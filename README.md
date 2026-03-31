@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md)
+[English](./README.md) | [简体中文](./docs/README.zh-CN.md) | [日本語](./docs/README.ja.md) | [한국어](./docs/README.ko.md) | [Español](./docs/README.es.md) | [Français](./docs/README.fr.md)
 
 <img src="./docs/assets/overview.svg" alt="Project Overview" width="100%" />
 
@@ -188,13 +188,13 @@ Implements the most commonly used tools, prioritizing file operations, shell com
 ```text
 rust-clw/
 ├── README.md                # English documentation
-├── README.zh-CN.md          # 简体中文文档
-├── README.ja.md             # 日本語ドキュメント
-├── README.ko.md             # 한국어 문서
-├── README.es.md             # Documentación en español
-├── README.fr.md             # Documentation en français
 ├── ARCHITECTURE.zh-CN.md    # Architecture analysis of Claude Code (TS)
 └── docs/
+    ├── README.zh-CN.md      # 简体中文文档
+    ├── README.ja.md         # 日本語ドキュメント
+    ├── README.ko.md         # 한국어 문서
+    ├── README.es.md         # Documentación en español
+    ├── README.fr.md         # Documentation en français
     └── assets/
         ├── overview.svg     # Project overview diagram
         ├── architecture.svg # Architecture diagram
