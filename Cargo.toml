@@ -47,6 +47,10 @@ anyhow = "1"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 reqwest-eventsource = "0.6"
 
+# AI provider SDKs
+async-anthropic = "0.6"
+async-openai = { version = "0.34", features = ["chat-completion", "rustls"] }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

@@ -1,113 +1,204 @@
-use std::collections::HashMap;
 use std::pin::Pin;
 
+use async_anthropic::{
+    types::{
+        ContentBlockDelta, CreateMessagesRequestBuilder, MessageBuilder, MessageContent,
+        MessageRole, MessagesStreamEvent, ToolResult, ToolUse,
+    },
+    Client,
+};
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
-use tracing::{debug, warn};
+use futures::Stream;
+use tokio_stream::StreamExt as _;
+use tracing::debug;
 
 use crate::{
-    ModelProvider, ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
+    ModelProvider, ModelRequest, ModelResponse, RequestContent, ResponseContent, StopReason,
+    StreamEvent, Usage,
 };
 
+/// Anthropic provider backed by the `async-anthropic` crate.
 pub struct AnthropicProvider {
-    api_key: String,
-    base_url: String,
-    client: reqwest::Client,
+    client: Client,
 }
 
 impl AnthropicProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            api_key: api_key.into(),
-            base_url: "https://api.anthropic.com".to_string(),
-            client: reqwest::Client::new(),
+            client: Client::from_api_key(api_key.into()),
         }
     }
 
-    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
-        self
-    }
-
-    fn build_body(&self, request: &ModelRequest, stream: bool) -> serde_json::Value {
-        let mut body = serde_json::json!({
-            "model": request.model,
-            "max_tokens": request.max_tokens,
-        });
-        if stream {
-            body["stream"] = serde_json::json!(true);
-        }
-        if let Some(ref system) = request.system {
-            body["system"] = serde_json::json!(system);
-        }
-        if let Some(ref tools) = request.tools {
-            if !tools.is_empty() {
-                body["tools"] = serde_json::to_value(tools).unwrap();
-            }
-        }
-        if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::json!(temp);
-        }
-        body["messages"] = serde_json::to_value(&request.messages).unwrap();
-        body
+    pub fn with_base_url(self, base_url: impl Into<String>) -> Self {
+        let client = Client::builder()
+            .base_url(base_url.into())
+            .build()
+            .expect("failed to build Anthropic client");
+        Self { client }
     }
 }
 
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
     async fn complete(&self, request: ModelRequest) -> anyhow::Result<ModelResponse> {
-        let body = self.build_body(&request, false);
-        debug!(model = %request.model, "complete request");
-
+        let req = build_request(&request, false)?;
+        debug!(model = %request.model, "anthropic complete");
         let resp = self
             .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .messages()
+            .create(req)
+            .await
+            .map_err(|e| anyhow::anyhow!("Anthropic API error: {e}"))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error {}: {}", status, text);
-        }
+        let content = resp
+            .content
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(map_content_block)
+            .collect();
 
-        let raw: serde_json::Value = resp.json().await?;
-        parse_complete_response(&raw)
+        let stop_reason = resp.stop_reason.as_deref().map(parse_stop_reason);
+        let usage = resp
+            .usage
+            .map(|u| Usage {
+                input_tokens: u.input_tokens.unwrap_or(0) as usize,
+                output_tokens: u.output_tokens.unwrap_or(0) as usize,
+                ..Default::default()
+            })
+            .unwrap_or_default();
+
+        Ok(ModelResponse {
+            id: resp.id.unwrap_or_default(),
+            content,
+            stop_reason,
+            usage,
+        })
     }
 
     async fn stream(
         &self,
         request: ModelRequest,
     ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
-        let body = self.build_body(&request, true);
-        debug!(model = %request.model, "stream request");
+        let req = build_request(&request, true)?;
+        debug!(model = %request.model, "anthropic stream");
 
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Anthropic API error {}: {}", status, text);
-        }
+        let mut sdk_stream = self.client.messages().create_stream(req).await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<anyhow::Result<StreamEvent>>(64);
-        let byte_stream = resp.bytes_stream();
 
         tokio::spawn(async move {
-            if let Err(e) = process_sse_stream(byte_stream, &tx).await {
-                let _ = tx.send(Err(e)).await;
+            let mut message_id = String::new();
+            let mut input_tokens = 0usize;
+            let mut output_tokens = 0usize;
+            let mut stop_reason: Option<StopReason> = None;
+            let mut content_blocks: Vec<ResponseContent> = Vec::new();
+            let mut tool_json: std::collections::HashMap<usize, String> =
+                std::collections::HashMap::new();
+
+            while let Some(event) = sdk_stream.next().await {
+                let evt = match event {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = tx.send(Err(anyhow::anyhow!("stream error: {e}"))).await;
+                        return;
+                    }
+                };
+
+                match evt {
+                    MessagesStreamEvent::MessageStart { message, usage } => {
+                        message_id = message.id;
+                        if let Some(u) = usage {
+                            input_tokens = u.input_tokens.unwrap_or(0) as usize;
+                        }
+                    }
+                    MessagesStreamEvent::ContentBlockStart {
+                        index,
+                        content_block,
+                    } => {
+                        let rc = match &content_block {
+                            MessageContent::Text(_) => ResponseContent::Text(String::new()),
+                            MessageContent::ToolUse(tu) => {
+                                tool_json.insert(index, String::new());
+                                ResponseContent::ToolUse {
+                                    id: tu.id.clone(),
+                                    name: tu.name.clone(),
+                                    input: serde_json::Value::Object(serde_json::Map::new()),
+                                }
+                            }
+                            _ => continue,
+                        };
+                        while content_blocks.len() <= index {
+                            content_blocks.push(ResponseContent::Text(String::new()));
+                        }
+                        content_blocks[index] = rc.clone();
+                        let _ = tx
+                            .send(Ok(StreamEvent::ContentBlockStart {
+                                index,
+                                content: rc,
+                            }))
+                            .await;
+                    }
+                    MessagesStreamEvent::ContentBlockDelta { index, delta } => match delta {
+                        ContentBlockDelta::TextDelta { text } => {
+                            if let Some(ResponseContent::Text(ref mut t)) =
+                                content_blocks.get_mut(index)
+                            {
+                                t.push_str(&text);
+                            }
+                            let _ = tx
+                                .send(Ok(StreamEvent::TextDelta {
+                                    index,
+                                    text: text.clone(),
+                                }))
+                                .await;
+                        }
+                        ContentBlockDelta::InputJsonDelta { partial_json } => {
+                            if let Some(acc) = tool_json.get_mut(&index) {
+                                acc.push_str(&partial_json);
+                            }
+                            let _ = tx
+                                .send(Ok(StreamEvent::InputJsonDelta {
+                                    index,
+                                    partial_json: partial_json.clone(),
+                                }))
+                                .await;
+                        }
+                    },
+                    MessagesStreamEvent::ContentBlockStop { index } => {
+                        if let Some(json_str) = tool_json.remove(&index) {
+                            if let Ok(parsed) = serde_json::from_str(&json_str) {
+                                if let Some(ResponseContent::ToolUse {
+                                    ref mut input, ..
+                                }) = content_blocks.get_mut(index)
+                                {
+                                    *input = parsed;
+                                }
+                            }
+                        }
+                        let _ = tx
+                            .send(Ok(StreamEvent::ContentBlockStop { index }))
+                            .await;
+                    }
+                    MessagesStreamEvent::MessageDelta { delta, usage } => {
+                        stop_reason = delta.stop_reason.as_deref().map(parse_stop_reason);
+                        if let Some(u) = usage {
+                            output_tokens = u.output_tokens.unwrap_or(0) as usize;
+                        }
+                    }
+                    MessagesStreamEvent::MessageStop => {
+                        let response = ModelResponse {
+                            id: message_id.clone(),
+                            content: content_blocks.clone(),
+                            stop_reason: stop_reason.clone(),
+                            usage: Usage {
+                                input_tokens,
+                                output_tokens,
+                                ..Default::default()
+                            },
+                        };
+                        let _ = tx.send(Ok(StreamEvent::MessageDone { response })).await;
+                    }
+                }
             }
         });
 
@@ -120,213 +211,99 @@ impl ModelProvider for AnthropicProvider {
 }
 
 // ---------------------------------------------------------------------------
-// SSE stream processing
+// Request conversion
 // ---------------------------------------------------------------------------
 
-struct SseState {
-    message_id: String,
-    input_tokens: usize,
-    output_tokens: usize,
-    stop_reason: Option<StopReason>,
-    content_blocks: Vec<ResponseContent>,
-    tool_json: HashMap<usize, String>,
-}
+fn build_request(
+    request: &ModelRequest,
+    stream: bool,
+) -> anyhow::Result<async_anthropic::types::CreateMessagesRequest> {
+    let mut messages = Vec::new();
 
-impl SseState {
-    fn new() -> Self {
-        Self {
-            message_id: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            stop_reason: None,
-            content_blocks: Vec::new(),
-            tool_json: HashMap::new(),
-        }
-    }
-}
+    for msg in &request.messages {
+        let role = match msg.role.as_str() {
+            "assistant" => MessageRole::Assistant,
+            _ => MessageRole::User,
+        };
 
-async fn process_sse_stream(
-    mut byte_stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
-    tx: &tokio::sync::mpsc::Sender<anyhow::Result<StreamEvent>>,
-) -> anyhow::Result<()> {
-    let mut buffer = String::new();
-    let mut event_type = String::new();
-    let mut event_data = String::new();
-    let mut state = SseState::new();
-
-    while let Some(chunk) = byte_stream.next().await {
-        let bytes = chunk?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-        while let Some(pos) = buffer.find('\n') {
-            let line = buffer[..pos].trim_end_matches('\r').to_string();
-            buffer = buffer[pos + 1..].to_string();
-
-            if line.is_empty() {
-                // Empty line → dispatch the accumulated event
-                if !event_data.is_empty() {
-                    let events = handle_sse_event(&event_type, &event_data, &mut state);
-                    for evt in events {
-                        if tx.send(evt).await.is_err() {
-                            return Ok(());
-                        }
-                    }
-                }
-                event_type.clear();
-                event_data.clear();
-            } else if let Some(val) = line.strip_prefix("event: ") {
-                event_type = val.to_string();
-            } else if let Some(val) = line.strip_prefix("data: ") {
-                if event_data.is_empty() {
-                    event_data = val.to_string();
-                } else {
-                    event_data.push('\n');
-                    event_data.push_str(val);
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn handle_sse_event(
-    event_type: &str,
-    data: &str,
-    state: &mut SseState,
-) -> Vec<anyhow::Result<StreamEvent>> {
-    let json: serde_json::Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(event_type, "failed to parse SSE data: {}", e);
-            return vec![];
-        }
-    };
-
-    let mut out = Vec::new();
-
-    match event_type {
-        "message_start" => {
-            if let Some(msg) = json.get("message") {
-                state.message_id = msg["id"].as_str().unwrap_or("").to_string();
-                if let Some(u) = msg.get("usage") {
-                    state.input_tokens = u["input_tokens"].as_u64().unwrap_or(0) as usize;
-                }
-            }
-        }
-
-        "content_block_start" => {
-            let index = json["index"].as_u64().unwrap_or(0) as usize;
-            let block = &json["content_block"];
-            let btype = block["type"].as_str().unwrap_or("");
-
-            let content = match btype {
-                "text" => ResponseContent::Text(String::new()),
-                "tool_use" => {
-                    state.tool_json.insert(index, String::new());
-                    ResponseContent::ToolUse {
-                        id: block["id"].as_str().unwrap_or("").to_string(),
-                        name: block["name"].as_str().unwrap_or("").to_string(),
-                        input: serde_json::Value::Object(serde_json::Map::new()),
-                    }
-                }
-                _ => return out,
-            };
-
-            while state.content_blocks.len() <= index {
-                state
-                    .content_blocks
-                    .push(ResponseContent::Text(String::new()));
-            }
-            state.content_blocks[index] = content.clone();
-            out.push(Ok(StreamEvent::ContentBlockStart { index, content }));
-        }
-
-        "content_block_delta" => {
-            let index = json["index"].as_u64().unwrap_or(0) as usize;
-            let delta = &json["delta"];
-            let dtype = delta["type"].as_str().unwrap_or("");
-
-            match dtype {
-                "text_delta" => {
-                    let text = delta["text"].as_str().unwrap_or("").to_string();
-                    if let Some(ResponseContent::Text(ref mut t)) =
-                        state.content_blocks.get_mut(index)
-                    {
-                        t.push_str(&text);
-                    }
-                    out.push(Ok(StreamEvent::TextDelta { index, text }));
-                }
-                "input_json_delta" => {
-                    let partial = delta["partial_json"].as_str().unwrap_or("").to_string();
-                    if let Some(accum) = state.tool_json.get_mut(&index) {
-                        accum.push_str(&partial);
-                    }
-                    out.push(Ok(StreamEvent::InputJsonDelta {
-                        index,
-                        partial_json: partial,
+        let mut content: Vec<MessageContent> = Vec::new();
+        for block in &msg.content {
+            match block {
+                RequestContent::Text { text } => {
+                    content.push(MessageContent::Text(async_anthropic::types::Text {
+                        text: text.clone(),
                     }));
                 }
-                _ => {}
-            }
-        }
-
-        "content_block_stop" => {
-            let index = json["index"].as_u64().unwrap_or(0) as usize;
-
-            // Finalize tool_use input from accumulated JSON
-            if let Some(json_str) = state.tool_json.remove(&index) {
-                if !json_str.is_empty() {
-                    if let Ok(parsed) = serde_json::from_str(&json_str) {
-                        if let Some(ResponseContent::ToolUse { ref mut input, .. }) =
-                            state.content_blocks.get_mut(index)
-                        {
-                            *input = parsed;
-                        }
-                    }
+                RequestContent::ToolUse { id, name, input } => {
+                    content.push(MessageContent::ToolUse(ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    }));
+                }
+                RequestContent::ToolResult {
+                    tool_use_id,
+                    content: result_content,
+                    is_error,
+                } => {
+                    content.push(MessageContent::ToolResult(ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: Some(result_content.clone()),
+                        is_error: is_error.unwrap_or(false),
+                    }));
                 }
             }
-
-            out.push(Ok(StreamEvent::ContentBlockStop { index }));
         }
 
-        "message_delta" => {
-            if let Some(delta) = json.get("delta") {
-                if let Some(sr) = delta["stop_reason"].as_str() {
-                    state.stop_reason = Some(parse_stop_reason(sr));
-                }
-            }
-            if let Some(u) = json.get("usage") {
-                state.output_tokens = u["output_tokens"].as_u64().unwrap_or(0) as usize;
-            }
-        }
+        let sdk_msg = MessageBuilder::default()
+            .role(role)
+            .content(async_anthropic::types::MessageContentList(content))
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build message: {e}"))?;
 
-        "message_stop" => {
-            let response = ModelResponse {
-                id: state.message_id.clone(),
-                content: state.content_blocks.clone(),
-                stop_reason: state.stop_reason.clone(),
-                usage: Usage {
-                    input_tokens: state.input_tokens,
-                    output_tokens: state.output_tokens,
-                    ..Default::default()
-                },
-            };
-            out.push(Ok(StreamEvent::MessageDone { response }));
-        }
-
-        "ping" | "error" => {
-            if event_type == "error" {
-                warn!(data, "anthropic stream error event");
-            }
-        }
-
-        _ => {
-            debug!(event_type, "unhandled SSE event type");
-        }
+        messages.push(sdk_msg);
     }
 
-    out
+    let mut builder = CreateMessagesRequestBuilder::default();
+    builder
+        .model(request.model.clone())
+        .messages(messages)
+        .max_tokens(request.max_tokens as i32)
+        .stream(stream);
+
+    if let Some(ref system) = request.system {
+        builder.system(system.clone());
+    }
+
+    if let Some(ref tools) = request.tools {
+        let sdk_tools: Vec<serde_json::Map<String, serde_json::Value>> = tools
+            .iter()
+            .map(|t| {
+                let mut m = serde_json::Map::new();
+                m.insert("name".into(), serde_json::json!(t.name));
+                m.insert("description".into(), serde_json::json!(t.description));
+                m.insert("input_schema".into(), t.input_schema.clone());
+                m
+            })
+            .collect();
+        builder.tools(sdk_tools);
+    }
+
+    builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build request: {e}"))
+}
+
+fn map_content_block(block: MessageContent) -> Option<ResponseContent> {
+    match block {
+        MessageContent::Text(t) => Some(ResponseContent::Text(t.text)),
+        MessageContent::ToolUse(tu) => Some(ResponseContent::ToolUse {
+            id: tu.id,
+            name: tu.name,
+            input: tu.input,
+        }),
+        _ => None,
+    }
 }
 
 fn parse_stop_reason(s: &str) -> StopReason {
@@ -337,49 +314,4 @@ fn parse_stop_reason(s: &str) -> StopReason {
         "stop_sequence" => StopReason::StopSequence,
         _ => StopReason::EndTurn,
     }
-}
-
-// ---------------------------------------------------------------------------
-// Non-streaming response parsing
-// ---------------------------------------------------------------------------
-
-fn parse_complete_response(raw: &serde_json::Value) -> anyhow::Result<ModelResponse> {
-    let id = raw["id"].as_str().unwrap_or("").to_string();
-
-    let mut content = Vec::new();
-    if let Some(blocks) = raw["content"].as_array() {
-        for block in blocks {
-            let btype = block["type"].as_str().unwrap_or("");
-            match btype {
-                "text" => {
-                    content.push(ResponseContent::Text(
-                        block["text"].as_str().unwrap_or("").to_string(),
-                    ));
-                }
-                "tool_use" => {
-                    content.push(ResponseContent::ToolUse {
-                        id: block["id"].as_str().unwrap_or("").to_string(),
-                        name: block["name"].as_str().unwrap_or("").to_string(),
-                        input: block["input"].clone(),
-                    });
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let stop_reason = raw["stop_reason"].as_str().map(parse_stop_reason);
-
-    let usage = Usage {
-        input_tokens: raw["usage"]["input_tokens"].as_u64().unwrap_or(0) as usize,
-        output_tokens: raw["usage"]["output_tokens"].as_u64().unwrap_or(0) as usize,
-        ..Default::default()
-    };
-
-    Ok(ModelResponse {
-        id,
-        content,
-        stop_reason,
-        usage,
-    })
 }

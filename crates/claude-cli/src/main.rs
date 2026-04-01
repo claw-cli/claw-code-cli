@@ -6,8 +6,10 @@ use clap::Parser;
 
 use agent_core::{query, Message, QueryEvent, SessionConfig, SessionState};
 use agent_permissions::PermissionMode;
-use agent_provider::ModelProvider;
 use agent_tools::{ToolOrchestrator, ToolRegistry};
+
+mod config;
+mod onboarding;
 
 /// Output format for non-interactive (print/query) mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +55,7 @@ struct Cli {
     #[arg(short, long, default_value = "auto")]
     permission: String,
 
-    /// Run a single prompt non-interactively then exit (alias: --print / -p)
+    /// Run a single prompt non-interactively then exit
     #[arg(short = 'q', long)]
     query: Option<String>,
 
@@ -69,7 +71,7 @@ struct Cli {
     #[arg(long, default_value = "100")]
     max_turns: usize,
 
-    /// Provider: anthropic, ollama (auto-detected if not set)
+    /// Provider: anthropic, ollama, openai (auto-detected if not set)
     #[arg(long)]
     provider: Option<String>,
 
@@ -92,6 +94,7 @@ async fn main() -> Result<()> {
 
     // --print is an alias for --query; --query takes precedence if both given
     let single_prompt = cli.query.or(cli.print);
+    let interactive = single_prompt.is_none();
 
     let permission_mode = match cli.permission.as_str() {
         "auto" => PermissionMode::AutoApprove,
@@ -109,64 +112,23 @@ async fn main() -> Result<()> {
     let registry = Arc::new(registry);
     let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
 
-    // Resolve provider
-    let resolved_provider = cli.provider.as_deref().unwrap_or_else(|| {
-        if std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty()).is_some() {
-            "anthropic"
-        } else {
-            "ollama"
-        }
-    });
+    // Resolve provider: CLI flags > env vars > config file > onboarding
+    let resolved = config::resolve_provider(
+        cli.provider.as_deref(),
+        cli.model.as_deref(),
+        &cli.ollama_url,
+        interactive,
+    )?;
 
-    let (provider, model_name): (Box<dyn ModelProvider>, String) = match resolved_provider {
-        "anthropic" => {
-            let key = std::env::var("ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-                .expect("ANTHROPIC_API_KEY is required for anthropic provider");
-            let model = cli.model.unwrap_or_else(|| "claude-sonnet-4-20250514".into());
-            eprintln!("Using Anthropic API (model: {})", model);
-            (
-                Box::new(agent_provider::anthropic::AnthropicProvider::new(key)),
-                model,
-            )
-        }
-        "ollama" | "openai" => {
-            let base_url = if resolved_provider == "ollama" {
-                cli.ollama_url.clone()
-            } else {
-                std::env::var("OPENAI_BASE_URL")
-                    .unwrap_or_else(|_| "https://api.openai.com".into())
-            };
-            let model = cli.model.unwrap_or_else(|| "qwen3.5:9b".into());
-            eprintln!("Using {} (url: {}, model: {})", resolved_provider, base_url, model);
-            let mut p = agent_provider::openai_compat::OpenAICompatProvider::new(&base_url);
-            if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-                p = p.with_api_key(key);
-            }
-            (Box::new(p), model)
-        }
-        "stub" => {
-            let model = cli.model.unwrap_or_else(|| "stub".into());
-            eprintln!("Using stub provider (no real model calls)");
-            (Box::new(StubProvider), model)
-        }
-        other => {
-            eprintln!("Unknown provider '{}', falling back to stub", other);
-            let model = cli.model.unwrap_or_else(|| "stub".into());
-            (Box::new(StubProvider), model)
-        }
-    };
-
-    let config = SessionConfig {
-        model: model_name,
+    let session_config = SessionConfig {
+        model: resolved.model,
         system_prompt: cli.system.clone(),
         max_turns: cli.max_turns,
         permission_mode,
         ..Default::default()
     };
 
-    let mut session = SessionState::new(config, cwd);
+    let mut session = SessionState::new(session_config, cwd);
 
     // Single-query / print mode
     if let Some(prompt) = single_prompt {
@@ -174,7 +136,7 @@ async fn main() -> Result<()> {
         let on_event = make_event_callback(cli.output_format);
         query(
             &mut session,
-            provider.as_ref(),
+            resolved.provider.as_ref(),
             Arc::clone(&registry),
             &orchestrator,
             Some(on_event),
@@ -182,7 +144,6 @@ async fn main() -> Result<()> {
         .await?;
 
         if cli.output_format == OutputFormat::Json {
-            // Emit the full assistant response as a single JSON object
             let last_assistant = session
                 .messages
                 .iter()
@@ -240,7 +201,7 @@ async fn main() -> Result<()> {
 
         if let Err(e) = query(
             &mut session,
-            provider.as_ref(),
+            resolved.provider.as_ref(),
             Arc::clone(&registry),
             &orchestrator,
             Some(Arc::clone(&on_event)),
@@ -268,8 +229,6 @@ fn make_event_callback(format: OutputFormat) -> Arc<dyn Fn(QueryEvent) + Send + 
         OutputFormat::Text => handle_event_text(event),
         OutputFormat::StreamJson => handle_event_stream_json(event),
         OutputFormat::Json => {
-            // In json mode we only collect; final output is printed after the turn.
-            // Still emit tool progress to stderr so the user isn't left in the dark.
             match &event {
                 QueryEvent::ToolUseStart { name, .. } => {
                     eprintln!("⚡ calling tool: {}", name);
@@ -350,53 +309,5 @@ fn byte_summary(s: &str) -> String {
         format!("{} bytes", len)
     } else {
         format!("{:.1} KB", len as f64 / 1024.0)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub provider — fallback when no API key is configured
-// ---------------------------------------------------------------------------
-
-use agent_provider::{
-    ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
-};
-use futures::Stream;
-use std::pin::Pin;
-
-struct StubProvider;
-
-#[async_trait::async_trait]
-impl ModelProvider for StubProvider {
-    async fn complete(&self, _request: ModelRequest) -> anyhow::Result<ModelResponse> {
-        Ok(ModelResponse {
-            id: "stub".into(),
-            content: vec![ResponseContent::Text(
-                "[stub provider] Set ANTHROPIC_API_KEY to enable real model calls.".into(),
-            )],
-            stop_reason: Some(StopReason::EndTurn),
-            usage: Usage::default(),
-        })
-    }
-
-    async fn stream(
-        &self,
-        request: ModelRequest,
-    ) -> anyhow::Result<Pin<Box<dyn Stream<Item = anyhow::Result<StreamEvent>> + Send>>> {
-        let response = self.complete(request).await?;
-        let events = vec![
-            Ok(StreamEvent::TextDelta {
-                index: 0,
-                text: match &response.content[0] {
-                    ResponseContent::Text(t) => t.clone(),
-                    _ => String::new(),
-                },
-            }),
-            Ok(StreamEvent::MessageDone { response }),
-        ];
-        Ok(Box::pin(futures::stream::iter(events)))
-    }
-
-    fn name(&self) -> &str {
-        "stub"
     }
 }

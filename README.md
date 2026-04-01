@@ -2,7 +2,7 @@
 
 # 🦀 Claude Code Rust
 
-**A modular agent runtime extracted from Claude Code, rebuilt in Rust.**
+**A modular agent runtime extracted from Claude Code, rebuilt in Rust, and still in active development.**
 
 [![Status](https://img.shields.io/badge/status-designing-blue?style=flat-square)](https://github.com/)
 [![Language](https://img.shields.io/badge/language-Rust-E57324?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -208,18 +208,6 @@ Connects to external MCP services, bringing remote tools, resources, and prompts
 
 Implements the most commonly used tools, prioritizing file operations, shell commands, search, and editing — the basic operations any agent needs.
 </details>
-
-## ⚖️ Rust vs TypeScript
-
-| TypeScript (Claude Code) | Rust Approach |
-|--------------------------|---------------|
-| Extensive runtime checks | Push checks into the type system |
-| Context objects tend to grow unbounded | Smaller context / trait boundaries |
-| Scattered callbacks and events | Unified, continuous event streams |
-| Runtime feature flags | Compile-time feature gating where possible |
-| UI and runtime tightly coupled | Runtime as an independent layer |
-
-> This isn't about Rust being "better" — it's about Rust being well-suited for **locking down runtime boundaries**. For a long-evolving agent system, such constraints are typically valuable.
 
 ## 🗺 Roadmap
 
