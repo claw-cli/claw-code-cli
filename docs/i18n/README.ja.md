@@ -7,21 +7,12 @@
 [![ステータス](https://img.shields.io/badge/ステータス-設計中-blue?style=flat-square)](https://github.com/)
 [![言語](https://img.shields.io/badge/言語-Rust-E57324?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![由来](https://img.shields.io/badge/由来-Claude_Code_TS-8A2BE2?style=flat-square)](https://docs.anthropic.com/en/docs/claude-code)
-<<<<<<<< HEAD:docs/i18n/README.ja.md
 [![ライセンス](https://img.shields.io/badge/ライセンス-MIT-green?style=flat-square)](../../LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
 
 [English](../../README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md)
 
 <img src="../assets/overview.svg" alt="プロジェクト概要" width="100%" />
-========
-[![ライセンス](https://img.shields.io/badge/ライセンス-MIT-green?style=flat-square)](../LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
-
-[English](../README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md)
-
-<img src="./assets/overview.svg" alt="プロジェクト概要" width="100%" />
->>>>>>>> origin/main:docs/README.ja.md
 
 </div>
 
@@ -83,11 +74,7 @@ Claude Codeは優れたエンジニアリング品質を持っていますが、
 ## 🏗 アーキテクチャ
 
 <div align="center">
-<<<<<<<< HEAD:docs/i18n/README.ja.md
 <img src="../assets/architecture.svg" alt="アーキテクチャ概要" width="100%" />
-========
-<img src="./assets/architecture.svg" alt="アーキテクチャ概要" width="100%" />
->>>>>>>> origin/main:docs/README.ja.md
 </div>
 
 ### Crate マップ
@@ -169,11 +156,7 @@ Claude Codeは優れたエンジニアリング品質を持っていますが、
 ## 🗺 ロードマップ
 
 <div align="center">
-<<<<<<<< HEAD:docs/i18n/README.ja.md
 <img src="../assets/roadmap.svg" alt="ロードマップ" width="100%" />
-========
-<img src="./assets/roadmap.svg" alt="ロードマップ" width="100%" />
->>>>>>>> origin/main:docs/README.ja.md
 </div>
 
 ### Phase 1：まず動かす
@@ -233,21 +216,13 @@ rust-clw/
 
 ## 📚 参考資料
 
-<<<<<<<< HEAD:docs/i18n/README.ja.md
 - [ARCHITECTURE.zh-CN.md](../../ARCHITECTURE.zh-CN.md) — Claude Code TypeScriptアーキテクチャの詳細分析
-========
-- [ARCHITECTURE.zh-CN.md](../ARCHITECTURE.zh-CN.md) — Claude Code TypeScriptアーキテクチャの詳細分析
->>>>>>>> origin/main:docs/README.ja.md
 - [Claude Code 公式ドキュメント](https://docs.anthropic.com/en/docs/claude-code)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## 📄 ライセンス
 
-<<<<<<<< HEAD:docs/i18n/README.ja.md
 このプロジェクトは [MIT ライセンス](../../LICENSE) の下で公開されています。
-========
-このプロジェクトは [MIT ライセンス](../LICENSE) の下で公開されています。
->>>>>>>> origin/main:docs/README.ja.md
 
 ---
 

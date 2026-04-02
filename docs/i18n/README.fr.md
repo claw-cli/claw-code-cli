@@ -7,21 +7,12 @@
 [![Statut](https://img.shields.io/badge/statut-conception-blue?style=flat-square)](https://github.com/)
 [![Langage](https://img.shields.io/badge/langage-Rust-E57324?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Origine](https://img.shields.io/badge/origine-Claude_Code_TS-8A2BE2?style=flat-square)](https://docs.anthropic.com/en/docs/claude-code)
-<<<<<<<< HEAD:docs/i18n/README.fr.md
 [![Licence](https://img.shields.io/badge/licence-MIT-green?style=flat-square)](../../LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
 
 [English](../../README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md)
 
 <img src="../assets/overview.svg" alt="Vue d'ensemble du projet" width="100%" />
-========
-[![Licence](https://img.shields.io/badge/licence-MIT-green?style=flat-square)](../LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
-
-[English](../README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md)
-
-<img src="./assets/overview.svg" alt="Vue d'ensemble du projet" width="100%" />
->>>>>>>> origin/main:docs/README.fr.md
 
 </div>
 
@@ -83,11 +74,7 @@ Ce projet vise à :
 ## 🏗 Architecture
 
 <div align="center">
-<<<<<<<< HEAD:docs/i18n/README.fr.md
 <img src="../assets/architecture.svg" alt="Vue d'ensemble de l'architecture" width="100%" />
-========
-<img src="./assets/architecture.svg" alt="Vue d'ensemble de l'architecture" width="100%" />
->>>>>>>> origin/main:docs/README.fr.md
 </div>
 
 ### Carte des crates
@@ -169,11 +156,7 @@ Implémente les outils les plus courants, en priorisant fichiers, shell, recherc
 ## 🗺 Feuille de route
 
 <div align="center">
-<<<<<<<< HEAD:docs/i18n/README.fr.md
 <img src="../assets/roadmap.svg" alt="Feuille de route" width="100%" />
-========
-<img src="./assets/roadmap.svg" alt="Feuille de route" width="100%" />
->>>>>>>> origin/main:docs/README.fr.md
 </div>
 
 ### Phase 1 : Le faire fonctionner
@@ -233,21 +216,13 @@ N'hésitez pas à ouvrir une issue ou à proposer une pull request.
 
 ## 📚 Références
 
-<<<<<<<< HEAD:docs/i18n/README.fr.md
 - [ARCHITECTURE.zh-CN.md](../../ARCHITECTURE.zh-CN.md) — Démontage détaillé de l'architecture TypeScript de Claude Code
-========
-- [ARCHITECTURE.zh-CN.md](../ARCHITECTURE.zh-CN.md) — Démontage détaillé de l'architecture TypeScript de Claude Code
->>>>>>>> origin/main:docs/README.fr.md
 - [Documentation officielle Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## 📄 Licence
 
-<<<<<<<< HEAD:docs/i18n/README.fr.md
 Ce projet est sous [licence MIT](../../LICENSE).
-========
-Ce projet est sous [licence MIT](../LICENSE).
->>>>>>>> origin/main:docs/README.fr.md
 
 ---
 

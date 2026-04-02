@@ -325,7 +325,11 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let mut end = max;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &s[..end])
     }
 }
 
@@ -335,5 +339,76 @@ fn byte_summary(s: &str) -> String {
         format!("{} bytes", len)
     } else {
         format!("{:.1} KB", len as f64 / 1024.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ascii_within_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_at_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_over_limit() {
+        assert_eq!(truncate("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_multibyte_at_char_boundary() {
+        // 'é' is 2 bytes; "café" = [99, 97, 102, 195, 169] = 5 bytes
+        assert_eq!(truncate("café", 4), "caf...");
+    }
+
+    #[test]
+    fn truncate_multibyte_inside_char() {
+        // CJK char '中' is 3 bytes (228, 184, 173)
+        // "a中b" = [97, 228, 184, 173, 98] = 5 bytes
+        // Cutting at byte 2 lands inside '中', should back up to byte 1
+        assert_eq!(truncate("a中b", 2), "a...");
+    }
+
+    #[test]
+    fn truncate_cjk_string() {
+        // Each CJK char is 3 bytes; "你好世界" = 12 bytes
+        // max=7 lands inside 3rd char (bytes 6..9), should back up to byte 6
+        let result = truncate("你好世界", 7);
+        assert_eq!(result, "你好...");
+    }
+
+    #[test]
+    fn truncate_emoji() {
+        // '😀' is 4 bytes
+        // "hi😀bye" = [104, 105, 240, 159, 152, 128, 98, 121, 101] = 9 bytes
+        // max=4 lands inside emoji (bytes 2..6), should back up to byte 2
+        assert_eq!(truncate("hi😀bye", 4), "hi...");
+    }
+
+    #[test]
+    fn truncate_japanese() {
+        // Hiragana 'こ','ん','に','ち','は' are each 3 bytes = 15 bytes total
+        // max=8 lands inside 3rd char (bytes 6..9), should back up to byte 6
+        assert_eq!(truncate("こんにちは", 8), "こん...");
+    }
+
+    #[test]
+    fn truncate_mixed_cjk_error_output() {
+        // Simulates real-world cargo stderr with mixed CJK and ASCII
+        let input = "error[E0308]: エラー: 型が一致しません expected `i32`, found `&str`";
+        let result = truncate(input, 30);
+        assert!(result.ends_with("..."));
+        assert!(result.len() <= 33 + 3); // at most 33 bytes content + "..."
+    }
+
+    #[test]
+    fn truncate_empty() {
+        assert_eq!(truncate("", 10), "");
     }
 }
