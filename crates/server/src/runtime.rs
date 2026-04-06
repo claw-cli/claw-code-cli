@@ -114,15 +114,21 @@ impl ServerRuntime {
 
         match method.as_str() {
             "session/start" => match id {
-                Some(request_id) => Some(self.handle_session_start(request_id, params)),
+                Some(request_id) => {
+                    Some(self.handle_session_start(connection_id, request_id, params).await)
+                }
                 None => None,
             },
             "session/resume" => match id {
-                Some(request_id) => Some(self.handle_session_resume(request_id, params).await),
+                Some(request_id) => {
+                    Some(self.handle_session_resume(connection_id, request_id, params).await)
+                }
                 None => None,
             },
             "session/fork" => match id {
-                Some(request_id) => Some(self.handle_session_fork(request_id, params).await),
+                Some(request_id) => {
+                    Some(self.handle_session_fork(connection_id, request_id, params).await)
+                }
                 None => None,
             },
             "turn/start" => match id {
@@ -150,9 +156,12 @@ impl ServerRuntime {
                     "no pending approval request exists for this runtime",
                 )
             }),
-            "events/subscribe" => id.map(|request_id| {
-                self.handle_events_subscribe(connection_id, request_id, params)
-            }),
+            "events/subscribe" => match id {
+                Some(request_id) => {
+                    Some(self.handle_events_subscribe(connection_id, request_id, params).await)
+                }
+                None => None,
+            },
             _ => id.map(|request_id| {
                 self.error_response(
                     request_id,
@@ -193,8 +202,9 @@ impl ServerRuntime {
         }
     }
 
-    fn handle_session_start(
+    async fn handle_session_start(
         &self,
+        connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -227,7 +237,7 @@ impl ServerRuntime {
             status: SessionRuntimeStatus::Idle,
         };
 
-        self.sessions.blocking_lock().insert(
+        self.sessions.lock().await.insert(
             session_id,
             RuntimeSession {
                 summary: summary.clone(),
@@ -237,8 +247,11 @@ impl ServerRuntime {
                 steering_queue: VecDeque::new(),
             },
         );
+        self.subscribe_connection_to_session(connection_id, session_id, None)
+            .await;
 
-        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload { session: summary.clone() }));
+        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload { session: summary.clone() }))
+            .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -255,6 +268,7 @@ impl ServerRuntime {
 
     async fn handle_session_resume(
         &self,
+        connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -277,13 +291,19 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
+        let session_summary = session.summary.clone();
+        let latest_turn = session.latest_turn.clone();
+        let loaded_item_count = session.loaded_item_count;
+        drop(sessions);
+        self.subscribe_connection_to_session(connection_id, params.session_id, None)
+            .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: SessionResumeResult {
-                session: session.summary.clone(),
-                latest_turn: session.latest_turn.clone(),
-                loaded_item_count: session.loaded_item_count,
+                session: session_summary,
+                latest_turn,
+                loaded_item_count,
             },
         })
         .expect("serialize session/resume response")
@@ -291,6 +311,7 @@ impl ServerRuntime {
 
     async fn handle_session_fork(
         &self,
+        connection_id: u64,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -338,8 +359,11 @@ impl ServerRuntime {
             },
         );
         drop(sessions);
+        self.subscribe_connection_to_session(connection_id, forked_id, None)
+            .await;
 
-        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload { session: session.clone() }));
+        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload { session: session.clone() }))
+            .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -569,7 +593,7 @@ impl ServerRuntime {
         .expect("serialize turn/steer response")
     }
 
-    fn handle_events_subscribe(
+    async fn handle_events_subscribe(
         &self,
         connection_id: u64,
         request_id: serde_json::Value,
@@ -587,7 +611,7 @@ impl ServerRuntime {
         };
 
         let subscription_id = format!("sub-{connection_id}-1");
-        self.connections.blocking_lock().entry(connection_id).and_modify(|connection| {
+        self.connections.lock().await.entry(connection_id).and_modify(|connection| {
             connection.subscriptions.push(SubscriptionFilter {
                 session_id: params.session_id,
                 event_types: params.event_types.unwrap_or_default().into_iter().collect(),
@@ -601,6 +625,28 @@ impl ServerRuntime {
             },
         })
         .expect("serialize events/subscribe response")
+    }
+
+    async fn subscribe_connection_to_session(
+        &self,
+        connection_id: u64,
+        session_id: SessionId,
+        event_types: Option<HashSet<String>>,
+    ) {
+        let mut connections = self.connections.lock().await;
+        if let Some(connection) = connections.get_mut(&connection_id) {
+            let already_subscribed = connection.subscriptions.iter().any(|subscription| {
+                subscription.session_id == Some(session_id)
+                    && subscription.event_types == event_types.clone().unwrap_or_default()
+            });
+            if already_subscribed {
+                return;
+            }
+            connection.subscriptions.push(SubscriptionFilter {
+                session_id: Some(session_id),
+                event_types: event_types.unwrap_or_default(),
+            });
+        }
     }
 
     async fn connection_ready(&self, connection_id: u64) -> bool {
@@ -626,7 +672,7 @@ impl ServerRuntime {
         }
     }
 
-    fn broadcast_event(&self, event: ServerEvent) {
+    async fn broadcast_event(&self, event: ServerEvent) {
         let session_id = event.session_id();
         let method = match &event {
             ServerEvent::SessionStarted(_) => "session/started",
@@ -651,7 +697,7 @@ impl ServerRuntime {
             params: event,
         })
         .expect("serialize notification");
-        let connections = self.connections.blocking_lock();
+        let connections = self.connections.lock().await;
         for connection in connections.values() {
             if !connection.should_deliver(method, session_id) {
                 continue;

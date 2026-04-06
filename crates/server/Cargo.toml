@@ -27,3 +27,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 tokio-tungstenite = "0.28"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
