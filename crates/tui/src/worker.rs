@@ -83,12 +83,12 @@ impl QueryWorkerHandle {
 impl QueryWorkerHandle {
     /// Creates a lightweight stub worker handle for unit tests that exercise UI logic only.
     pub(crate) fn stub() -> Self {
-        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let (_event_tx, event_rx) = mpsc::unbounded_channel();
         Self {
             command_tx,
             event_rx,
-            join_handle: tokio::spawn(async {}),
+            join_handle: tokio::spawn(async move { while command_rx.recv().await.is_some() {} }),
         }
     }
 }

@@ -10,14 +10,15 @@ use crate::{app::TuiApp, events::TranscriptItemKind};
 
 /// Draws the full interactive UI for the current application state.
 pub(crate) fn draw(frame: &mut Frame, app: &TuiApp) {
-    let composer_height = composer_height(app, frame.area());
+    let content_area = centered_content_area(frame.area());
+    let composer_height = composer_height(app, content_area);
     let [header_area, transcript_area, composer_area, footer_area] = Layout::vertical([
         Constraint::Length(6),
         Constraint::Min(6),
         Constraint::Length(composer_height),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(content_area);
 
     frame.render_widget(render_header(app), header_area);
     frame.render_widget(render_transcript(app, transcript_area), transcript_area);
@@ -28,24 +29,24 @@ pub(crate) fn draw(frame: &mut Frame, app: &TuiApp) {
     frame.set_cursor_position(cursor);
 }
 
-fn render_header(app: &TuiApp) -> Paragraph<'static> {
-    let spinner = if app.busy {
-        ["⠋", "⠙", "⠹", "⠸", "⠴", "⠦"][app.spinner_index % 6]
-    } else {
-        "●"
-    };
-    let status_style = if app.busy {
-        Style::new().yellow().add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().green().add_modifier(Modifier::BOLD)
-    };
-    let cwd_name = app
-        .cwd
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| app.cwd.to_string_lossy().into_owned());
+fn centered_content_area(area: Rect) -> Rect {
+    const MAX_CONTENT_WIDTH: u16 = 100;
 
+    if area.width <= MAX_CONTENT_WIDTH {
+        return area;
+    }
+
+    let horizontal_padding = (area.width - MAX_CONTENT_WIDTH) / 2;
+    let [_, content, _] = Layout::horizontal([
+        Constraint::Length(horizontal_padding),
+        Constraint::Length(MAX_CONTENT_WIDTH),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    content
+}
+
+fn render_header(_app: &TuiApp) -> Paragraph<'static> {
     Paragraph::new(Text::from(vec![
         Line::from(vec![Span::styled(
             "   ________               _______ ",
@@ -67,18 +68,6 @@ fn render_header(app: &TuiApp) -> Paragraph<'static> {
             "\\____/_/\\__,_/ |__/|__/\\____/ |_|",
             Style::new().cyan().add_modifier(Modifier::BOLD),
         )]),
-        Line::from(vec![
-            Span::styled(format!("{spinner} {}", app.status_message), status_style),
-            Span::raw("   "),
-            Span::styled("model ", Style::new().dark_gray()),
-            Span::styled(
-                app.model.clone(),
-                Style::new().white().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("   "),
-            Span::styled("cwd ", Style::new().dark_gray()),
-            Span::raw(cwd_name),
-        ]),
     ]))
 }
 
@@ -141,12 +130,13 @@ fn render_composer(app: &TuiApp) -> Paragraph<'_> {
 }
 
 fn render_footer(app: &TuiApp) -> Paragraph<'static> {
-    let footer = format!(
-        "/model [/name]  /status  /exit  Ctrl+C quit  PgUp/PgDn scroll  turns {}  total {} in / {} out",
-        app.turn_count,
-        app.total_input_tokens,
-        app.total_output_tokens
-    );
+    let cwd_name = app
+        .cwd
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| app.cwd.to_string_lossy().into_owned());
+    let footer = format!("model {}   cwd {}", app.model, cwd_name);
     Paragraph::new(footer).style(Style::new().dark_gray())
 }
 
@@ -163,7 +153,7 @@ fn transcript_text(app: &TuiApp) -> Text<'static> {
 
     let mut lines = Vec::new();
     for item in &app.transcript {
-        append_transcript_item(&mut lines, item);
+        append_transcript_item(&mut lines, item, app.spinner_index);
         lines.push(Line::from(""));
     }
     Text::from(lines)
@@ -176,15 +166,15 @@ fn transcript_line_count(app: &TuiApp, inner_width: u16) -> u16 {
 
     app.transcript
         .iter()
-        .map(|item| {
-            let title_lines = 1;
-            let body_lines = wrapped_line_count(&item.body, inner_width);
-            title_lines + body_lines + 1
-        })
+        .map(|item| transcript_item_line_count(item, inner_width) + 1)
         .sum()
 }
 
-fn append_transcript_item(lines: &mut Vec<Line<'static>>, item: &crate::events::TranscriptItem) {
+fn append_transcript_item(
+    lines: &mut Vec<Line<'static>>,
+    item: &crate::events::TranscriptItem,
+    spinner_index: usize,
+) {
     match item.kind {
         TranscriptItemKind::User => {
             lines.push(Line::from(vec![
@@ -206,6 +196,16 @@ fn append_transcript_item(lines: &mut Vec<Line<'static>>, item: &crate::events::
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(item.body.clone(), Style::new().fg(item.kind.accent())),
+            ]));
+        }
+        TranscriptItemKind::System if item.title == "Thinking" => {
+            let spinner = ["⠋", "⠙", "⠹", "⠸", "⠴", "⠦"][spinner_index % 6];
+            lines.push(Line::from(vec![
+                Span::styled("• ", Style::new().yellow().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{spinner} Thinking"),
+                    Style::new().yellow().add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
         TranscriptItemKind::ToolCall
@@ -277,6 +277,36 @@ fn wrapped_line_count(text: &str, inner_width: u16) -> u16 {
             length.div_ceil(width) as u16
         })
         .sum()
+}
+
+fn transcript_item_line_count(item: &crate::events::TranscriptItem, inner_width: u16) -> u16 {
+    match item.kind {
+        TranscriptItemKind::User | TranscriptItemKind::Assistant => {
+            wrapped_line_count(&item.body, inner_width.saturating_sub(2).max(1))
+        }
+        TranscriptItemKind::ToolCall
+        | TranscriptItemKind::ToolResult
+        | TranscriptItemKind::System
+        | TranscriptItemKind::Error => 1 + body_line_count(item, inner_width),
+    }
+}
+
+fn body_line_count(item: &crate::events::TranscriptItem, inner_width: u16) -> u16 {
+    if item.body.is_empty() {
+        return 0;
+    }
+
+    let continuation_width = inner_width.saturating_sub(4).max(1);
+    let first_width = inner_width.saturating_sub(4).max(1);
+    let mut body_lines = item.body.lines();
+    let Some(first_line) = body_lines.next() else {
+        return 0;
+    };
+
+    wrapped_line_count(first_line, first_width)
+        + body_lines
+            .map(|line| wrapped_line_count(line, continuation_width))
+            .sum::<u16>()
 }
 
 fn composer_height(app: &TuiApp, area: Rect) -> u16 {

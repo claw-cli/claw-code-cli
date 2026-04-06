@@ -95,11 +95,11 @@ impl TranscriptItemKind {
     pub(crate) fn accent(self) -> Color {
         match self {
             TranscriptItemKind::User => Color::Cyan,
-            TranscriptItemKind::Assistant => Color::Green,
+            TranscriptItemKind::Assistant => Color::Cyan,
             TranscriptItemKind::ToolCall => Color::DarkGray,
             TranscriptItemKind::ToolResult => Color::DarkGray,
             TranscriptItemKind::Error => Color::Red,
-            TranscriptItemKind::System => Color::Magenta,
+            TranscriptItemKind::System => Color::DarkGray,
         }
     }
 }

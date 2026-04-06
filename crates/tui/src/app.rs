@@ -53,6 +53,8 @@ pub(crate) struct TuiApp {
     pub(crate) total_output_tokens: usize,
     /// Currently selected slash-command suggestion row.
     pub(crate) slash_selection: usize,
+    /// Index of the current turn status line rendered below the latest user message.
+    pending_status_index: Option<usize>,
     /// Index of the assistant transcript item currently receiving streamed text.
     pending_assistant_index: Option<usize>,
     /// Background query worker owned by the UI.
@@ -85,6 +87,7 @@ impl TuiApp {
             total_input_tokens: 0,
             total_output_tokens: 0,
             slash_selection: 0,
+            pending_status_index: None,
             pending_assistant_index: None,
             worker,
             should_quit: false,
@@ -167,6 +170,7 @@ impl TuiApp {
             }
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.transcript.clear();
+                self.pending_status_index = None;
                 self.pending_assistant_index = None;
                 self.status_message = "Transcript cleared".to_string();
             }
@@ -259,6 +263,8 @@ impl TuiApp {
         }
 
         self.push_item(TranscriptItemKind::User, "You", prompt.clone());
+        self.pending_status_index =
+            Some(self.push_item(TranscriptItemKind::System, "Thinking", ""));
         self.follow_output = true;
         self.busy = true;
         self.reset_slash_selection();
@@ -337,6 +343,7 @@ impl TuiApp {
         match event {
             WorkerEvent::TurnStarted => {
                 self.busy = true;
+                self.set_turn_status_line("Thinking");
                 self.status_message = "Thinking".to_string();
                 self.pending_assistant_index = None;
             }
@@ -384,6 +391,7 @@ impl TuiApp {
                 total_output_tokens,
             } => {
                 self.busy = false;
+                self.clear_turn_status_line();
                 self.pending_assistant_index = None;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -397,6 +405,7 @@ impl TuiApp {
                 total_output_tokens,
             } => {
                 self.busy = false;
+                self.clear_turn_status_line();
                 self.pending_assistant_index = None;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -427,10 +436,35 @@ impl TuiApp {
         kind: TranscriptItemKind,
         title: impl Into<String>,
         body: impl Into<String>,
-    ) {
+    ) -> usize {
         self.transcript.push(TranscriptItem::new(kind, title, body));
         if self.follow_output {
             self.scroll = 0;
+        }
+        self.transcript.len() - 1
+    }
+
+    fn set_turn_status_line(&mut self, title: impl Into<String>) {
+        if let Some(index) = self.pending_status_index {
+            if let Some(item) = self.transcript.get_mut(index) {
+                item.title = title.into();
+                item.body.clear();
+            }
+        }
+    }
+
+    fn clear_turn_status_line(&mut self) {
+        if let Some(index) = self.pending_status_index.take() {
+            if index < self.transcript.len() {
+                self.transcript.remove(index);
+            }
+            if let Some(pending_assistant_index) = self.pending_assistant_index {
+                if pending_assistant_index > index {
+                    self.pending_assistant_index = Some(pending_assistant_index - 1);
+                } else if pending_assistant_index == index {
+                    self.pending_assistant_index = None;
+                }
+            }
         }
     }
 
@@ -509,6 +543,7 @@ mod tests {
             total_input_tokens: 10,
             total_output_tokens: 20,
             slash_selection: 0,
+            pending_status_index: None,
             pending_assistant_index: None,
             worker: QueryWorkerHandle::stub(),
             should_quit: false,
@@ -596,6 +631,22 @@ mod tests {
                     "{\n  \"command\": \"date\"\n}"
                 ),
                 TranscriptItem::new(TranscriptItemKind::Assistant, "Assistant", "after"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_prompt_inserts_status_line_below_user_message() {
+        let mut app = test_app();
+
+        app.submit_prompt("hello".to_string())
+            .expect("submit should succeed");
+
+        assert_eq!(
+            app.transcript,
+            vec![
+                TranscriptItem::new(TranscriptItemKind::User, "You", "hello"),
+                TranscriptItem::new(TranscriptItemKind::System, "Thinking", ""),
             ]
         );
     }
