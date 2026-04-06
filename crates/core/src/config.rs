@@ -326,7 +326,8 @@ impl FileSystemAppConfigLoader {
     }
 
     fn project_config_path(&self, workspace_root: &Path) -> PathBuf {
-        FileSystemConfigPathResolver::new(self.user_home.clone()).project_config_file(workspace_root)
+        FileSystemConfigPathResolver::new(self.user_home.clone())
+            .project_config_file(workspace_root)
     }
 }
 

@@ -394,10 +394,10 @@ mod tests {
     use futures::Stream;
     use serde_json::json;
 
-    use clawcr_safety::legacy_permissions::PermissionMode;
     use clawcr_provider::{
         ModelRequest, ModelResponse, ResponseContent, StopReason, StreamEvent, Usage,
     };
+    use clawcr_safety::legacy_permissions::PermissionMode;
     use clawcr_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
 
     use super::query;

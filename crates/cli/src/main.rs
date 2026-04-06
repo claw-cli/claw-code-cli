@@ -1,12 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use clawcr_server::{ServerProcessArgs, run_server_process};
+use clawcr_server::{run_server_process, ServerProcessArgs};
 
 mod agent;
 mod config;
 mod onboarding;
 
-use agent::{AgentCli, run_agent};
+use agent::{run_agent, AgentCli};
 
 /// Top-level `clawcr` command that dispatches to interactive agent mode or one
 /// of the supporting runtime subcommands.

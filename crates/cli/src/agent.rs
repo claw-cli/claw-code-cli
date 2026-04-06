@@ -1,11 +1,12 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Args;
-use clawcr_core::{Message, QueryEvent, SessionConfig, SessionState, query};
+use clawcr_core::{query, Message, QueryEvent, SessionConfig, SessionState};
 use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_tools::{ToolOrchestrator, ToolRegistry};
+use clawcr_tui::{run_interactive_tui, InteractiveTuiConfig};
 
 use crate::config;
 
@@ -95,11 +96,6 @@ pub async fn run_agent(cli: AgentCli) -> Result<()> {
         }
     };
 
-    let mut registry = ToolRegistry::new();
-    clawcr_tools::register_builtin_tools(&mut registry);
-    let registry = Arc::new(registry);
-    let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
-
     if cli.provider.as_deref() == Some("ollama") {
         config::ensure_ollama(&cli.ollama_url, interactive)?;
     }
@@ -110,6 +106,26 @@ pub async fn run_agent(cli: AgentCli) -> Result<()> {
         &cli.ollama_url,
         interactive,
     )?;
+
+    if interactive {
+        run_interactive_tui(InteractiveTuiConfig {
+            provider_name: resolved.provider.name().to_string(),
+            model: resolved.model,
+            system_prompt: cli.system,
+            max_turns: cli.max_turns,
+            permission_mode,
+            cwd,
+            provider: resolved.provider,
+            startup_prompt: None,
+        })
+        .await?;
+        return Ok(());
+    }
+
+    let mut registry = ToolRegistry::new();
+    clawcr_tools::register_builtin_tools(&mut registry);
+    let registry = Arc::new(registry);
+    let orchestrator = ToolOrchestrator::new(Arc::clone(&registry));
 
     let session_config = SessionConfig {
         model: resolved.model,
@@ -164,48 +180,6 @@ pub async fn run_agent(cli: AgentCli) -> Result<()> {
 
         return Ok(());
     }
-
-    println!("ClawCR v{}", env!("CARGO_PKG_VERSION"));
-    println!("Type your message, or 'exit' / Ctrl-D to quit.\n");
-
-    let on_event = make_event_callback(OutputFormat::Text);
-    let stdin = io::stdin();
-    loop {
-        print!("> ");
-        io::stdout().flush()?;
-
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line == "exit" || line == "quit" {
-            break;
-        }
-
-        session.push_message(Message::user(line));
-
-        if let Err(error) = query(
-            &mut session,
-            resolved.provider.as_ref(),
-            Arc::clone(&registry),
-            &orchestrator,
-            Some(Arc::clone(&on_event)),
-        )
-        .await
-        {
-            eprintln!("error: {}", error);
-        }
-    }
-
-    eprintln!(
-        "\n[session: {} turns, {} in / {} out tokens]",
-        session.turn_count, session.total_input_tokens, session.total_output_tokens
-    );
-
     Ok(())
 }
 

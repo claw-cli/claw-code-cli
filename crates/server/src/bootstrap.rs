@@ -5,7 +5,7 @@ use clap::Parser;
 use clawcr_core::{AppConfigLoader, FileSystemAppConfigLoader};
 use clawcr_utils::FileSystemConfigPathResolver;
 
-use crate::{ListenTarget, ServerRuntime, resolve_listen_targets, run_listeners};
+use crate::{resolve_listen_targets, run_listeners, ListenTarget, ServerRuntime};
 
 /// Command-line arguments accepted by the standalone server process entrypoint.
 #[derive(Debug, Clone, Parser)]

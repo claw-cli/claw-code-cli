@@ -1,0 +1,27 @@
+[package]
+name = "clawcr-tui"
+description = "Interactive terminal UI for ClawCR"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "clawcr_tui"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clawcr-core = { workspace = true }
+clawcr-provider = { workspace = true }
+clawcr-safety = { workspace = true }
+clawcr-tools = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
+ratatui = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1"

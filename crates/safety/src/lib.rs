@@ -712,9 +712,9 @@ mod tests {
         ApprovalCache, DefaultSandboxPolicyTransformer, EffectiveSandboxPolicy,
         FileSystemPolicyRecord, InMemorySecretDetectorRegistry, NetworkPolicy, PermissionDecision,
         PermissionProfile, PermissionRequest, PolicyModelSelection, PolicySnapshot,
-        RegexSecretDetector, ResourceKind, SafetyPolicyMode, SandboxMode,
-        SandboxPolicyRecord, SecretDetectorRegistry, SecretMatchConfidence, SecretRedactor,
-        StaticPermissionPolicy, REDACTED_SECRET_PLACEHOLDER,
+        RegexSecretDetector, ResourceKind, SafetyPolicyMode, SandboxMode, SandboxPolicyRecord,
+        SecretDetectorRegistry, SecretMatchConfidence, SecretRedactor, StaticPermissionPolicy,
+        REDACTED_SECRET_PLACEHOLDER,
     };
     use crate::{PermissionPolicy, SandboxPolicyTransformer};
 

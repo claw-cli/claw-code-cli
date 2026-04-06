@@ -175,8 +175,14 @@ mod tests {
     #[test]
     fn pattern_matches_prefix_and_exact() {
         assert!(RuleBasedPolicy::pattern_matches("/tmp/*", "/tmp/file.txt"));
-        assert!(RuleBasedPolicy::pattern_matches("/etc/passwd", "/etc/passwd"));
-        assert!(!RuleBasedPolicy::pattern_matches("/tmp/*", "/var/tmp/file.txt"));
+        assert!(RuleBasedPolicy::pattern_matches(
+            "/etc/passwd",
+            "/etc/passwd"
+        ));
+        assert!(!RuleBasedPolicy::pattern_matches(
+            "/tmp/*",
+            "/var/tmp/file.txt"
+        ));
     }
 
     #[tokio::test]

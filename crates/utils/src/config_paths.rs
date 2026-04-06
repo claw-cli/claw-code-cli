@@ -169,7 +169,10 @@ mod tests {
             std::env::set_var("HOME", "/home/runtime");
         }
         let paths = current_config_paths(Some(PathBuf::from("/repo").as_path())).expect("paths");
-        assert_eq!(paths.project_config_file, Some(PathBuf::from("/repo/.clawcr/config.toml")));
+        assert_eq!(
+            paths.project_config_file,
+            Some(PathBuf::from("/repo/.clawcr/config.toml"))
+        );
         match original_home {
             Some(value) => unsafe { std::env::set_var("HOME", value) },
             None => unsafe { std::env::remove_var("HOME") },

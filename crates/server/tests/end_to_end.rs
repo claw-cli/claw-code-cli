@@ -77,31 +77,31 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
         serde_json::json!("clawcr-server")
     );
 
-    stdin
-        .write_all(b"{\"method\":\"initialized\"}\n")
-        .await?;
+    stdin.write_all(b"{\"method\":\"initialized\"}\n").await?;
     stdin
         .write_all(
             format!(
                 "{}\n",
                 serde_json::json!({
-            "id": 2,
-            "method": "session/start",
-            "params": {
-                "cwd": "C:/repo",
-                "ephemeral": false,
-                "title": "End To End",
-                "model": "test-model"
-            }
-        })
+                    "id": 2,
+                    "method": "session/start",
+                    "params": {
+                        "cwd": "C:/repo",
+                        "ephemeral": false,
+                        "title": "End To End",
+                        "model": "test-model"
+                    }
+                })
             )
             .as_bytes(),
         )
         .await?;
     stdin.flush().await?;
 
-    let first_message = read_stdio_line(&mut stdout_reader, "first post-session/start message").await?;
-    let second_message = read_stdio_line(&mut stdout_reader, "second post-session/start message").await?;
+    let first_message =
+        read_stdio_line(&mut stdout_reader, "first post-session/start message").await?;
+    let second_message =
+        read_stdio_line(&mut stdout_reader, "second post-session/start message").await?;
 
     let first_value = parse_stdio_json_line(
         &mut child,
@@ -128,7 +128,10 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
         .find(|value| value.get("id") == Some(&serde_json::json!(2)))
         .context("find session/start response")?;
 
-    assert_eq!(session_started["params"]["session"]["cwd"], serde_json::json!("C:/repo"));
+    assert_eq!(
+        session_started["params"]["session"]["cwd"],
+        serde_json::json!("C:/repo")
+    );
     assert_eq!(
         session_start_response["result"]["resolved_model"],
         serde_json::json!("test-model")
@@ -151,9 +154,10 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
     let bind_address = format!("127.0.0.1:{port}");
     let runtime = ServerRuntime::new(std::env::temp_dir());
     let listen = vec![format!("ws://{bind_address}")];
-    let listener_task = tokio::spawn(async move {
-        clawcr_server::run_listeners(Arc::clone(&runtime), &listen).await
-    });
+    let listener_task =
+        tokio::spawn(
+            async move { clawcr_server::run_listeners(Arc::clone(&runtime), &listen).await },
+        );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -173,7 +177,9 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
 
     socket
         .send(Message::Text(
-            serde_json::json!({ "method": "initialized" }).to_string().into(),
+            serde_json::json!({ "method": "initialized" })
+                .to_string()
+                .into(),
         ))
         .await?;
 
@@ -298,12 +304,16 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
 }
 
 async fn read_websocket_json(
-    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
 ) -> Result<serde_json::Value> {
     timeout(Duration::from_secs(5), async {
         loop {
             match socket.next().await.context("websocket closed")?? {
-                Message::Text(text) => return serde_json::from_str(text.as_str()).map_err(Into::into),
+                Message::Text(text) => {
+                    return serde_json::from_str(text.as_str()).map_err(Into::into)
+                }
                 _ => continue,
             }
         }
@@ -313,7 +323,9 @@ async fn read_websocket_json(
 }
 
 async fn read_n_websocket_json(
-    socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
     count: usize,
 ) -> Result<Vec<serde_json::Value>> {
     let mut values = Vec::with_capacity(count);

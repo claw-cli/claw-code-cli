@@ -28,9 +28,6 @@
 - [Quick Start](#-quick-start)
 - [Why Rebuild in Rust](#-why-rebuild-in-rust)
 - [Design Goals](#-design-goals)
-- [Architecture](#-architecture)
-- [Crate Overview](#-crate-overview)
-- [Rust vs TypeScript](#-rust-vs-typescript)
 - [Roadmap](#-roadmap)
 - [Contributing](#-contributing)
 - [References](#-references)
@@ -38,15 +35,7 @@
 
 ## 💡 What is This
 
-This project extracts the core runtime ideas from [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and reorganizes them into a set of reusable Rust crates. It's not a line-by-line TypeScript translation — it's a clean-room redesign of the capabilities an agent truly depends on:
-
-- **Message Loop** — driving multi-turn conversations
-- **Tool Execution** — orchestrating tool calls with schema validation
-- **Permission Control** — authorization before file/shell/network access
-- **Long-running Tasks** — background execution with lifecycle management
-- **Context Compaction** — keeping long sessions stable under token budgets
-- **Model Providers** — unified interface for streaming LLM backends
-- **MCP Integration** — extending capabilities via Model Context Protocol
+This project extracts the core runtime ideas from [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and reorganizes them into a set of reusable Rust crates.
 
 Think of it as an **agent runtime skeleton**:
 
@@ -143,90 +132,11 @@ This project aims to:
 3. **Make replacement natural.** Tools, model providers, permission policies, and compaction strategies should all be swappable.
 4. **Learn from Claude Code's experience** without replicating its UI or internal features.
 
-## 🏗 Architecture
-
-<div align="center">
-<img src="./docs/assets/architecture.svg" alt="Architecture Overview" width="100%" />
-</div>
-
-### Crate Map
-
-| Crate | Purpose | Derived From (Claude Code) |
-|-------|---------|---------------------------|
-| `clawcr-core` | Message model, state container, main loop, session | `query.ts`, `QueryEngine.ts`, `state/store.ts` |
-| `clawcr-tools` | Tool trait, registry, execution orchestration, and built-in tools | `Tool.ts`, `tools.ts`, tool service layer |
-| `clawcr-tasks` | Long task lifecycle and notification mechanism | `Task.ts`, `tasks.ts` |
-| `clawcr-safety` | Secret redaction, approval policy, sandbox policy, and legacy runtime permission compatibility | `types/permissions.ts`, `utils/permissions/` |
-| `clawcr-provider` | Unified model interface, streaming, retry | `services/api/` |
-| `clawcr-core::context` | Context management, compaction, and token budget control | `services/compact/`, `query/tokenBudget.ts` |
-| `clawcr-mcp` | MCP client, connection, discovery, reconnect | `services/mcp/` |
-| `clawcr-cli` | Executable entry point, assembles all crates | CLI layer |
-
-## 🔍 Crate Overview
-
-<details>
-<summary><b>clawcr-core</b> — The foundation</summary>
-
-Manages how a conversation turn starts, continues, and stops. Defines the unified message model, main loop, and session state. This is the bedrock of the entire system.
-</details>
-
-<details>
-<summary><b>clawcr-tools</b> — Tools and dispatch</summary>
-
-Defines tools, schedules them, and ships the built-in file, shell, search, and edit capabilities in one crate.
-</details>
-
-<details>
-<summary><b>clawcr-tasks</b> — Background task runtime</summary>
-
-Separating tool calls from runtime tasks is critical for supporting long commands, background agents, and completion notifications fed back into the conversation.
-</details>
-
-<details>
-<summary><b>clawcr-safety</b> — Safety and authorization layer</summary>
-
-Controls what the agent can do, when it must ask the user, and when to refuse outright. Essential whenever agents read files, write files, or execute commands.
-</details>
-
-<details>
-<summary><b>clawcr-provider</b> — Model abstraction</summary>
-
-Shields the system from differences between model backends. Unifies streaming output, retry logic, and error recovery.
-</details>
-
-<details>
-<summary><b>clawcr-core::context</b> — Context management</summary>
-
-Ensures long session stability. Not just "summarization" — applies different compression levels and budget controls based on context to prevent unbounded growth.
-</details>
-
-<details>
-<summary><b>clawcr-mcp</b> — MCP integration</summary>
-
-Connects to external MCP services, bringing remote tools, resources, and prompts into the unified capability surface.
-</details>
-
-<details>
-<summary><b>clawcr-cli</b> — CLI entry point</summary>
-
-Packages the executable as `clawcr` and wires together the runtime crates for interactive and one-shot use.
-</details>
-
 ## 🗺 Roadmap
 
 <div align="center">
 <img src="./docs/assets/roadmap.svg" alt="Roadmap" width="100%" />
 </div>
-
-### 1-Week Plan
-
-- **Day 1**: Finalize crate boundaries and wire the minimal CLI
-- **Day 2**: Land `Bash`, `FileRead`, and `FileWrite`
-- **Day 3**: Stabilize provider flow, permissions, and session state
-- **Day 4**: Add editing and search tools
-- **Day 5**: Improve long-session handling with tasks and compaction
-- **Day 6**: Start MCP and plugin/skill integration
-- **Day 7**: Run focused testing, fix gaps, and document the next slice
 
 
 ## 🤝 Contributing

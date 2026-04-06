@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use clawcr_utils::{current_user_config_file, FileSystemConfigPathResolver};
+use serde::{Deserialize, Serialize};
 
 use clawcr_provider::ModelProvider;
 
@@ -65,8 +65,8 @@ pub fn load_config() -> Result<AppConfig> {
     if path.exists() {
         let data = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let cfg: AppConfig = toml::from_str(&data)
-            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let cfg: AppConfig =
+            toml::from_str(&data).with_context(|| format!("failed to parse {}", path.display()))?;
         return Ok(cfg);
     }
 

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use futures::{SinkExt, StreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -61,10 +61,7 @@ pub fn resolve_listen_targets(listen: &[String]) -> Result<Vec<ListenTarget>> {
 }
 
 /// Runs every configured listener target until shutdown.
-pub async fn run_listeners(
-    runtime: Arc<ServerRuntime>,
-    listen: &[String],
-) -> Result<()> {
+pub async fn run_listeners(runtime: Arc<ServerRuntime>, listen: &[String]) -> Result<()> {
     let targets = resolve_listen_targets(listen)?;
 
     let mut tasks = Vec::new();
@@ -192,13 +189,15 @@ async fn handle_websocket_connection(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_WEBSOCKET_BIND_ADDRESS, ListenTarget, parse_listen_target,
-        resolve_listen_targets,
+        parse_listen_target, resolve_listen_targets, ListenTarget, DEFAULT_WEBSOCKET_BIND_ADDRESS,
     };
 
     #[test]
     fn parse_stdio_target() {
-        assert_eq!(parse_listen_target("stdio://").expect("stdio"), ListenTarget::Stdio);
+        assert_eq!(
+            parse_listen_target("stdio://").expect("stdio"),
+            ListenTarget::Stdio
+        );
     }
 
     #[test]

@@ -1,22 +1,22 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use chrono::Utc;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 
 use clawcr_core::{ItemId, SessionId, SessionTitleState, TurnId, TurnStatus};
 
 use crate::{
     ClientTransportKind, ConnectionState, ErrorResponse, EventsSubscribeParams,
-    EventsSubscribeResult, InitializeParams, InitializeResult, NotificationEnvelope,
-    ProtocolError, ProtocolErrorCode, ServerCapabilities, ServerEvent,
-    ServerRequestResolvedPayload, SessionEventPayload, SessionForkParams, SessionForkResult,
-    SessionResumeParams, SessionResumeResult, SessionRuntimeStatus, SessionStartParams,
-    SessionStartResult, SessionSummary, SuccessResponse, TurnEventPayload,
-    TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult, TurnSteerParams,
-    TurnSteerResult, TurnSummary, SteerInputRecord,
+    EventsSubscribeResult, InitializeParams, InitializeResult, NotificationEnvelope, ProtocolError,
+    ProtocolErrorCode, ServerCapabilities, ServerEvent, ServerRequestResolvedPayload,
+    SessionEventPayload, SessionForkParams, SessionForkResult, SessionResumeParams,
+    SessionResumeResult, SessionRuntimeStatus, SessionStartParams, SessionStartResult,
+    SessionSummary, SteerInputRecord, SuccessResponse, TurnEventPayload, TurnInterruptParams,
+    TurnInterruptResult, TurnStartParams, TurnStartResult, TurnSteerParams, TurnSteerResult,
+    TurnSummary,
 };
 
 /// Shared runtime state backing every server transport connection.
@@ -88,7 +88,10 @@ impl ServerRuntime {
     ) -> Option<serde_json::Value> {
         let method = message.get("method")?.as_str()?.to_string();
         let id = message.get("id").cloned();
-        let params = message.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let params = message
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
 
         if method == "initialized" {
             let mut connections = self.connections.lock().await;
@@ -114,39 +117,45 @@ impl ServerRuntime {
 
         match method.as_str() {
             "session/start" => match id {
-                Some(request_id) => {
-                    Some(self.handle_session_start(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_session_start(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             "session/resume" => match id {
-                Some(request_id) => {
-                    Some(self.handle_session_resume(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_session_resume(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             "session/fork" => match id {
-                Some(request_id) => {
-                    Some(self.handle_session_fork(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_session_fork(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             "turn/start" => match id {
-                Some(request_id) => {
-                    Some(self.handle_turn_start(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_turn_start(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             "turn/interrupt" => match id {
-                Some(request_id) => {
-                    Some(self.handle_turn_interrupt(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_turn_interrupt(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             "turn/steer" => match id {
-                Some(request_id) => {
-                    Some(self.handle_turn_steer(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_turn_steer(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             "approval/respond" => id.map(|request_id| {
@@ -157,9 +166,10 @@ impl ServerRuntime {
                 )
             }),
             "events/subscribe" => match id {
-                Some(request_id) => {
-                    Some(self.handle_events_subscribe(connection_id, request_id, params).await)
-                }
+                Some(request_id) => Some(
+                    self.handle_events_subscribe(connection_id, request_id, params)
+                        .await,
+                ),
                 None => None,
             },
             _ => id.map(|request_id| {
@@ -230,7 +240,9 @@ impl ServerRuntime {
             title_state: params
                 .title
                 .as_ref()
-                .map(|_| SessionTitleState::Final(clawcr_core::SessionTitleFinalSource::ExplicitCreate))
+                .map(|_| {
+                    SessionTitleState::Final(clawcr_core::SessionTitleFinalSource::ExplicitCreate)
+                })
                 .unwrap_or(SessionTitleState::Unset),
             ephemeral: params.ephemeral,
             resolved_model: params.model.clone(),
@@ -250,8 +262,10 @@ impl ServerRuntime {
         self.subscribe_connection_to_session(connection_id, session_id, None)
             .await;
 
-        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload { session: summary.clone() }))
-            .await;
+        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload {
+            session: summary.clone(),
+        }))
+        .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -362,8 +376,10 @@ impl ServerRuntime {
         self.subscribe_connection_to_session(connection_id, forked_id, None)
             .await;
 
-        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload { session: session.clone() }))
-            .await;
+        self.broadcast_event(ServerEvent::SessionStarted(SessionEventPayload {
+            session: session.clone(),
+        }))
+        .await;
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -393,7 +409,11 @@ impl ServerRuntime {
         };
 
         if params.input.is_empty() {
-            return self.error_response(request_id, ProtocolErrorCode::EmptyInput, "turn input is empty");
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::EmptyInput,
+                "turn input is empty",
+            );
         }
 
         let mut sessions = self.sessions.lock().await;
@@ -417,7 +437,10 @@ impl ServerRuntime {
         let turn_summary = TurnSummary {
             turn_id: TurnId::new(),
             session_id: params.session_id,
-            sequence: session.latest_turn.as_ref().map_or(1, |turn| turn.sequence + 1),
+            sequence: session
+                .latest_turn
+                .as_ref()
+                .map_or(1, |turn| turn.sequence + 1),
             status: TurnStatus::Running,
             model_slug: params
                 .model
@@ -484,10 +507,18 @@ impl ServerRuntime {
         };
 
         let Some(active_turn) = session.active_turn.as_mut() else {
-            return self.error_response(request_id, ProtocolErrorCode::TurnNotFound, "turn is not active");
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::TurnNotFound,
+                "turn is not active",
+            );
         };
         if active_turn.turn_id != params.turn_id {
-            return self.error_response(request_id, ProtocolErrorCode::TurnNotFound, "turn does not exist");
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::TurnNotFound,
+                "turn does not exist",
+            );
         }
 
         active_turn.status = TurnStatus::Interrupted;
@@ -545,7 +576,11 @@ impl ServerRuntime {
         };
 
         if params.input.is_empty() {
-            return self.error_response(request_id, ProtocolErrorCode::EmptyInput, "turn steer input is empty");
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::EmptyInput,
+                "turn steer input is empty",
+            );
         }
 
         let mut sessions = self.sessions.lock().await;
@@ -557,7 +592,11 @@ impl ServerRuntime {
             );
         };
         let Some(active_turn) = session.active_turn.as_ref() else {
-            return self.error_response(request_id, ProtocolErrorCode::NoActiveTurn, "no active turn exists");
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::NoActiveTurn,
+                "no active turn exists",
+            );
         };
         if active_turn.turn_id != params.expected_turn_id {
             return self.error_response(
@@ -611,12 +650,16 @@ impl ServerRuntime {
         };
 
         let subscription_id = format!("sub-{connection_id}-1");
-        self.connections.lock().await.entry(connection_id).and_modify(|connection| {
-            connection.subscriptions.push(SubscriptionFilter {
-                session_id: params.session_id,
-                event_types: params.event_types.unwrap_or_default().into_iter().collect(),
+        self.connections
+            .lock()
+            .await
+            .entry(connection_id)
+            .and_modify(|connection| {
+                connection.subscriptions.push(SubscriptionFilter {
+                    session_id: params.session_id,
+                    event_types: params.event_types.unwrap_or_default().into_iter().collect(),
+                });
             });
-        });
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -748,8 +791,8 @@ impl ConnectionRuntime {
             let session_matches = subscription
                 .session_id
                 .is_none_or(|expected| session_id == Some(expected));
-            let event_matches = subscription.event_types.is_empty()
-                || subscription.event_types.contains(method);
+            let event_matches =
+                subscription.event_types.is_empty() || subscription.event_types.contains(method);
             session_matches && event_matches
         })
     }

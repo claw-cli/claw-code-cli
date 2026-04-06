@@ -17,6 +17,7 @@ clawcr-safety = { workspace = true }
 clawcr-tasks = { workspace = true }
 clawcr-utils = { workspace = true }
 clawcr-server = { workspace = true }
+clawcr-tui = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }

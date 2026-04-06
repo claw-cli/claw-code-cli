@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use clawcr_server::{ServerProcessArgs, run_server_process};
+use clawcr_server::{run_server_process, ServerProcessArgs};
 
 #[tokio::main]
 async fn main() -> Result<()> {

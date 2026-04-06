@@ -8,8 +8,9 @@ members = [
     "crates/tasks",
     "crates/mcp",
     "crates/server",
+    "crates/tui",
     "crates/utils",
-    "crates/clawcr-cli",
+    "crates/cli",
 ]
 
 [workspace.package]
@@ -28,6 +29,7 @@ clawcr-tasks = { path = "crates/tasks" }
 clawcr-mcp = { path = "crates/mcp" }
 clawcr-utils = { path = "crates/utils" }
 clawcr-server = { path = "crates/server" }
+clawcr-tui = { path = "crates/tui" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -54,6 +56,9 @@ async-openai = { version = "0.34", features = ["chat-completion", "rustls"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.29"
+unicode-width = "0.2"
 
 # Logging
 tracing = "0.1"

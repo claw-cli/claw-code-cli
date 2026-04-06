@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use clawcr_safety::legacy_permissions::PermissionMode;
 use clawcr_provider::{ModelResponse, ResponseContent, StopReason, StreamEvent, Usage};
+use clawcr_safety::legacy_permissions::PermissionMode;
 
 use clawcr_core::{SessionConfig, SessionState};
 
