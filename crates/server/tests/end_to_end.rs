@@ -19,7 +19,12 @@ use clawcr_tools::ToolRegistry;
 use futures::stream;
 
 fn write_test_config(home_dir: &TempDir, listen: &[&str]) -> Result<()> {
+    #[cfg(windows)]
     let config_dir = home_dir.path().join(".clawcr");
+
+    #[cfg(unix)]
+    let config_dir = home_dir.path().join(".config").join("clawcr");
+
     std::fs::create_dir_all(&config_dir)?;
     let listen_entries = listen
         .iter()
@@ -73,6 +78,8 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
     let home_dir = TempDir::new()?;
     write_test_config(&home_dir, &["stdio://"])?;
 
+    let test_cwd = home_dir.path().to_string_lossy().into_owned();
+
     let mut child = Command::new(env!("CARGO_BIN_EXE_clawcr-server"))
         .env("USERPROFILE", home_dir.path())
         .env("HOME", home_dir.path())
@@ -111,7 +118,7 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
                     "id": 2,
                     "method": "session/start",
                     "params": {
-                        "cwd": "C:/repo",
+                        "cwd": test_cwd,
                         "ephemeral": false,
                         "title": "End To End",
                         "model": "test-model"
@@ -155,7 +162,7 @@ async fn stdio_server_process_supports_handshake_and_session_start() -> Result<(
 
     assert_eq!(
         session_started["params"]["session"]["cwd"],
-        serde_json::json!("C:/repo")
+        serde_json::json!(test_cwd)
     );
     assert_eq!(
         session_start_response["result"]["resolved_model"],

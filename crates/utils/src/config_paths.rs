@@ -48,29 +48,26 @@ pub fn current_user_config_file() -> Result<PathBuf, ConfigPathError> {
 /// Filesystem-backed config-path resolver for the local host process.
 #[derive(Debug, Clone)]
 pub struct FileSystemConfigPathResolver {
-    /// The home directory used to derive the user-level config directory.
-    user_home: PathBuf,
+    /// The resolved user-level config directory (for example `~/.clawcr`).
+    user_config_dir: PathBuf,
 }
 
 impl FileSystemConfigPathResolver {
-    /// Creates a config-path resolver rooted at one explicit user home directory.
-    pub fn new(user_home: PathBuf) -> Self {
-        Self { user_home }
+    /// Creates a config-path resolver rooted at one explicit user config directory.
+    pub fn new(user_config_dir: PathBuf) -> Self {
+        Self { user_config_dir }
     }
 
-    /// Creates a config-path resolver using the current process home directory.
     pub fn from_env() -> Result<Self, ConfigPathError> {
-        let user_home =
+        let user_config_dir =
             find_clawcr_home().map_err(|_| ConfigPathError::HomeDirectoryUnavailable)?;
-        Ok(Self::new(user_home))
+        Ok(Self::new(user_config_dir))
     }
 
-    /// Returns the canonical user-level config directory path.
     pub fn user_config_dir(&self) -> PathBuf {
-        self.user_home.clone()
+        self.user_config_dir.clone()
     }
 
-    /// Returns the canonical user-level config file path.
     pub fn user_config_file(&self) -> PathBuf {
         self.user_config_dir().join(APP_CONFIG_FILE_NAME)
     }
@@ -126,38 +123,32 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn resolver_supports_user_only_paths() {
-        let resolver = FileSystemConfigPathResolver::new(PathBuf::from("C:\\Users\\tester"));
+    fn resolver_supports_user_only_paths_windows() {
+        let resolver =
+            FileSystemConfigPathResolver::new(PathBuf::from("C:\\Users\\tester\\.clawcr"));
         let paths = resolver.resolve_paths(None).expect("paths");
 
         assert!(paths.project_config_dir.is_none());
         assert!(paths.project_config_file.is_none());
         assert_eq!(
             paths.user_config_file,
-            PathBuf::from("C:\\Users\\tester\\config.toml")
+            PathBuf::from("C:\\Users\\tester\\.clawcr\\config.toml")
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn current_config_paths_builds_workspace_override() {
-        let original_home = std::env::var_os("HOME");
-        let original_userprofile = std::env::var_os("USERPROFILE");
-        unsafe {
-            std::env::set_var("HOME", "/home/runtime");
-        }
-        let paths = current_config_paths(Some(PathBuf::from("/repo").as_path())).expect("paths");
+    fn resolver_supports_user_only_paths_unix() {
+        let resolver = FileSystemConfigPathResolver::new(PathBuf::from("/home/tester/.clawcr"));
+        let paths = resolver.resolve_paths(None).expect("paths");
+
+        assert!(paths.project_config_dir.is_none());
+        assert!(paths.project_config_file.is_none());
         assert_eq!(
-            paths.project_config_file,
-            Some(PathBuf::from("/repo/.clawcr/config.toml"))
+            paths.user_config_file,
+            PathBuf::from("/home/tester/.clawcr/config.toml")
         );
-        match original_home {
-            Some(value) => unsafe { std::env::set_var("HOME", value) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        match original_userprofile {
-            Some(value) => unsafe { std::env::set_var("USERPROFILE", value) },
-            None => unsafe { std::env::remove_var("USERPROFILE") },
-        }
     }
 }

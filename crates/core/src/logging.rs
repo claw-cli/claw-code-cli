@@ -203,8 +203,9 @@ mod tests {
         assert_eq!(resolved, PathBuf::from("/tmp/.clawcr/logs"));
     }
 
+    #[cfg(windows)]
     #[test]
-    fn resolve_log_directory_supports_relative_override() {
+    fn resolve_log_directory_supports_relative_override_windows() {
         let resolved = resolve_log_directory(
             Path::new("C:\\Users\\tester\\.clawcr"),
             Some(Path::new("diagnostics")),
@@ -215,12 +216,33 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
-    fn resolve_log_directory_preserves_absolute_override() {
+    fn resolve_log_directory_preserves_absolute_override_windows() {
         let resolved = resolve_log_directory(
             Path::new("C:\\Users\\tester\\.clawcr"),
             Some(Path::new("D:\\clawcr-logs")),
         );
         assert_eq!(resolved, PathBuf::from("D:\\clawcr-logs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_log_directory_supports_relative_override_unix() {
+        let resolved = resolve_log_directory(
+            Path::new("/home/tester/.clawcr"),
+            Some(Path::new("diagnostics")),
+        );
+        assert_eq!(resolved, PathBuf::from("/home/tester/.clawcr/diagnostics"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_log_directory_preserves_absolute_override_unix() {
+        let resolved = resolve_log_directory(
+            Path::new("/home/tester/.clawcr"),
+            Some(Path::new("/var/log/clawcr")),
+        );
+        assert_eq!(resolved, PathBuf::from("/var/log/clawcr"));
     }
 }
