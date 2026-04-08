@@ -32,3 +32,7 @@ This repository is a Rust-based coding agent, currently called `claw-code-rust`.
 - Use `pretty_assertions::assert_eq` in tests to produce clearer diffs. Import it at the top of the test module if it’s not already present.
 - Prefer deep equality checks by asserting entire objects instead of comparing fields individually.
 - Do not mutate process environment variables in tests; instead, pass environment-dependent values or flags explicitly from higher levels.
+- Tests that involve filesystem paths or other platform-dependent behavior MUST be platform-aware:
+  - Use `#[cfg(windows)]` and `#[cfg(unix)]` to define platform-specific test cases when behavior differs.
+  - Never rely on Windows-style paths being interpreted correctly on Unix, or Unix-style paths on Windows.
+  - Always use platform-native path formats in tests so they align with `std::path::Path` semantics.
