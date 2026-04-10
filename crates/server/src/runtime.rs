@@ -30,7 +30,7 @@ use crate::{
     SessionStartParams, SessionStartResult, SessionStatusChangedPayload, SessionTitleUpdateParams,
     SessionTitleUpdateResult, SteerInputRecord, SuccessResponse, TurnEventPayload,
     TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult, TurnSteerParams,
-    TurnSteerResult, TurnSummary,
+    TurnSteerResult, TurnSummary, TurnUsageUpdatedPayload,
 };
 
 pub struct ServerRuntime {
@@ -928,11 +928,13 @@ impl ServerRuntime {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
         let runtime = Arc::clone(&self);
         let turn_for_events = turn.clone();
+        let event_session_arc = Arc::clone(&session_arc);
         let event_task = tokio::spawn(async move {
             let mut assistant_item_id = None;
             let mut assistant_item_seq = None;
             let mut assistant_text = String::new();
             let mut latest_usage: Option<TurnUsage> = None;
+            let mut usage_base: Option<(usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
                 match event {
                     QueryEvent::TextDelta(text) => {
@@ -1035,20 +1037,59 @@ impl ServerRuntime {
                             )
                             .await;
                     }
-                    QueryEvent::Usage {
+                    QueryEvent::UsageDelta {
+                        input_tokens,
+                        output_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                    }
+                    | QueryEvent::Usage {
                         input_tokens,
                         output_tokens,
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                     } => {
-                        latest_usage = Some(TurnUsage {
+                        let usage = TurnUsage {
                             input_tokens: input_tokens as u32,
                             output_tokens: output_tokens as u32,
                             cache_creation_input_tokens: cache_creation_input_tokens
                                 .map(|value| value as u32),
                             cache_read_input_tokens: cache_read_input_tokens
                                 .map(|value| value as u32),
-                        });
+                        };
+                        latest_usage = Some(usage.clone());
+
+                        let base = if let Some(base) = usage_base {
+                            base
+                        } else {
+                            let base = {
+                                let session = event_session_arc.lock().await;
+                                (
+                                    session.summary.total_input_tokens,
+                                    session.summary.total_output_tokens,
+                                )
+                            };
+                            usage_base = Some(base);
+                            base
+                        };
+                        {
+                            let mut session = event_session_arc.lock().await;
+                            session.summary.total_input_tokens =
+                                base.0 + usage.input_tokens as usize;
+                            session.summary.total_output_tokens =
+                                base.1 + usage.output_tokens as usize;
+                        }
+                        let _ = runtime
+                            .broadcast_event(ServerEvent::TurnUsageUpdated(
+                                TurnUsageUpdatedPayload {
+                                    session_id,
+                                    turn_id: turn_for_events.turn_id,
+                                    usage,
+                                    total_input_tokens: base.0 + input_tokens as usize,
+                                    total_output_tokens: base.1 + output_tokens as usize,
+                                },
+                            ))
+                            .await;
                     }
                     QueryEvent::TurnComplete { .. } => {}
                 }
@@ -1647,6 +1688,7 @@ impl ServerEvent {
             | ServerEvent::TurnFailed(payload)
             | ServerEvent::TurnPlanUpdated(payload)
             | ServerEvent::TurnDiffUpdated(payload) => Some(payload.session_id),
+            ServerEvent::TurnUsageUpdated(payload) => Some(payload.session_id),
             ServerEvent::ItemStarted(payload) | ServerEvent::ItemCompleted(payload) => {
                 Some(payload.context.session_id)
             }
@@ -1669,6 +1711,7 @@ impl ServerEvent {
             ServerEvent::TurnFailed(_) => "turn/failed",
             ServerEvent::TurnPlanUpdated(_) => "turn/plan/updated",
             ServerEvent::TurnDiffUpdated(_) => "turn/diff/updated",
+            ServerEvent::TurnUsageUpdated(_) => "turn/usage/updated",
             ServerEvent::ItemStarted(_) => "item/started",
             ServerEvent::ItemCompleted(_) => "item/completed",
             ServerEvent::ItemDelta { delta_kind, .. } => match delta_kind {
@@ -1689,6 +1732,7 @@ impl ServerEvent {
                 payload.context.seq = seq;
             }
             ServerEvent::ItemDelta { payload, .. } => payload.context.seq = seq,
+            ServerEvent::TurnUsageUpdated(_) => {}
             _ => {}
         }
         self

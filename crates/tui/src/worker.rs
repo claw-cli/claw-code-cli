@@ -179,6 +179,7 @@ impl QueryWorkerHandle {
     /// Stops the worker task and waits for it to finish.
     pub(crate) async fn shutdown(self) -> Result<()> {
         let _ = self.command_tx.send(WorkerCommand::Shutdown);
+        self.join_handle.abort();
         let _ = self.join_handle.await.map_err(map_join_error);
         Ok(())
     }
@@ -314,8 +315,13 @@ async fn run_worker_inner(
                         active_turn_id = None;
                     }
                     Some(WorkerCommand::ListSessions) => {
-                        match client.session_list(SessionListParams::default()).await {
-                            Ok(result) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(5),
+                            client.session_list(SessionListParams::default()),
+                        )
+                        .await
+                        {
+                            Ok(Ok(result)) => {
                                 let sessions = result
                                     .sessions
                                     .iter()
@@ -334,9 +340,17 @@ async fn run_worker_inner(
                                     .collect();
                                 let _ = event_tx.send(WorkerEvent::SessionsListed { sessions });
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
                                     message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                });
+                            }
+                            Err(_) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: "session list request timed out".to_string(),
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
@@ -437,7 +451,6 @@ async fn run_worker_inner(
                         }
                     }
                     Some(WorkerCommand::Shutdown) | None => {
-                        client.shutdown().await?;
                         break;
                     }
                 }
@@ -471,14 +484,14 @@ async fn run_worker_inner(
                             "turn/completed" => {
                                 if let ServerEvent::TurnCompleted(payload) = event {
                                     active_turn_id = None;
-                                    if let Some(usage) = &payload.turn.usage {
-                                        total_input_tokens += usage.input_tokens as usize;
-                                        total_output_tokens += usage.output_tokens as usize;
-                                    }
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
                                     if completed {
                                         turn_count += 1;
+                                        if let Some(usage) = &payload.turn.usage {
+                                            total_input_tokens = usage.input_tokens as usize;
+                                            total_output_tokens = usage.output_tokens as usize;
+                                        }
                                         let _ = event_tx.send(WorkerEvent::TurnFinished {
                                             stop_reason: format!("{:?}", payload.turn.status),
                                             turn_count,
@@ -489,16 +502,26 @@ async fn run_worker_inner(
                                     }
                                 }
                             }
+                            "turn/usage/updated" => {
+                                if let ServerEvent::TurnUsageUpdated(payload) = event {
+                                    total_input_tokens = payload.total_input_tokens;
+                                    total_output_tokens = payload.total_output_tokens;
+                                    let _ = event_tx.send(WorkerEvent::UsageUpdated {
+                                        total_input_tokens: payload.total_input_tokens,
+                                        total_output_tokens: payload.total_output_tokens,
+                                    });
+                                }
+                            }
                             "turn/failed" => {
                                 if let ServerEvent::TurnFailed(TurnEventPayload { turn, .. }) = event {
                                     active_turn_id = None;
-                                    if let Some(usage) = &turn.usage {
-                                        total_input_tokens += usage.input_tokens as usize;
-                                        total_output_tokens += usage.output_tokens as usize;
-                                    }
                                     let message = latest_completed_agent_message
                                         .take()
                                         .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
+                                    if let Some(usage) = &turn.usage {
+                                        total_input_tokens = usage.input_tokens as usize;
+                                        total_output_tokens = usage.output_tokens as usize;
+                                    }
                                     let _ = event_tx.send(WorkerEvent::TurnFailed {
                                         message,
                                         turn_count,

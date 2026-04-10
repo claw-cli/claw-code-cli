@@ -1,5 +1,10 @@
 use super::*;
 use crate::events::ThinkingListEntry;
+use crate::onboarding_config::save_last_used_model;
+use clawcr_core::SessionId;
+use clawcr_utils::find_clawcr_home;
+use std::io::{BufRead, BufReader};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 impl TuiApp {
     pub(crate) fn show_aux_panel(&mut self, title: impl Into<String>, body: impl Into<String>) {
@@ -69,7 +74,7 @@ impl TuiApp {
             .map(|model| ModelListEntry {
                 slug: model.model.clone(),
                 display_name: model.model.clone(),
-                provider: self.provider,
+                provider: model.provider,
                 description: model
                     .base_url
                     .as_ref()
@@ -79,6 +84,23 @@ impl TuiApp {
                 is_custom_mode: false,
             })
             .collect::<Vec<_>>();
+
+        if entries.is_empty() {
+            entries.extend(
+                self.model_catalog
+                    .list_visible()
+                    .iter()
+                    .map(|model| ModelListEntry {
+                        slug: model.slug.clone(),
+                        display_name: model.display_name.clone(),
+                        provider: model.provider,
+                        description: model.description.clone(),
+                        is_current: model.slug == self.model,
+                        is_builtin: true,
+                        is_custom_mode: false,
+                    }),
+            );
+        }
 
         if entries.is_empty() {
             entries.push(ModelListEntry {
@@ -121,12 +143,8 @@ impl TuiApp {
 
     pub(crate) fn onboarding_model_picker_entries(&self) -> Vec<ModelListEntry> {
         let mut entries = Vec::new();
-        let onboarding_provider = self.show_model_onboarding.then_some(self.provider);
 
         for model in self.model_catalog.list_visible() {
-            if onboarding_provider.is_some_and(|provider| model.provider != provider) {
-                continue;
-            }
             entries.push(ModelListEntry {
                 slug: model.slug.clone(),
                 display_name: model.display_name.clone(),
@@ -182,6 +200,7 @@ impl TuiApp {
 
     pub(crate) fn set_model(&mut self, model: String) -> Result<()> {
         self.worker.set_model(model.clone())?;
+        save_last_used_model(self.provider, &model)?;
         self.model = model;
         Ok(())
     }
@@ -197,6 +216,7 @@ impl TuiApp {
         } else {
             self.worker
                 .reconfigure_provider(model.clone(), base_url, api_key)?;
+            save_last_used_model(self.provider, &model)?;
             self.model = model;
             Ok(())
         }
@@ -216,11 +236,7 @@ impl TuiApp {
         // the command needs server-side state to change.
         match command {
             "/exit" => {
-                self.push_item(
-                    TranscriptItemKind::System,
-                    "Command",
-                    "Exiting interactive session",
-                );
+                self.last_ctrl_c_at = None;
                 self.status_message = "Exiting".to_string();
                 self.should_quit = true;
                 Ok(())
@@ -245,8 +261,13 @@ impl TuiApp {
                 Ok(())
             }
             "/sessions" => {
+                let sessions = local_session_entries().unwrap_or_default();
+                if sessions.is_empty() {
+                    self.show_aux_panel("Sessions", "No sessions found");
+                } else {
+                    self.show_session_panel(sessions);
+                }
                 self.worker.list_sessions()?;
-                self.status_message = "Loading sessions".to_string();
                 Ok(())
             }
             "/thinking" => {
@@ -271,8 +292,13 @@ impl TuiApp {
             }
             "/session" => {
                 if argument.is_empty() || argument == "list" {
+                    let sessions = local_session_entries().unwrap_or_default();
+                    if sessions.is_empty() {
+                        self.show_aux_panel("Sessions", "No sessions found");
+                    } else {
+                        self.show_session_panel(sessions);
+                    }
                     self.worker.list_sessions()?;
-                    self.status_message = "Loading sessions".to_string();
                     return Ok(());
                 }
 
@@ -690,5 +716,115 @@ impl TuiApp {
             self.show_model_onboarding = false;
         }
         Ok(())
+    }
+}
+
+fn local_session_entries() -> Result<Vec<SessionListEntry>> {
+    let root = find_clawcr_home()?.join("sessions");
+    let mut entries = Vec::new();
+    if !root.exists() {
+        return Ok(entries);
+    }
+
+    for path in walk_rollout_files(&root)? {
+        if let Some(entry) = read_rollout_session_entry(&path)? {
+            entries.push(entry);
+        }
+    }
+
+    entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(entries)
+}
+
+fn walk_rollout_files(root: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            files.extend(walk_rollout_files(&path)?);
+        } else if file_type.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
+            files.push(path);
+        }
+    }
+    Ok(files)
+}
+
+fn read_rollout_session_entry(path: &std::path::Path) -> Result<Option<SessionListEntry>> {
+    let file = std::fs::File::open(path)?;
+    let reader = BufReader::new(file).lines();
+    let mut session_id = None;
+    let mut title: Option<String> = None;
+    let mut updated_at: Option<String> = None;
+
+    for line in reader {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(line_value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+
+        if let Some(meta) = line_value.get("SessionMeta") {
+            if let Some(session) = meta.get("session") {
+                session_id = session
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.parse::<SessionId>().ok());
+                title = session
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+                updated_at = session
+                    .get("updated_at")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+            }
+            continue;
+        }
+
+        if let Some(updated) = line_value.get("SessionTitleUpdated") {
+            title = updated
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned);
+            updated_at = updated
+                .get("timestamp")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned);
+        }
+    }
+
+    let session_id = session_id.unwrap_or_else(SessionId::new);
+    let title = title.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.strip_prefix("rollout-").unwrap_or(stem).to_string())
+            .unwrap_or_else(|| "(untitled)".to_string())
+    });
+    let updated_at = updated_at.unwrap_or_else(|| {
+        path.metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(format_system_time)
+            .unwrap_or_else(|| "(unknown)".to_string())
+    });
+
+    Ok(Some(SessionListEntry {
+        session_id,
+        title,
+        updated_at,
+        is_active: false,
+    }))
+}
+
+fn format_system_time(time: SystemTime) -> String {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => format!("unix {}", duration.as_secs()),
+        Err(_) => "(unknown)".to_string(),
     }
 }

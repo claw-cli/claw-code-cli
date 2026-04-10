@@ -58,6 +58,7 @@ fn test_app() -> TuiApp {
         }]),
         saved_models: vec![SavedModelEntry {
             model: "test-model".to_string(),
+            provider: ProviderKind::Anthropic,
             base_url: None,
             api_key: None,
         }],
@@ -160,7 +161,7 @@ async fn slash_sessions_requests_listing() {
     app.handle_slash_command("/sessions".to_string())
         .expect("sessions command should succeed");
 
-    assert_eq!(app.status_message, "Loading sessions");
+    assert_eq!(app.status_message, "Ready");
 }
 
 #[tokio::test]
@@ -399,6 +400,7 @@ async fn onboarding_model_picker_enter_on_builtin_row_prompts_for_connection() {
     app.show_model_onboarding = true;
     app.saved_models = vec![SavedModelEntry {
         model: "existing-model".to_string(),
+        provider: ProviderKind::Anthropic,
         base_url: Some("https://example.invalid/v1".to_string()),
         api_key: Some("secret".to_string()),
     }];

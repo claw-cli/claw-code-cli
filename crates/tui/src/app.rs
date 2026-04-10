@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Result;
-use clawcr_core::{BuiltinModelCatalog, ModelCatalog, ProviderKind, SessionId};
+use clawcr_core::{BuiltinModelCatalog, ModelCatalog, ProviderKind};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::layout::{Constraint, Layout, Rect};

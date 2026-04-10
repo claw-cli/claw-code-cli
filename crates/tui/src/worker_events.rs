@@ -119,6 +119,13 @@ impl TuiApp {
                     "Tool completed".to_string()
                 };
             }
+            WorkerEvent::UsageUpdated {
+                total_input_tokens,
+                total_output_tokens,
+            } => {
+                self.total_input_tokens = total_input_tokens;
+                self.total_output_tokens = total_output_tokens;
+            }
             WorkerEvent::TurnFinished {
                 stop_reason,
                 turn_count,
@@ -132,7 +139,6 @@ impl TuiApp {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
-                self.last_ctrl_c_at = None;
                 if stop_reason == "Interrupted" {
                     self.push_item(TranscriptItemKind::System, "Interrupted", "");
                 } else {
@@ -153,7 +159,6 @@ impl TuiApp {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
-                self.last_ctrl_c_at = None;
                 self.push_item(TranscriptItemKind::Error, "Error", message);
                 self.status_message = "Query failed; see error above".to_string();
             }

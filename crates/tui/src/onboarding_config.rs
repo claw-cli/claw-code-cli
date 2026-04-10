@@ -33,6 +33,30 @@ pub(crate) fn save_onboarding_config(
     Ok(())
 }
 
+pub(crate) fn save_last_used_model(provider: ProviderKind, model: &str) -> Result<()> {
+    let path = find_clawcr_home()
+        .context("could not determine user config path")?
+        .join("config.toml");
+    let mut root = if path.exists() {
+        let data = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        data.parse::<Value>()
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        Value::Table(Default::default())
+    };
+    root = merge_last_used_model(root, provider, model)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let rendered = toml::to_string_pretty(&root)?;
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
 fn merge_onboarding_config(
     mut root: Value,
     provider: ProviderKind,
@@ -57,6 +81,7 @@ fn merge_onboarding_config(
         .as_table_mut()
         .context("provider config must be a TOML table")?;
 
+    profile_table.insert("last_model".to_string(), Value::String(model.to_string()));
     profile_table.insert(
         "default_model".to_string(),
         Value::String(model.to_string()),
@@ -94,6 +119,25 @@ fn merge_onboarding_config(
         normalized_optional(api_key),
     );
 
+    Ok(root)
+}
+
+fn merge_last_used_model(mut root: Value, provider: ProviderKind, model: &str) -> Result<Value> {
+    let table = root
+        .as_table_mut()
+        .context("config root must be a TOML table")?;
+    table.insert(
+        "default_provider".to_string(),
+        Value::String(provider.as_str().to_string()),
+    );
+
+    let profile = table
+        .entry(provider.as_str().to_string())
+        .or_insert_with(|| Value::Table(Default::default()));
+    let profile_table = profile
+        .as_table_mut()
+        .context("provider config must be a TOML table")?;
+    profile_table.insert("last_model".to_string(), Value::String(model.to_string()));
     Ok(root)
 }
 
@@ -176,6 +220,10 @@ mod tests {
             .expect("provider profile");
         assert_eq!(
             profile.get("default_model").and_then(Value::as_str),
+            Some("qwen3-coder-next")
+        );
+        assert_eq!(
+            profile.get("last_model").and_then(Value::as_str),
             Some("qwen3-coder-next")
         );
         assert_eq!(

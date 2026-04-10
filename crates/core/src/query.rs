@@ -16,6 +16,13 @@ use crate::{AgentError, ContentBlock, Message, Role, SessionState};
 pub enum QueryEvent {
     /// Incremental text from the assistant.
     TextDelta(String),
+    /// Incremental token usage update from the provider stream.
+    UsageDelta {
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_creation_input_tokens: Option<usize>,
+        cache_read_input_tokens: Option<usize>,
+    },
     /// The assistant started a tool call.
     ToolUseStart {
         /// Stable provider-issued tool use identifier.
@@ -366,7 +373,7 @@ pub async fn query(
                 Ok(StreamEvent::MessageDone { response }) => {
                     stop_reason = response.stop_reason.clone();
 
-                    // 1.11: Accumulate all usage counters
+                    // 1.11: Accumulate all usage counters at completion time.
                     session.total_input_tokens += response.usage.input_tokens;
                     session.total_output_tokens += response.usage.output_tokens;
                     session.total_cache_creation_tokens +=
@@ -380,6 +387,14 @@ pub async fn query(
                         output_tokens: response.usage.output_tokens,
                         cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
                         cache_read_input_tokens: response.usage.cache_read_input_tokens,
+                    });
+                }
+                Ok(StreamEvent::UsageDelta(usage)) => {
+                    emit(QueryEvent::UsageDelta {
+                        input_tokens: usage.input_tokens,
+                        output_tokens: usage.output_tokens,
+                        cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                        cache_read_input_tokens: usage.cache_read_input_tokens,
                     });
                 }
                 Ok(_) => {}

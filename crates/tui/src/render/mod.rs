@@ -144,28 +144,24 @@ fn render_footer(app: &TuiApp) -> Paragraph<'static> {
 
     let cwd = app.cwd.to_string_lossy().into_owned();
     let branch = resolve_git_branch(&app.cwd).unwrap_or_else(|| "no-git".to_string());
-    let follow = if app.follow_output {
-        "follow"
-    } else {
-        "scroll"
-    };
     let token_usage = format!(
         "tokens {} in / {} out",
         format_token_count(app.total_input_tokens),
         format_token_count(app.total_output_tokens)
     );
     let context_usage = render_context_usage(app);
-    Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(app.model.clone(), theme::muted()),
         Span::styled("  |  ", theme::muted()),
+    ];
+    spans.extend([
         Span::styled(token_usage, theme::muted()),
         Span::styled("  |  ", theme::muted()),
         Span::styled(context_usage, theme::muted()),
         Span::styled("  |  ", theme::muted()),
         Span::styled(format!("{cwd} ({branch})"), theme::muted()),
-        Span::styled("  |  ", theme::muted()),
-        Span::styled(follow, theme::muted()),
-    ]))
+    ]);
+    Paragraph::new(Line::from(spans))
 }
 
 fn render_context_usage(app: &TuiApp) -> String {

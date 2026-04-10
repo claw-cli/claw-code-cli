@@ -60,6 +60,21 @@ pub struct TurnEventPayload {
     pub turn: TurnSummary,
 }
 
+/// Carries a live turn usage update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnUsageUpdatedPayload {
+    /// The session associated with the event.
+    pub session_id: SessionId,
+    /// The active turn identifier.
+    pub turn_id: TurnId,
+    /// The current turn usage snapshot.
+    pub usage: clawcr_core::TurnUsage,
+    /// The live session input token total.
+    pub total_input_tokens: usize,
+    /// The live session output token total.
+    pub total_output_tokens: usize,
+}
+
 /// Carries one session event payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEventPayload {
@@ -222,6 +237,8 @@ pub enum ServerEvent {
     TurnPlanUpdated(TurnEventPayload),
     /// A turn diff changed.
     TurnDiffUpdated(TurnEventPayload),
+    /// A live turn usage update arrived.
+    TurnUsageUpdated(TurnUsageUpdatedPayload),
     /// An item started.
     ItemStarted(ItemEventPayload),
     /// An item completed.

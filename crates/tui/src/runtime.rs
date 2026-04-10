@@ -526,7 +526,6 @@ impl TuiApp {
         self.aux_panel = None;
         self.aux_panel_selection = 0;
         self.pending_assistant_index = None;
-        self.status_message = "Waiting for model response".to_string();
         self.worker.submit_prompt(prompt)
     }
 }

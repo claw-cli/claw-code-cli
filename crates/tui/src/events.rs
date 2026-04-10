@@ -57,6 +57,8 @@ pub(crate) struct ModelListEntry {
 pub struct SavedModelEntry {
     /// Stable model slug or custom model name.
     pub model: String,
+    /// Provider family the model belongs to.
+    pub provider: ProviderKind,
     /// Optional provider base URL override stored with the model.
     pub base_url: Option<String>,
     /// Optional API key override stored with the model.
@@ -89,6 +91,13 @@ pub(crate) enum WorkerEvent {
         is_error: bool,
         /// Whether the preview was truncated for display.
         truncated: bool,
+    },
+    /// Live usage update for the active turn.
+    UsageUpdated {
+        /// Total input tokens accumulated in the session.
+        total_input_tokens: usize,
+        /// Total output tokens accumulated in the session.
+        total_output_tokens: usize,
     },
     /// The current turn completed successfully.
     TurnFinished {
