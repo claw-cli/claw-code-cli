@@ -53,10 +53,39 @@ fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
         AppConfig::default()
     });
     LoggingBootstrap {
-        process_name: "cli",
+        process_name: logging_process_name(&cli.command),
         config: app_config.logging,
         home_dir,
     }
     .install()
     .map_err(Into::into)
+}
+
+fn logging_process_name(command: &Option<Command>) -> &'static str {
+    match command {
+        Some(Command::Server(_)) => "server",
+        None => "cli",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::{Command, ServerProcessArgs, logging_process_name};
+
+    #[test]
+    fn logging_process_name_defaults_to_cli() {
+        assert_eq!(logging_process_name(&None), "cli");
+    }
+
+    #[test]
+    fn logging_process_name_uses_server_for_server_subcommand() {
+        assert_eq!(
+            logging_process_name(&Some(Command::Server(ServerProcessArgs {
+                working_root: None,
+            }))),
+            "server"
+        );
+    }
 }

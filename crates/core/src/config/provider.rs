@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn resolves_provider_from_model_profile_when_default_provider_is_stale() {
         let config = ProviderConfigFile {
-            default_provider: Some(ProviderKind::Anthropic),
+            default_provider: Some(ProviderKind::Openai),
             anthropic: ProviderProfile::default(),
             openai: ProviderProfile {
                 last_model: Some("qwen3-coder-next".to_string()),
