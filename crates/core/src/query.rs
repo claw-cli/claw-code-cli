@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use clawcr_protocol::ResolvedThinkingRequest;
 use futures::StreamExt;
 use serde_json::json;
 use tracing::{debug, info, info_span, warn};
@@ -86,6 +87,7 @@ fn classify_error(e: &anyhow::Error) -> ErrorClass {
 // Session compaction (capabilities 1.3 / 1.7)
 // ---------------------------------------------------------------------------
 
+/// TODO: The context compact is weired, should compact with a seperate LLM invoke.
 /// Remove older messages to bring the conversation within budget.
 /// Returns how many messages were removed.
 fn compact_session(session: &mut SessionState) -> usize {
@@ -126,6 +128,9 @@ fn compact_session(session: &mut SessionState) -> usize {
 // Micro compact (capability 1.4)
 // ---------------------------------------------------------------------------
 
+/// TODO: Now, the micro compact acts like a truncation, however, we already
+/// have truncation policy, should follow model's truncation policy, so the
+/// micro compact should be removed in the future.
 const MICRO_COMPACT_THRESHOLD: usize = 10_000;
 
 fn micro_compact(content: String) -> String {
@@ -142,6 +147,9 @@ fn micro_compact(content: String) -> String {
 // Memory prefetch (capability 1.9)
 // ---------------------------------------------------------------------------
 
+/// TODO: Current the Agent automatically read the `AGENTS.md` / `CLAUDE.md` at
+/// current workspace root directory, for those md in sub-directory, what is
+/// the load policy ? not sure, should investigate and design.
 fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
     let mut sections = Vec::new();
 
@@ -162,6 +170,8 @@ fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
+/// TODO: At the current design, we take base_instructions as system prompt,
+/// so there is no nesscerry to keep `system_prompt`, should be removed.
 fn build_system_prompt(
     base_instructions: &str,
     system_prompt: &str,
@@ -207,24 +217,10 @@ fn build_environment_context(cwd: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 const MAX_RETRIES: usize = 3;
-const MAX_TURNS_PER_QUERY: usize = 100;
-
-fn resolve_request_parameters(
-    turn_config: &TurnConfig,
-) -> (String, Option<String>, Option<serde_json::Value>) {
-    let resolved = turn_config
-        .model
-        .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
-    (
-        resolved.request_model,
-        resolved.request_thinking,
-        resolved.extra_body,
-    )
-}
 
 /// The recursive agent loop — the beating heart of the runtime.
 ///
-/// This is the Rust equivalent of Claude Code's `query.ts`. It drives
+/// The implementation refers to Claude Code's `query.ts`. It drives
 /// multi-turn conversations by:
 ///
 /// 1. Building the model request from session state
@@ -236,8 +232,10 @@ fn resolve_request_parameters(
 ///
 /// The loop terminates when:
 /// - The model emits `end_turn` with no tool calls
-/// - Max turns are exceeded
 /// - An unrecoverable error occurs
+/// TODO: Not sure should we put `provider: &dyn ModelProviderSDK` into runtime `Model`,
+/// so that the turn_config has the `provider`.
+/// TODO: The body of `query` 
 pub async fn query(
     session: &mut SessionState,
     turn_config: &TurnConfig,
@@ -252,9 +250,10 @@ pub async fn query(
         }
     };
 
-    // 1.9: Memory prefetch — load CLAUDE.md once before the loop
+    // 1.9: Memory prefetch — load CLAUDE.md/AGETNS.md once before the loop
     let memory_content = load_prompt_md(&session.cwd);
 
+    // TODO: Implement retry with exponential backoff strategy.
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
 
@@ -268,10 +267,6 @@ pub async fn query(
         {
             info!("token budget threshold exceeded — compacting session");
             compact_session(session);
-        }
-
-        if session.turn_count >= MAX_TURNS_PER_QUERY {
-            return Err(AgentError::MaxTurnsExceeded(MAX_TURNS_PER_QUERY));
         }
 
         session.turn_count += 1;
@@ -292,7 +287,17 @@ pub async fn query(
             &memory_content,
             &session.cwd,
         );
-        let (request_model, request_thinking, extra_body) = resolve_request_parameters(turn_config);
+
+        // resolve thinking request parameter
+        let ResolvedThinkingRequest {
+            request_model,
+            request_thinking,
+            extra_body,
+            effective_reasoning_effort: _,
+        } = turn_config
+            .model
+            .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
+
         let request = ModelRequest {
             model: request_model,
             system: if system.is_empty() {
@@ -308,6 +313,7 @@ pub async fn query(
                     value as usize
                 }),
             tools: Some(registry.tool_definitions()),
+            // TODO: Should add temperature, top_k, top_p .. etc paratermer
             temperature: None,
             sampling: SamplingControls::default(),
             thinking: request_thinking,
