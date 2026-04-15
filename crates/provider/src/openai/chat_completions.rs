@@ -580,9 +580,8 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
         root["tools"] = tool_definitions(tools);
     }
 
-    let temperature = request.sampling.temperature.or(request.temperature);
     if profile.supports_temperature
-        && let Some(temperature) = temperature
+        && let Some(temperature) = request.sampling.temperature
     {
         root["temperature"] = json!(temperature);
     }
@@ -1245,8 +1244,10 @@ mod tests {
                     "required": ["city"]
                 }),
             }]),
-            temperature: Some(0.2),
-            sampling: SamplingControls::default(),
+            sampling: SamplingControls {
+                temperature: Some(0.2),
+                ..SamplingControls::default()
+            },
             thinking: Some("medium".to_string()),
             extra_body: None,
         };
@@ -1282,7 +1283,6 @@ mod tests {
             }],
             max_tokens: 64,
             tools: None,
-            temperature: None,
             sampling: SamplingControls::default(),
             thinking: Some("disabled".to_string()),
             extra_body: None,
@@ -1307,7 +1307,6 @@ mod tests {
             }],
             max_tokens: 64,
             tools: None,
-            temperature: None,
             sampling: SamplingControls {
                 temperature: Some(0.3),
                 top_p: Some(0.9),

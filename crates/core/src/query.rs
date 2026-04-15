@@ -315,7 +315,6 @@ pub async fn query(
                 }),
             tools: Some(registry.tool_definitions()),
             // TODO: Should add temperature, top_k, top_p .. etc paratermer
-            temperature: None,
             sampling: SamplingControls::default(),
             thinking: request_thinking,
             extra_body,
