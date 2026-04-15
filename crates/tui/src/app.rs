@@ -98,6 +98,8 @@ pub(crate) struct TuiApp {
     pub(crate) pending_status_index: Option<usize>,
     /// Index of the assistant transcript item currently receiving streamed text.
     pub(crate) pending_assistant_index: Option<usize>,
+    /// Index of the reasoning transcript item currently receiving streamed text.
+    pub(crate) pending_reasoning_index: Option<usize>,
     /// Map from tool call id to the transcript row that should be updated with the result.
     pub(crate) pending_tool_items: HashMap<String, usize>,
     /// Background query worker owned by the UI.
@@ -158,6 +160,8 @@ pub struct InteractiveTuiConfig {
     pub cwd: PathBuf,
     /// Environment overrides applied to the spawned stdio server process.
     pub server_env: Vec<(String, String)>,
+    /// Optional CLI log-level override to forward to the spawned server process.
+    pub server_log_level: Option<String>,
     /// Built-in model catalog used for onboarding and model selection.
     pub model_catalog: PresetModelCatalog,
     /// Persisted model entries available for switching in the composer popup.

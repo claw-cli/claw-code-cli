@@ -7,7 +7,11 @@ use clawcr_protocol::ProviderFamily;
 use clawcr_tui::{InteractiveTuiConfig, SavedModelEntry, TerminalMode, run_interactive_tui};
 
 /// Runs the interactive coding-agent entrypoint.
-pub async fn run_agent(force_onboarding: bool, no_alt_screen: bool) -> Result<()> {
+pub async fn run_agent(
+    force_onboarding: bool,
+    no_alt_screen: bool,
+    log_level: Option<&str>,
+) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let model_catalog = PresetModelCatalog::load()?;
     let stored_config = load_config().unwrap_or_default();
@@ -53,6 +57,7 @@ pub async fn run_agent(force_onboarding: bool, no_alt_screen: bool) -> Result<()
         provider,
         cwd,
         server_env,
+        server_log_level: log_level.map(ToOwned::to_owned),
         model_catalog,
         saved_models,
         show_model_onboarding: onboarding_mode,

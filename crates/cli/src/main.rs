@@ -34,8 +34,17 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Server(args)) => run_server_process(args).await,
-        Some(Command::Onboard) => run_agent(true, cli.no_alt_screen).await,
-        None => run_agent(false, cli.no_alt_screen).await,
+        Some(Command::Onboard) => {
+            run_agent(true, cli.no_alt_screen, cli.log_level.map(LogLevel::as_str)).await
+        }
+        None => {
+            run_agent(
+                false,
+                cli.no_alt_screen,
+                cli.log_level.map(LogLevel::as_str),
+            )
+            .await
+        }
     }
 }
 

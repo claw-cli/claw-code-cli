@@ -30,6 +30,7 @@ pub struct StdioServerClientConfig {
     pub program: PathBuf,
     pub workspace_root: Option<PathBuf>,
     pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +57,9 @@ impl StdioServerClient {
         );
         let mut command = Command::new(&config.program);
         command.arg("server");
+        for arg in config.args {
+            command.arg(arg);
+        }
         if let Some(workspace_root) = config.workspace_root {
             command.arg("--working-root").arg(workspace_root);
         }

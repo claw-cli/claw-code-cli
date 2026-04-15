@@ -69,6 +69,10 @@ fn append_transcript_item(
         TranscriptItemKind::Assistant => {
             append_plain_message(lines, item, "• ", "  ", inner_width);
         }
+        TranscriptItemKind::Reasoning => {
+            append_wrapped_title(lines, &item.title, item.kind, inner_width);
+            append_transcript_body(lines, item, inner_width);
+        }
         TranscriptItemKind::System if item.title == "Thinking" => {
             let spinner = ["⠋", "⠙", "⠹", "⠸", "⠴", "⠦"][spinner_index % 6];
             append_wrapped_styled_text(

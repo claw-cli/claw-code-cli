@@ -33,6 +33,8 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) cwd: PathBuf,
     /// Environment overrides applied to the spawned server child process.
     pub(crate) server_env: Vec<(String, String)>,
+    /// Optional log-level override forwarded to the server child process.
+    pub(crate) server_log_level: Option<String>,
     /// Initial thinking mode used for new turns.
     pub(crate) thinking_selection: Option<String>,
 }
@@ -236,7 +238,12 @@ async fn run_worker_inner(
     // The worker owns the server client and translates UI commands into server
     // calls, then turns server notifications back into lightweight UI events.
     let mut server_env = config.server_env;
-    let mut client = spawn_client(&config.cwd, server_env.clone()).await?;
+    let mut client = spawn_client(
+        &config.cwd,
+        server_env.clone(),
+        config.server_log_level.clone(),
+    )
+    .await?;
     let _ = client.initialize().await?;
     let mut session_id: Option<SessionId> = None;
     let mut model = config.model;
@@ -328,7 +335,12 @@ async fn run_worker_inner(
                         apply_optional_env_override(&mut server_env, "CLAWCR_BASE_URL", base_url);
                         apply_optional_env_override(&mut server_env, "CLAWCR_API_KEY", api_key);
                         client.shutdown().await?;
-                        client = spawn_client(&config.cwd, server_env.clone()).await?;
+                        client = spawn_client(
+                            &config.cwd,
+                            server_env.clone(),
+                            config.server_log_level.clone(),
+                        )
+                        .await?;
                         client.initialize().await?;
                         session_id = None;
                         active_turn_id = None;
@@ -493,6 +505,11 @@ async fn run_worker_inner(
                                     let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
                                 }
                             }
+                            "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
+                                if let ServerEvent::ItemDelta { payload, .. } = event {
+                                    let _ = event_tx.send(WorkerEvent::ReasoningDelta(payload.delta));
+                                }
+                            }
                             "item/completed" => {
                                 if let ServerEvent::ItemCompleted(payload) = event {
                                     if let Some(text) = completed_agent_message_text(&payload) {
@@ -603,11 +620,19 @@ async fn ensure_session_started(
     })
 }
 
-async fn spawn_client(cwd: &PathBuf, env: Vec<(String, String)>) -> Result<StdioServerClient> {
+async fn spawn_client(
+    cwd: &PathBuf,
+    env: Vec<(String, String)>,
+    server_log_level: Option<String>,
+) -> Result<StdioServerClient> {
     StdioServerClient::spawn(StdioServerClientConfig {
         program: std::env::current_exe().context("resolve current executable for server launch")?,
         workspace_root: Some(cwd.clone()),
         env,
+        args: server_log_level
+            .into_iter()
+            .flat_map(|level| ["--log-level".to_string(), level])
+            .collect(),
     })
     .await
 }
@@ -644,10 +669,37 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
 }
 
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
-    // Only tool lifecycle items need special handling here; other item kinds are
-    // intentionally ignored because they are either streamed separately or not
-    // shown in the TUI transcript.
     match payload.item {
+        ItemEnvelope {
+            item_kind: ItemKind::AgentMessage,
+            payload,
+            ..
+        } => {
+            let text = payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned);
+            if let Some(text) = text {
+                let _ = event_tx.send(WorkerEvent::AssistantMessageCompleted(text));
+            }
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::Reasoning,
+            payload,
+            ..
+        } => {
+            let text = payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned);
+            if let Some(text) = text {
+                let _ = event_tx.send(WorkerEvent::ReasoningCompleted(text));
+            }
+        }
         ItemEnvelope {
             item_kind: ItemKind::ToolCall,
             payload,

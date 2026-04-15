@@ -49,6 +49,7 @@ pub(super) fn transcript_prefix(kind: TranscriptItemKind) -> Style {
     match kind {
         TranscriptItemKind::User => Style::new().fg(CYAN_300).add_modifier(Modifier::BOLD),
         TranscriptItemKind::Assistant => Style::new().fg(SLATE_400).add_modifier(Modifier::BOLD),
+        TranscriptItemKind::Reasoning => Style::new().fg(AMBER_300).add_modifier(Modifier::BOLD),
         TranscriptItemKind::ToolCall | TranscriptItemKind::ToolResult => {
             Style::new().fg(AMBER_300).add_modifier(Modifier::BOLD)
         }
@@ -62,6 +63,7 @@ pub(super) fn transcript_title(kind: TranscriptItemKind) -> Style {
         TranscriptItemKind::ToolCall | TranscriptItemKind::ToolResult => {
             Style::new().fg(SLATE_200).add_modifier(Modifier::BOLD)
         }
+        TranscriptItemKind::Reasoning => Style::new().fg(AMBER_300).add_modifier(Modifier::BOLD),
         TranscriptItemKind::Error => Style::new().fg(RED_300).add_modifier(Modifier::BOLD),
         TranscriptItemKind::System => Style::new().fg(SLATE_200).add_modifier(Modifier::BOLD),
         TranscriptItemKind::User => Style::new().fg(CYAN_300).add_modifier(Modifier::BOLD),
@@ -73,6 +75,7 @@ pub(super) fn transcript_body(kind: TranscriptItemKind) -> Style {
     match kind {
         TranscriptItemKind::User => Style::new().fg(SLATE_200),
         TranscriptItemKind::Assistant => Style::new().fg(SLATE_200),
+        TranscriptItemKind::Reasoning => Style::new().fg(SLATE_200),
         TranscriptItemKind::ToolCall => Style::new().fg(SLATE_400),
         TranscriptItemKind::ToolResult => Style::new().fg(SLATE_400),
         TranscriptItemKind::Error => Style::new().fg(RED_300),

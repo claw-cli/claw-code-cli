@@ -11,6 +11,7 @@ impl TuiApp {
                 self.set_turn_status_line("Thinking");
                 self.status_message = "Thinking".to_string();
                 self.pending_assistant_index = None;
+                self.pending_reasoning_index = None;
                 self.close_inline_assistant_stream();
             }
             WorkerEvent::TextDelta(text) => {
@@ -22,6 +23,30 @@ impl TuiApp {
                 }
                 self.emit_inline_assistant_delta(&text);
             }
+            WorkerEvent::ReasoningDelta(text) => {
+                let index = self.ensure_reasoning_item();
+                self.transcript[index].body.push_str(&text);
+                self.status_message = "Thinking".to_string();
+                if self.follow_output {
+                    self.scroll = 0;
+                }
+            }
+            WorkerEvent::AssistantMessageCompleted(text) => {
+                let index = self.ensure_assistant_item();
+                self.transcript[index].body = text;
+                self.status_message = "Streaming response".to_string();
+                if self.follow_output {
+                    self.scroll = 0;
+                }
+            }
+            WorkerEvent::ReasoningCompleted(text) => {
+                let index = self.ensure_reasoning_item();
+                self.transcript[index].body = text;
+                self.status_message = "Thinking".to_string();
+                if self.follow_output {
+                    self.scroll = 0;
+                }
+            }
             WorkerEvent::ToolCall {
                 tool_use_id,
                 summary,
@@ -29,6 +54,7 @@ impl TuiApp {
             } => {
                 self.close_inline_assistant_stream();
                 self.pending_assistant_index = None;
+                self.pending_reasoning_index = None;
                 self.transcript
                     .push(TranscriptItem::tool_call(summary.clone()));
                 let index = self.transcript.len() - 1;
@@ -155,6 +181,7 @@ impl TuiApp {
                 self.busy = false;
                 self.clear_turn_status_line();
                 self.pending_assistant_index = None;
+                self.pending_reasoning_index = None;
                 self.pending_tool_items.clear();
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -176,6 +203,7 @@ impl TuiApp {
                 self.busy = false;
                 self.clear_turn_status_line();
                 self.pending_assistant_index = None;
+                self.pending_reasoning_index = None;
                 self.pending_tool_items.clear();
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -230,6 +258,7 @@ impl TuiApp {
                 self.aux_panel_selection = 0;
                 self.pending_status_index = None;
                 self.pending_assistant_index = None;
+                self.pending_reasoning_index = None;
                 self.pending_tool_items.clear();
                 self.busy = false;
                 self.total_input_tokens = 0;
@@ -258,6 +287,7 @@ impl TuiApp {
                 self.aux_panel_selection = 0;
                 self.pending_status_index = None;
                 self.pending_assistant_index = None;
+                self.pending_reasoning_index = None;
                 self.busy = false;
                 self.transcript = history_items;
                 self.pending_tool_items.clear();
@@ -317,6 +347,21 @@ impl TuiApp {
         index
     }
 
+    pub(crate) fn ensure_reasoning_item(&mut self) -> usize {
+        if let Some(index) = self.pending_reasoning_index {
+            return index;
+        }
+
+        self.transcript.push(TranscriptItem::new(
+            TranscriptItemKind::Reasoning,
+            "Reasoning",
+            String::new(),
+        ));
+        let index = self.transcript.len() - 1;
+        self.pending_reasoning_index = Some(index);
+        index
+    }
+
     pub(crate) fn push_item(
         &mut self,
         kind: TranscriptItemKind,
@@ -371,6 +416,13 @@ impl TuiApp {
                     self.pending_assistant_index = Some(pending_assistant_index - 1);
                 } else if pending_assistant_index == index {
                     self.pending_assistant_index = None;
+                }
+            }
+            if let Some(pending_reasoning_index) = self.pending_reasoning_index {
+                if pending_reasoning_index > index {
+                    self.pending_reasoning_index = Some(pending_reasoning_index - 1);
+                } else if pending_reasoning_index == index {
+                    self.pending_reasoning_index = None;
                 }
             }
             for pending_tool_index in self.pending_tool_items.values_mut() {

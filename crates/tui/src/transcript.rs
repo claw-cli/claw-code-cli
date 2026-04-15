@@ -99,6 +99,12 @@ pub(crate) fn format_item(width: u16, item: &TranscriptItem) -> String {
         TranscriptItemKind::Assistant => {
             format_block("assistant", &item.body, width, Some("assistant> "))
         }
+        TranscriptItemKind::Reasoning => format_block(
+            &block_title("reasoning", item.title.trim()),
+            &item.body,
+            width,
+            None,
+        ),
         TranscriptItemKind::ToolCall => format_block(
             &format!("tool: {}", item.title.trim()),
             &item.body,

@@ -8,6 +8,7 @@ impl TuiApp {
             model: config.model.clone(),
             cwd: config.cwd.clone(),
             server_env: config.server_env,
+            server_log_level: config.server_log_level,
             thinking_selection: None,
         });
 
@@ -29,6 +30,7 @@ impl TuiApp {
             aux_panel: None,
             pending_status_index: None,
             pending_assistant_index: None,
+            pending_reasoning_index: None,
             pending_tool_items: std::collections::HashMap::new(),
             thinking_selection: None,
             worker,

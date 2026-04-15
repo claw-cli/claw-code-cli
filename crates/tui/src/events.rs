@@ -74,6 +74,12 @@ pub(crate) enum WorkerEvent {
     },
     /// Incremental assistant text.
     TextDelta(String),
+    /// Incremental reasoning text.
+    ReasoningDelta(String),
+    /// Final assistant text for a completed item.
+    AssistantMessageCompleted(String),
+    /// Final reasoning text for a completed item.
+    ReasoningCompleted(String),
     /// A tool call started.
     ToolCall {
         /// Stable identifier used to match the later tool result.
@@ -275,6 +281,8 @@ pub(crate) enum TranscriptItemKind {
     User,
     /// Assistant-authored text.
     Assistant,
+    /// Model reasoning/thinking text.
+    Reasoning,
     /// Tool execution start marker.
     ToolCall,
     /// Successful tool result.
