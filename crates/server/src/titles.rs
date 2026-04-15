@@ -52,8 +52,10 @@ pub(crate) fn build_title_generation_request(
         }],
         max_tokens: 32,
         tools: None,
-        temperature: Some(0.0),
-        sampling: SamplingControls::default(),
+        sampling: SamplingControls {
+            temperature: Some(0.0),
+            ..SamplingControls::default()
+        },
         thinking: None,
         extra_body: None,
     }

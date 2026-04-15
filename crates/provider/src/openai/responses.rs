@@ -76,9 +76,8 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
         root["tools"] = tool_definitions(tools);
     }
 
-    let temperature = request.sampling.temperature.or(request.temperature);
     if profile.supports_temperature
-        && let Some(temperature) = temperature
+        && let Some(temperature) = request.sampling.temperature
     {
         root["temperature"] = json!(temperature);
     }
@@ -502,7 +501,6 @@ mod tests {
                 description: "Get weather by city".to_string(),
                 input_schema: json!({"type": "object"}),
             }]),
-            temperature: Some(0.2),
             sampling: SamplingControls {
                 temperature: Some(0.4),
                 top_p: Some(0.7),

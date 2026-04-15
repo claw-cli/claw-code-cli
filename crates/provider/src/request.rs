@@ -99,8 +99,6 @@ pub struct ModelRequest {
     pub max_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f64>,
     #[serde(default)]
     pub sampling: SamplingControls,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,7 +200,6 @@ mod tests {
             }],
             max_tokens: 4096,
             tools: None,
-            temperature: None,
             sampling: SamplingControls::default(),
             thinking: None,
             extra_body: None,

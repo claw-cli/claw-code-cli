@@ -566,7 +566,7 @@ fn build_request(request: &ModelRequest, stream: bool) -> Value {
                 .collect::<Vec<_>>()
         }),
         thinking: request.thinking.as_deref().and_then(build_thinking),
-        temperature: request.sampling.temperature.or(request.temperature),
+        temperature: request.sampling.temperature,
         top_p: request.sampling.top_p,
         top_k: request.sampling.top_k,
     };
@@ -930,9 +930,8 @@ mod tests {
                     "required": ["city"]
                 }),
             }]),
-            temperature: Some(0.2),
             sampling: SamplingControls {
-                temperature: None,
+                temperature: Some(0.2),
                 top_p: Some(0.9),
                 top_k: Some(32),
             },
