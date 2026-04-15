@@ -34,6 +34,8 @@ use crate::{
     titles::{build_title_generation_request, derive_provisional_title, normalize_generated_title},
 };
 
+mod plan;
+
 pub struct ServerRuntime {
     metadata: InitializeResult,
     deps: ServerRuntimeDependencies,
@@ -42,6 +44,11 @@ pub struct ServerRuntime {
     connections: Mutex<HashMap<u64, ConnectionRuntime>>,
     active_tasks: Mutex<HashMap<SessionId, tokio::task::AbortHandle>>,
     next_connection_id: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryVisibility {
+    Visible,
 }
 
 impl ServerRuntime {
@@ -1005,6 +1012,7 @@ impl ServerRuntime {
             let mut assistant_item_seq = None;
             let mut assistant_text = String::new();
             let mut latest_usage: Option<TurnUsage> = None;
+            let mut tool_names_by_id = HashMap::new();
             let mut usage_base: Option<(usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
                 match event {
@@ -1063,10 +1071,12 @@ impl ServerRuntime {
                                         "title": "Assistant",
                                         "text": assistant_text,
                                     }),
+                                    HistoryVisibility::Visible,
                                 )
                                 .await;
                             assistant_text.clear();
                         }
+                        tool_names_by_id.insert(id.clone(), name.clone());
                         runtime
                             .emit_turn_item(
                                 session_id,
@@ -1090,23 +1100,36 @@ impl ServerRuntime {
                         content,
                         is_error,
                     } => {
-                        runtime
-                            .emit_turn_item(
-                                session_id,
-                                turn_for_events.turn_id,
-                                ItemKind::ToolResult,
-                                TurnItem::ToolResult(ToolResultItem {
-                                    tool_call_id: tool_use_id.clone(),
-                                    output: serde_json::Value::String(content.clone()),
-                                    is_error,
-                                }),
-                                serde_json::json!({
-                                    "tool_use_id": tool_use_id,
-                                    "content": content,
-                                    "is_error": is_error,
-                                }),
-                            )
-                            .await;
+                        let tool_name = tool_names_by_id.remove(&tool_use_id);
+                        if matches!(tool_name.as_deref(), Some("update_plan")) && !is_error {
+                            runtime
+                                .emit_plan_update(
+                                    session_id,
+                                    turn_for_events.turn_id,
+                                    &turn_for_events,
+                                    &tool_use_id,
+                                    &content,
+                                )
+                                .await;
+                        } else {
+                            runtime
+                                .emit_turn_item(
+                                    session_id,
+                                    turn_for_events.turn_id,
+                                    ItemKind::ToolResult,
+                                    TurnItem::ToolResult(ToolResultItem {
+                                        tool_call_id: tool_use_id.clone(),
+                                        output: serde_json::Value::String(content.clone()),
+                                        is_error,
+                                    }),
+                                    serde_json::json!({
+                                        "tool_use_id": tool_use_id,
+                                        "content": content,
+                                        "is_error": is_error,
+                                    }),
+                                )
+                                .await;
+                        }
                     }
                     QueryEvent::UsageDelta {
                         input_tokens,
@@ -1149,6 +1172,11 @@ impl ServerRuntime {
                                 base.0 + usage.input_tokens as usize;
                             session.summary.total_output_tokens =
                                 base.1 + usage.output_tokens as usize;
+                            if let Some(active_turn) = session.active_turn.as_mut()
+                                && active_turn.turn_id == turn_for_events.turn_id
+                            {
+                                active_turn.usage = Some(usage.clone());
+                            }
                         }
                         let _ = runtime
                             .broadcast_event(ServerEvent::TurnUsageUpdated(
@@ -1177,6 +1205,7 @@ impl ServerRuntime {
                             text: assistant_text.clone(),
                         }),
                         serde_json::json!({ "title": "Assistant", "text": assistant_text }),
+                        HistoryVisibility::Visible,
                     )
                     .await;
             }
@@ -1492,6 +1521,26 @@ impl ServerRuntime {
         turn_item: TurnItem,
         payload: serde_json::Value,
     ) {
+        self.emit_turn_item_with_history_visibility(
+            session_id,
+            turn_id,
+            item_kind,
+            turn_item,
+            payload,
+            HistoryVisibility::Visible,
+        )
+        .await;
+    }
+
+    async fn emit_turn_item_with_history_visibility(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        item_kind: ItemKind,
+        turn_item: TurnItem,
+        payload: serde_json::Value,
+        history_visibility: HistoryVisibility,
+    ) {
         let (item_id, item_seq) = self
             .start_item(session_id, turn_id, item_kind.clone(), payload.clone())
             .await;
@@ -1503,6 +1552,7 @@ impl ServerRuntime {
             item_kind.clone(),
             turn_item,
             payload.clone(),
+            history_visibility,
         )
         .await;
     }
@@ -1578,6 +1628,7 @@ impl ServerRuntime {
         item_kind: ItemKind,
         turn_item: TurnItem,
         payload: serde_json::Value,
+        history_visibility: HistoryVisibility,
     ) {
         self.persist_item(
             session_id,
@@ -1587,6 +1638,7 @@ impl ServerRuntime {
             turn_item,
             Some(TurnStatus::Running),
             None,
+            history_visibility,
         )
         .await;
         self.emit_item_completed(session_id, turn_id, item_id, item_kind, payload)
@@ -1602,11 +1654,14 @@ impl ServerRuntime {
         turn_item: TurnItem,
         turn_status: Option<TurnStatus>,
         worklog: Option<Worklog>,
+        history_visibility: HistoryVisibility,
     ) {
         if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
             let record = {
                 let mut session = session_arc.lock().await;
-                if let Some(history_item) = history_item_from_turn_item(&turn_item) {
+                if history_visibility == HistoryVisibility::Visible
+                    && let Some(history_item) = history_item_from_turn_item(&turn_item)
+                {
                     session.history_items.push(history_item);
                 }
                 session.record.clone()
@@ -1637,6 +1692,29 @@ impl ServerRuntime {
             return item_seq;
         }
         1
+    }
+
+    async fn current_turn_summary(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        fallback: &TurnSummary,
+    ) -> TurnSummary {
+        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+            return fallback.clone();
+        };
+        let session = session_arc.lock().await;
+        if let Some(active_turn) = session.active_turn.as_ref()
+            && active_turn.turn_id == turn_id
+        {
+            return active_turn.clone();
+        }
+        if let Some(latest_turn) = session.latest_turn.as_ref()
+            && latest_turn.turn_id == turn_id
+        {
+            return latest_turn.clone();
+        }
+        fallback.clone()
     }
 
     async fn subscribe_connection_to_session(

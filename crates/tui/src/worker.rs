@@ -637,9 +637,9 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
 }
 
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
-    // Only tool lifecycle items need special handling here; other item kinds are
-    // intentionally ignored because they are either streamed separately or not
-    // shown in the TUI transcript.
+    // Tool lifecycle items and plan completions need special handling here; other
+    // item kinds are intentionally ignored because they are streamed separately
+    // or not shown in the TUI transcript.
     match payload.item {
         ItemEnvelope {
             item_kind: ItemKind::ToolCall,
@@ -686,6 +686,23 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 is_error,
                 truncated: false,
             });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::Plan,
+            payload,
+            ..
+        } => {
+            let tool_use_id = payload
+                .get("tool_use_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let text = payload
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let _ = event_tx.send(WorkerEvent::PlanUpdated { tool_use_id, text });
         }
         _ => {}
     }

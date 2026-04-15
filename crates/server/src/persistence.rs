@@ -307,10 +307,12 @@ impl ReplayState {
 
         let mut replayed_messages = self.messages;
         let mut replayed_history_items = self.history_items;
+        let mut tool_names_by_id = HashMap::new();
         for pending_item in ordered_items {
             apply_turn_item(
                 &mut replayed_messages,
                 &mut replayed_history_items,
+                &mut tool_names_by_id,
                 pending_item.turn_item,
             );
         }
@@ -399,9 +401,10 @@ struct ReplayHistoryItem {
 fn apply_turn_item(
     messages: &mut Vec<Message>,
     history_items: &mut Vec<crate::SessionHistoryItem>,
+    tool_names_by_id: &mut HashMap<String, String>,
     item: TurnItem,
 ) {
-    if let Some(history_item) = history_item_from_turn_item(&item) {
+    if let Some(history_item) = replay_history_item_from_turn_item(&item, tool_names_by_id) {
         history_items.push(history_item);
     }
     match item {
@@ -415,25 +418,28 @@ fn apply_turn_item(
             tool_call_id,
             tool_name,
             input,
-        }) => match messages.last_mut() {
-            Some(message) if message.role == Role::Assistant => {
-                message.content.push(ContentBlock::ToolUse {
-                    id: tool_call_id,
-                    name: tool_name,
-                    input,
-                });
-            }
-            _ => {
-                messages.push(Message {
-                    role: Role::Assistant,
-                    content: vec![ContentBlock::ToolUse {
+        }) => {
+            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
+            match messages.last_mut() {
+                Some(message) if message.role == Role::Assistant => {
+                    message.content.push(ContentBlock::ToolUse {
                         id: tool_call_id,
                         name: tool_name,
                         input,
-                    }],
-                });
+                    });
+                }
+                _ => {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: tool_call_id,
+                            name: tool_name,
+                            input,
+                        }],
+                    });
+                }
             }
-        },
+        }
         TurnItem::ToolResult(ToolResultItem {
             tool_call_id,
             output,
@@ -469,17 +475,39 @@ fn apply_turn_item(
                 }
             }
         }
-        TurnItem::Plan(TextItem { text })
-        | TurnItem::Reasoning(TextItem { text })
+        TurnItem::Reasoning(TextItem { text })
         | TurnItem::WebSearch(TextItem { text })
         | TurnItem::ImageGeneration(TextItem { text })
         | TurnItem::ContextCompaction(TextItem { text })
         | TurnItem::HookPrompt(TextItem { text }) => {
             messages.push(Message::assistant_text(text));
         }
+        // Plan items are replay-visible transcript data, but they are not part of the
+        // provider-facing tool-call/result conversation state used for subsequent turns.
+        TurnItem::Plan(_) => {}
         TurnItem::ToolProgress(_)
         | TurnItem::ApprovalRequest(_)
         | TurnItem::ApprovalDecision(_) => {}
+    }
+}
+
+fn replay_history_item_from_turn_item(
+    item: &TurnItem,
+    tool_names_by_id: &HashMap<String, String>,
+) -> Option<crate::SessionHistoryItem> {
+    match item {
+        TurnItem::ToolResult(ToolResultItem {
+            tool_call_id,
+            is_error,
+            ..
+        }) if matches!(
+            tool_names_by_id.get(tool_call_id).map(String::as_str),
+            Some("update_plan")
+        ) && !is_error =>
+        {
+            None
+        }
+        other => history_item_from_turn_item(other),
     }
 }
 
@@ -616,6 +644,27 @@ pub(crate) fn build_item_record(
     turn_status: Option<TurnStatus>,
     worklog: Option<Worklog>,
 ) -> ItemRecord {
+    build_item_record_with_output_items(
+        session_id,
+        turn_id,
+        item_id,
+        seq,
+        vec![item],
+        turn_status,
+        worklog,
+    )
+}
+
+/// Creates one canonical persisted item record from normalized output payloads.
+pub(crate) fn build_item_record_with_output_items(
+    session_id: SessionId,
+    turn_id: TurnId,
+    item_id: clawcr_core::ItemId,
+    seq: u64,
+    output_items: Vec<TurnItem>,
+    turn_status: Option<TurnStatus>,
+    worklog: Option<Worklog>,
+) -> ItemRecord {
     ItemRecord {
         id: item_id,
         session_id,
@@ -626,7 +675,7 @@ pub(crate) fn build_item_record(
         turn_status,
         sibling_turn_ids: Vec::new(),
         input_items: Vec::new(),
-        output_items: vec![item],
+        output_items,
         worklog,
         error: None,
         schema_version: 1,

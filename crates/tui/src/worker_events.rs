@@ -138,6 +138,29 @@ impl TuiApp {
                     "Tool completed".to_string()
                 };
             }
+            WorkerEvent::PlanUpdated { tool_use_id, text } => {
+                self.close_inline_assistant_stream();
+                self.pending_tool_items.remove(&tool_use_id);
+                self.transcript.push(TranscriptItem::new(
+                    TranscriptItemKind::Assistant,
+                    String::new(),
+                    text.clone(),
+                ));
+                if self.follow_output {
+                    self.scroll = 0;
+                }
+                if self.inline_mode {
+                    self.emit_inline_item(&TranscriptItem::new(
+                        TranscriptItemKind::Assistant,
+                        String::new(),
+                        text,
+                    ));
+                }
+                if self.busy {
+                    self.show_turn_status_line("Thinking");
+                }
+                self.status_message = "Plan updated".to_string();
+            }
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,

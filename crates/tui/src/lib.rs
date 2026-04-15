@@ -20,4 +20,7 @@ pub use events::SavedModelEntry;
 pub use terminal::TerminalMode;
 
 #[cfg(test)]
+mod plan_tests;
+
+#[cfg(test)]
 mod tests;

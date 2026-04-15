@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -487,21 +488,34 @@ pub async fn query(
         };
 
         let results = orchestrator.execute_batch(&tool_calls, &tool_ctx).await;
+        let tool_names_by_id: HashMap<_, _> = tool_calls
+            .iter()
+            .map(|tool_call| (tool_call.id.clone(), tool_call.name.clone()))
+            .collect();
 
         // Build tool result message (user role, per Anthropic API convention)
-        // 1.4: Apply micro-compact to large tool results
+        // 1.4: Apply micro-compact to large tool results, except for successful
+        // canonical plan updates that become first-class plan items downstream.
         let result_content: Vec<ContentBlock> = results
             .into_iter()
             .map(|r| {
-                let compacted_content = micro_compact(r.output.content.clone());
+                let content = if matches!(
+                    tool_names_by_id.get(&r.tool_use_id).map(String::as_str),
+                    Some("update_plan")
+                ) && !r.output.is_error
+                {
+                    r.output.content.clone()
+                } else {
+                    micro_compact(r.output.content.clone())
+                };
                 emit(QueryEvent::ToolResult {
                     tool_use_id: r.tool_use_id.clone(),
-                    content: compacted_content.clone(),
+                    content: content.clone(),
                     is_error: r.output.is_error,
                 });
                 ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
-                    content: compacted_content,
+                    content,
                     is_error: r.output.is_error,
                 }
             })

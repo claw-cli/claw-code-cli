@@ -94,6 +94,13 @@ pub(crate) enum WorkerEvent {
         /// Whether the preview was truncated for display.
         truncated: bool,
     },
+    /// A plan update completed.
+    PlanUpdated {
+        /// Stable identifier used to match the corresponding tool call.
+        tool_use_id: String,
+        /// Canonical plan text shown in the transcript.
+        text: String,
+    },
     /// Live usage update for the active turn.
     UsageUpdated {
         /// Total input tokens accumulated in the session.
