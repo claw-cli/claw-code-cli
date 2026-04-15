@@ -10,6 +10,7 @@ mod session;
 mod thinking;
 mod truncation;
 mod turn;
+mod user_input;
 
 pub use approval::*;
 pub use connection::*;
@@ -23,3 +24,4 @@ pub use session::*;
 pub use thinking::*;
 pub use truncation::*;
 pub use turn::*;
+pub use user_input::*;

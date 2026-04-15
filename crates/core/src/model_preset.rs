@@ -15,10 +15,9 @@
 //! - turn execution should consume `Model`, not `ModelPreset`
 //! - loading policy and catalog access live in `model_catalog.rs`; this file only defines the raw shape
 //!
-use clawcr_protocol::ProviderFamily;
 use clawcr_protocol::{
-    InputModality, Model, ReasoningEffort, ThinkingCapability, ThinkingImplementation,
-    TruncationPolicyConfig,
+    InputModality, Model, ProviderFamily, ReasoningEffort, ThinkingCapability,
+    ThinkingImplementation, TruncationPolicyConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +29,13 @@ pub struct ModelPreset {
     pub slug: String,
     /// Human-readable display name shown in the UI. such as `claude-sonnet-4.6`
     pub display_name: String,
-    /// Provider family that serves this model.
-    pub provider_family: ProviderFamily,
+    /// Provider selection that serves this model.
+    #[serde(
+        default,
+        alias = "provider_family",
+        deserialize_with = "clawcr_protocol::deserialize_provider"
+    )]
+    pub provider: ProviderFamily,
     /// Optional short description of the model.
     #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub description: Option<String>,
@@ -89,7 +93,7 @@ impl Default for ModelPreset {
         Self {
             slug: String::new(),
             display_name: String::new(),
-            provider_family: ProviderFamily::OpenAI,
+            provider: ProviderFamily::openai(),
             description: None,
             thinking_capability: ThinkingCapability::Disabled,
             default_reasoning_effort: Some(ReasoningEffort::default()),
@@ -115,7 +119,7 @@ impl From<ModelPreset> for Model {
         Self {
             slug: value.slug,
             display_name: value.display_name,
-            provider_family: value.provider_family,
+            provider: value.provider,
             description: value.description,
             thinking_capability: value.thinking_capability,
             default_reasoning_effort: value.default_reasoning_effort,

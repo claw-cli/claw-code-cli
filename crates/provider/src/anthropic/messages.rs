@@ -516,7 +516,7 @@ impl ModelProviderSDK for AnthropicProvider {
 #[async_trait]
 impl ProviderAdapter for AnthropicProvider {
     fn family(&self) -> ProviderFamily {
-        ProviderFamily::Anthropic
+        ProviderFamily::anthropic()
     }
 
     fn capabilities(&self, _model: &str) -> ProviderCapabilities {

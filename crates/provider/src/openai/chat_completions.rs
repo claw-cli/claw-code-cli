@@ -1037,7 +1037,7 @@ impl ModelProviderSDK for OpenAIProvider {
 #[async_trait]
 impl ProviderAdapter for OpenAIProvider {
     fn family(&self) -> ProviderFamily {
-        ProviderFamily::OpenAI
+        ProviderFamily::openai()
     }
 
     fn capabilities(&self, model: &str) -> ProviderCapabilities {

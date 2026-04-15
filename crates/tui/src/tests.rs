@@ -19,7 +19,7 @@ use crate::{
 fn test_app() -> TuiApp {
     TuiApp {
         model: "test-model".to_string(),
-        provider: ProviderFamily::Anthropic,
+        provider: ProviderFamily::anthropic(),
         cwd: PathBuf::from("."),
         transcript: Vec::new(),
         input: InputBuffer::new(),
@@ -38,7 +38,7 @@ fn test_app() -> TuiApp {
         model_catalog: PresetModelCatalog::new(vec![Model {
             slug: "test-model".to_string(),
             display_name: "Test Model".to_string(),
-            provider_family: ProviderFamily::Anthropic,
+            provider: ProviderFamily::anthropic(),
             thinking_capability: clawcr_core::ThinkingCapability::Toggle,
             ..Model::default()
         }]),
@@ -655,14 +655,14 @@ async fn onboarding_model_picker_enter_on_builtin_row_prompts_for_connection() {
     app.show_model_onboarding = true;
     app.saved_models = vec![SavedModelEntry {
         model: "existing-model".to_string(),
-        provider: ProviderFamily::Anthropic,
+        provider: ProviderFamily::anthropic(),
         base_url: Some("https://example.invalid/v1".to_string()),
         api_key: Some("secret".to_string()),
     }];
     app.model_catalog = PresetModelCatalog::new(vec![Model {
         slug: "new-anthropic-model".to_string(),
         display_name: "New Anthropic Model".to_string(),
-        provider_family: ProviderFamily::Anthropic,
+        provider: ProviderFamily::anthropic(),
         description: Some("test model".to_string()),
         ..Model::default()
     }]);

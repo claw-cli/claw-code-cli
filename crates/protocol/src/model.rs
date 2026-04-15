@@ -121,23 +121,75 @@ impl Default for InputModality {
     }
 }
 
-/// High-level provider families supported by the provider layer.
+/// OpenAI-family API surfaces supported by the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiApi {
+    ChatCompletions,
+    Responses,
+}
+
+impl Default for OpenAiApi {
+    fn default() -> Self {
+        OpenAiApi::ChatCompletions
+    }
+}
+
+/// Anthropic-family API surfaces supported by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicApi {
+    Messages,
+}
+
+/// Provider identity plus its selected wire API.
+impl Default for AnthropicApi {
+    fn default() -> Self {
+        AnthropicApi::Messages
+    }
+}
+
+/// Provider identity plus its selected wire API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "family", rename_all = "lowercase")]
 pub enum ProviderFamily {
-    /// OpenAI chat completions, Responses, and OpenAI-compatible vendors.
-    OpenAI,
-    /// Anthropic Messages API and Anthropic-compatible vendors.
-    Anthropic,
+    Openai {
+        #[serde(default)]
+        api: OpenAiApi,
+    },
+    Anthropic {
+        #[serde(default)]
+        api: AnthropicApi,
+    },
 }
 
 impl ProviderFamily {
-    /// Returns the stable wire label for this provider family.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenAI => "openai",
-            Self::Anthropic => "anthropic",
+    /// Creates the default OpenAI provider selection.
+    pub fn openai() -> Self {
+        Self::Openai {
+            api: OpenAiApi::default(),
         }
+    }
+
+    /// Creates the default Anthropic provider selection.
+    pub fn anthropic() -> Self {
+        Self::Anthropic {
+            api: AnthropicApi::default(),
+        }
+    }
+
+    /// Returns the stable wire label for this provider family.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Openai { .. } => "openai",
+            Self::Anthropic { .. } => "anthropic",
+        }
+    }
+}
+
+impl Default for ProviderFamily {
+    fn default() -> Self {
+        Self::openai()
     }
 }
 
@@ -147,8 +199,8 @@ impl fmt::Display for ProviderFamily {
     }
 }
 
-impl From<ProviderFamily> for &'static str {
-    fn from(value: ProviderFamily) -> Self {
+impl From<&ProviderFamily> for &'static str {
+    fn from(value: &ProviderFamily) -> Self {
         value.as_str()
     }
 }
@@ -161,8 +213,13 @@ pub struct Model {
     pub slug: String,
     /// Human-readable display name shown in the UI. such as `claude-sonnet-4.6`
     pub display_name: String,
-    /// Provider family that serves this model.
-    pub provider_family: ProviderFamily,
+    /// Provider selection that serves this model.
+    #[serde(
+        default,
+        alias = "provider_family",
+        deserialize_with = "deserialize_provider"
+    )]
+    pub provider: ProviderFamily,
     /// Optional short description of the model.
     pub description: Option<String>,
     /// Thinking control available for this model.
@@ -198,7 +255,7 @@ impl Default for Model {
         Self {
             slug: String::new(),
             display_name: String::new(),
-            provider_family: ProviderFamily::OpenAI,
+            provider: ProviderFamily::openai(),
             description: None,
             thinking_capability: ThinkingCapability::Disabled,
             default_reasoning_effort: Some(ReasoningEffort::default()),
@@ -218,6 +275,10 @@ impl Default for Model {
 }
 
 impl Model {
+    pub fn provider_family(&self) -> ProviderFamily {
+        self.provider.clone()
+    }
+
     pub fn reasoning_effort_options(&self) -> Vec<ReasoningEffortPreset> {
         match &self.thinking_capability {
             ThinkingCapability::Levels(levels) => levels
@@ -350,6 +411,23 @@ impl Model {
     }
 }
 
+pub fn deserialize_provider<'de, D>(deserializer: D) -> Result<ProviderFamily, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "openai" => Ok(ProviderFamily::openai()),
+            "anthropic" => Ok(ProviderFamily::anthropic()),
+            other => Err(serde::de::Error::custom(format!(
+                "unsupported provider family `{other}`"
+            ))),
+        },
+        other => serde_json::from_value(other).map_err(serde::de::Error::custom),
+    }
+}
+
 /// Provides read-only access to resolved runtime model definitions.
 pub trait ModelCatalog: Send + Sync {
     fn list_visible(&self) -> Vec<&Model>;
@@ -413,7 +491,7 @@ mod tests {
         Model {
             slug: slug.into(),
             display_name: slug.into(),
-            provider_family: ProviderFamily::Anthropic,
+            provider: ProviderFamily::anthropic(),
             description: None,
             thinking_capability: ThinkingCapability::Disabled,
             default_reasoning_effort: Some(ReasoningEffort::Medium),

@@ -110,7 +110,7 @@ impl TuiApp {
                     .map(|model| ModelListEntry {
                         slug: model.slug.clone(),
                         display_name: model.display_name.clone(),
-                        provider: model.provider_family,
+                        provider: model.provider_family(),
                         description: model.description.clone(),
                         is_current: model.slug == self.model,
                         is_builtin: true,
@@ -165,7 +165,7 @@ impl TuiApp {
             entries.push(ModelListEntry {
                 slug: model.slug.clone(),
                 display_name: model.display_name.clone(),
-                provider: model.provider_family,
+                provider: model.provider_family(),
                 description: model.description.clone(),
                 is_current: model.slug == self.model,
                 is_builtin: true,
@@ -251,7 +251,7 @@ impl TuiApp {
             return entry.provider;
         }
         if let Some(entry) = self.model_catalog.get(model) {
-            return entry.provider_family;
+            return entry.provider_family();
         }
         self.provider
     }

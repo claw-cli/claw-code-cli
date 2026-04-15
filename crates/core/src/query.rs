@@ -3,11 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clawcr_protocol::{
-    ModelRequest, ResolvedThinkingRequest, ResponseContent, ResponseExtra, SamplingControls,
-    StopReason, StreamEvent,
+    ModelRequest, RequestContent, RequestMessage, ResolvedThinkingRequest, ResponseContent,
+    ResponseExtra, SamplingControls, StopReason, StreamEvent, UserInput,
 };
 use futures::StreamExt;
-use serde_json::json;
 use tokio::time::sleep;
 use tracing::{debug, info, info_span, warn};
 
@@ -79,6 +78,7 @@ enum ErrorClass {
 
 fn classify_error(e: &anyhow::Error) -> ErrorClass {
     let msg = e.to_string().to_lowercase();
+    // TODO: Expand the error of ContextTooLong
     if msg.contains("context_too_long") {
         ErrorClass::ContextTooLong
     } else if msg.contains("401")
@@ -210,7 +210,12 @@ fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
         if let Ok(content) = std::fs::read_to_string(path) {
             let content = content.trim().to_string();
             if !content.is_empty() {
-                sections.push(content);
+                sections.push(format!(
+                    "# {} instructions for {}\n\n <INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+                    file_name,
+                    cwd.display(),
+                    content,
+                ));
             }
         }
     }
@@ -222,16 +227,10 @@ fn load_prompt_md(cwd: &std::path::Path) -> Option<String> {
     }
 }
 
-fn build_system_prompt(base_instructions: &str, memory: &Option<String>, cwd: &Path) -> String {
+fn build_system_prompt(base_instructions: &str) -> String {
     let mut sections = Vec::new();
     if !base_instructions.is_empty() {
-        sections.push(base_instructions.to_string());
-    }
-    sections.push(build_environment_context(cwd));
-    if let Some(mem) = memory {
-        if !mem.is_empty() {
-            sections.push(mem.clone());
-        }
+        sections.push(format!("{}", base_instructions.to_string()));
     }
     sections.join("\n\n")
 }
@@ -240,18 +239,58 @@ fn build_environment_context(cwd: &Path) -> String {
     let shell = std::env::var("SHELL")
         .ok()
         .or_else(|| std::env::var("COMSPEC").ok())
-        .unwrap_or_default();
-    let payload = json!({
-        "OS": std::env::consts::OS,
-        "Arch": std::env::consts::ARCH,
-        "Family": std::env::consts::FAMILY,
-        "CWD": cwd.display().to_string(),
-        "Shell": shell,
-    });
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let shell = shell
+        .rsplit(std::path::MAIN_SEPARATOR)
+        .next()
+        .unwrap_or(&shell)
+        .to_lowercase();
+
+    let current_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+
     format!(
-        "Environment context (read only):\n```json\n{}\n```",
-        serde_json::to_string_pretty(&payload).expect("environment context should serialize")
+        "<environment_context>\n  <cwd>{}</cwd>\n  <shell>{}</shell>\n  <current_date>{}</current_date>\n  <timezone>{}</timezone>\n</environment_context>",
+        cwd.display(),
+        shell,
+        current_date,
+        timezone,
     )
+}
+
+fn build_prefetched_user_inputs(cwd: &Path) -> Vec<UserInput> {
+    let mut inputs = Vec::new();
+    if let Some(text) = load_prompt_md(cwd) {
+        inputs.push(UserInput::Text {
+            text,
+            text_elements: Vec::new(),
+        });
+    }
+    inputs.push(UserInput::Text {
+        text: build_environment_context(cwd),
+        text_elements: Vec::new(),
+    });
+    inputs
+}
+
+fn append_prefetched_user_inputs(messages: &mut Vec<RequestMessage>, user_inputs: &[UserInput]) {
+    messages.splice(
+        0..0,
+        user_inputs.iter().filter_map(|input| match input {
+            UserInput::Text { text, .. } if !text.trim().is_empty() => Some(RequestMessage {
+                role: Role::User.as_str().to_string(),
+                content: vec![RequestContent::Text { text: text.clone() }],
+            }),
+            UserInput::Text { .. }
+            | UserInput::Image { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Skill { .. }
+            | UserInput::Mention { .. }
+            | _ => None,
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -287,20 +326,22 @@ pub async fn query(
     orchestrator: &ToolOrchestrator,
     on_event: Option<EventCallback>,
 ) -> Result<(), AgentError> {
+    // emit is the event callback function.
     let emit = |event: QueryEvent| {
         if let Some(ref cb) = on_event {
             cb(event);
         }
     };
 
-    // 1.9: Memory prefetch — load CLAUDE.md/AGETNS.md once before the loop
-    let memory_content = load_prompt_md(&session.cwd);
+    // Memory prefetch — load workspace instructions and environment context once
+    // before the loop and inject them as leading user inputs.
+    let prefetched_user_inputs = build_prefetched_user_inputs(&session.cwd);
 
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
 
     loop {
-        // 1.3 + 1.7: Check token budget and compact before building the request
+        // Check token budget and compact before building the request
         if session.last_input_tokens > 0
             && session
                 .config
@@ -323,11 +364,8 @@ pub async fn query(
         info!("starting turn");
 
         // Build model request
-        let system = build_system_prompt(
-            &turn_config.model.base_instructions,
-            &memory_content,
-            &session.cwd,
-        );
+        // TODO: Should remove `memory_content` from system prompt
+        let system = build_system_prompt(&turn_config.model.base_instructions);
 
         // resolve thinking request parameter
         let ResolvedThinkingRequest {
@@ -339,6 +377,9 @@ pub async fn query(
             .model
             .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
 
+        let mut messages = session.to_request_messages();
+        append_prefetched_user_inputs(&mut messages, &prefetched_user_inputs);
+
         let request = ModelRequest {
             model: request_model,
             system: if system.is_empty() {
@@ -346,7 +387,7 @@ pub async fn query(
             } else {
                 Some(system)
             },
-            messages: session.to_request_messages(),
+            messages,
             max_tokens: turn_config
                 .model
                 .max_tokens
@@ -370,7 +411,7 @@ pub async fn query(
             "built model request"
         );
 
-        // 3.2: Stream with error classification
+        // Stream with error classification
         let stream_result = provider.completion_stream(request).await;
 
         let mut stream = match stream_result {
@@ -389,7 +430,7 @@ pub async fn query(
                 );
                 match classify_error(&e) {
                     ErrorClass::ContextTooLong => {
-                        // 1.5: Compact history and retry once
+                        // Compact history and retry once
                         if context_compacted {
                             return Err(AgentError::ContextTooLong);
                         }
@@ -428,6 +469,8 @@ pub async fn query(
             }
         };
 
+        // HTTP return ok, then processing Server Sent Event
+
         let mut assistant_text = String::new();
         let mut reasoning_text = String::new();
         let mut tool_uses: Vec<(String, String, serde_json::Value, String, bool)> = Vec::new();
@@ -461,7 +504,7 @@ pub async fn query(
                     stop_reason = response.stop_reason.clone();
                     final_response = Some(response.clone());
 
-                    // 1.11: Accumulate all usage counters at completion time.
+                    // Accumulate all usage counters at completion time.
                     session.total_input_tokens += response.usage.input_tokens;
                     session.total_output_tokens += response.usage.output_tokens;
                     session.total_cache_creation_tokens +=
@@ -580,7 +623,7 @@ pub async fn query(
 
         // If no tool calls, check stop reason
         if tool_calls.is_empty() {
-            // 1.6: MaxOutputTokens auto-continue
+            // MaxOutputTokens auto-continue
             if stop_reason == Some(StopReason::MaxTokens) {
                 debug!("max_tokens reached — injecting continuation prompt");
                 session.push_message(Message::user("Please continue from where you left off."));
@@ -606,7 +649,7 @@ pub async fn query(
         let results = orchestrator.execute_batch(&tool_calls, &tool_ctx).await;
 
         // Build tool result message (user role, per Anthropic API convention)
-        // 1.4: Apply micro-compact to large tool results
+        // Apply micro-compact to large tool results
         let result_content: Vec<ContentBlock> = results
             .into_iter()
             .map(|r| {
@@ -708,8 +751,8 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use clawcr_protocol::{
-        ModelRequest, ModelResponse, ProviderFamily, ResponseContent, ResponseExtra,
-        ResponseMetadata, StopReason, StreamEvent, Usage,
+        ModelRequest, ModelResponse, ResponseContent, ResponseExtra, ResponseMetadata, StopReason,
+        StreamEvent, Usage,
     };
     use clawcr_safety::legacy_permissions::PermissionMode;
     use clawcr_tools::{Tool, ToolOrchestrator, ToolOutput, ToolRegistry};
@@ -719,9 +762,9 @@ mod tests {
 
     use super::{QueryEvent, query, test_model_connection};
     use crate::{
-        ContentBlock, Message, Model, ReasoningEffort, Role, SessionConfig, SessionState,
-        ThinkingCapability, ThinkingImplementation, ThinkingVariant, ThinkingVariantConfig,
-        TruncationMode, TruncationPolicyConfig, TurnConfig,
+        ContentBlock, Message, Model, ProviderFamily, ReasoningEffort, Role, SessionConfig,
+        SessionState, ThinkingCapability, ThinkingImplementation, ThinkingVariant,
+        ThinkingVariantConfig, TruncationMode, TruncationPolicyConfig, TurnConfig,
     };
 
     struct SingleToolUseProvider {
@@ -790,21 +833,6 @@ mod tests {
         fn name(&self) -> &str {
             "test-provider"
         }
-    }
-
-    #[test]
-    fn system_prompt_includes_environment_context() {
-        let prompt = super::build_system_prompt(
-            "base instructions",
-            &Some("memory".to_string()),
-            std::path::Path::new("/tmp/project"),
-        );
-
-        assert!(prompt.contains("base instructions"));
-        assert!(prompt.contains("Environment context (read only):"));
-        assert!(prompt.contains("\"OS\""));
-        assert!(prompt.contains("/tmp/project"));
-        assert!(prompt.contains("memory"));
     }
 
     struct MutatingTool;
@@ -944,7 +972,7 @@ mod tests {
         let model = Model {
             slug: "kimi-k2.5".into(),
             display_name: "Kimi K2.5".into(),
-            provider_family: ProviderFamily::OpenAI,
+            provider: ProviderFamily::openai(),
             description: None,
             thinking_capability: ThinkingCapability::Toggle,
             default_reasoning_effort: Some(ReasoningEffort::Medium),

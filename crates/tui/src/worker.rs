@@ -886,7 +886,7 @@ fn resolve_validation_model(provider: ProviderFamily, model: &str) -> Result<Mod
     }
     Ok(Model {
         slug: model.to_string(),
-        provider_family: provider,
+        provider: provider,
         ..Model::default()
     })
 }
@@ -897,14 +897,14 @@ fn build_validation_provider(
     api_key: Option<String>,
 ) -> Result<std::sync::Arc<dyn ModelProviderSDK>> {
     match provider {
-        ProviderFamily::Anthropic => {
+        ProviderFamily::Anthropic { .. } => {
             let api_key = api_key.context("anthropic provider requires an API key")?;
             let base_url = base_url.unwrap_or_else(|| "https://api.anthropic.com".to_string());
             Ok(std::sync::Arc::new(
                 AnthropicProvider::new(base_url).with_api_key(api_key),
             ))
         }
-        ProviderFamily::OpenAI => {
+        ProviderFamily::Openai { .. } => {
             let base_url = normalize_openai_base_url(
                 &base_url.unwrap_or_else(|| "https://api.openai.com".to_string()),
             );

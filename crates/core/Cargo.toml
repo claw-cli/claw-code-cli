@@ -27,6 +27,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 smol_str = { workspace = true }
+iana-time-zone = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
