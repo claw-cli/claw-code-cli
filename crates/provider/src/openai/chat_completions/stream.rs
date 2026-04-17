@@ -570,7 +570,7 @@ struct ChatCompletionStreamChunk {
     service_tier: Option<String>,
     #[serde(default)]
     system_fingerprint: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     choices: Vec<ChatCompletionStreamChoice>,
     #[serde(default)]
     usage: Option<OpenAICompletionUsage>,
