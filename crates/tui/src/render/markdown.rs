@@ -481,8 +481,7 @@ fn highlight_code_to_lines(code: &str, lang: &str) -> Vec<Line<'static>> {
 }
 
 fn syntect_style_to_ratatui(style: syntect::highlighting::Style) -> Style {
-    let mut converted = Style::default();
-    converted.fg = Some(Color::Rgb(
+    let mut converted = Style::new().fg(Color::Rgb(
         style.foreground.r,
         style.foreground.g,
         style.foreground.b,

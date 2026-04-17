@@ -642,9 +642,8 @@ fn select_hunk_anchor(hunk: &PatchHunk) -> Option<(usize, &str)> {
                     && best_anchor
                         .map(|(_, best_text): (usize, &str)| text.len() > best_text.len())
                         .unwrap_or(true)
+                    || best_anchor.is_none()
                 {
-                    best_anchor = Some(candidate);
-                } else if best_anchor.is_none() {
                     best_anchor = Some(candidate);
                 }
                 sequence_index += 1;

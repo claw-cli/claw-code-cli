@@ -75,7 +75,7 @@ pub fn load_builtin_model_presets() -> Result<Vec<ModelPreset>, PresetModelCatal
 /// Loads the built-in model list bundled with the crate.
 pub fn load_builtin_models() -> Result<Vec<Model>, PresetModelCatalogError> {
     let mut presets = load_builtin_model_presets()?;
-    presets.sort_by(|left, right| right.priority.cmp(&left.priority));
+    presets.sort_by_key(|right| std::cmp::Reverse(right.priority));
     Ok(presets.into_iter().map(Model::from).collect())
 }
 

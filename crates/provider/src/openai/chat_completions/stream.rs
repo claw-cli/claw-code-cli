@@ -51,11 +51,11 @@ use crate::text_normalization::{TaggedTextFragment, TaggedTextParser};
 ///    - logprobs: optional object
 ///      Log probability information for the choice.
 /// - created: number
-/// The Unix timestamp (in seconds) of when the chat completion was created. Each chunk has the same timestamp.
+///   The Unix timestamp (in seconds) of when the chat completion was created. Each chunk has the same timestamp.
 /// - model: string
-/// The model to generate the completion.
+///   The model to generate the completion.
 /// - object: "chat.completion.chunk"
-/// The object type, which is always chat.completion.chunk
+///   The object type, which is always chat.completion.chunk
 /// - service_tier: optional "auto" or "default" or "flex" or "scale" or "priority"
 /// - usage: optional CompletionUsage
 pub(super) async fn completion_stream(
@@ -135,10 +135,10 @@ impl ChatCompletionStreamState {
     fn apply_chunk(&mut self, chunk: ChatCompletionStreamChunk) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
-        if self.response_id.is_empty() {
-            if let Some(id) = chunk.id {
-                self.response_id = id;
-            }
+        if self.response_id.is_empty()
+            && let Some(id) = chunk.id
+        {
+            self.response_id = id;
         }
         if self.created.is_none() {
             self.created = chunk.created;

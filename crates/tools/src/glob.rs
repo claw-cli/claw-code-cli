@@ -77,7 +77,7 @@ impl Tool for GlobTool {
         }
 
         // Sort newest first
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         if entries.is_empty() {
             return Ok(ToolOutput::success("(no matches)"));

@@ -485,6 +485,67 @@ fn apply_turn_item(
     }
 }
 
+fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(root).with_context(|| format!("read dir {}", root.display()))? {
+        let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type for {}", path.display()))?;
+        if file_type.is_dir() {
+            collect_rollout_files(&path, files)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Creates one canonical persisted turn record from the transport-facing runtime state.
+pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
+    TurnRecord {
+        id: turn.turn_id,
+        session_id: turn.session_id,
+        sequence: turn.sequence,
+        started_at: turn.started_at,
+        completed_at: turn.completed_at,
+        status: turn.status.clone(),
+        model_slug: turn.model_slug.clone(),
+        input_token_estimate: None,
+        usage: turn.usage.clone(),
+        schema_version: 1,
+    }
+}
+
+/// Creates one canonical persisted item record from a normalized turn item payload.
+pub(crate) fn build_item_record(
+    session_id: SessionId,
+    turn_id: TurnId,
+    item_id: clawcr_core::ItemId,
+    seq: u64,
+    item: TurnItem,
+    turn_status: Option<TurnStatus>,
+    worklog: Option<Worklog>,
+) -> ItemRecord {
+    ItemRecord {
+        id: item_id,
+        session_id,
+        turn_id,
+        seq,
+        timestamp: Utc::now(),
+        attempt_placement: None,
+        turn_status,
+        sibling_turn_ids: Vec::new(),
+        input_items: Vec::new(),
+        output_items: vec![item],
+        worklog,
+        error: None,
+        schema_version: 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
@@ -571,66 +632,5 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(titles, vec!["assistant 1", "date"]);
-    }
-}
-
-fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in std::fs::read_dir(root).with_context(|| format!("read dir {}", root.display()))? {
-        let entry = entry.with_context(|| format!("read entry in {}", root.display()))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("read file type for {}", path.display()))?;
-        if file_type.is_dir() {
-            collect_rollout_files(&path, files)?;
-        } else if file_type.is_file()
-            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// Creates one canonical persisted turn record from the transport-facing runtime state.
-pub(crate) fn build_turn_record(turn: &TurnSummary) -> TurnRecord {
-    TurnRecord {
-        id: turn.turn_id,
-        session_id: turn.session_id,
-        sequence: turn.sequence,
-        started_at: turn.started_at,
-        completed_at: turn.completed_at,
-        status: turn.status.clone(),
-        model_slug: turn.model_slug.clone(),
-        input_token_estimate: None,
-        usage: turn.usage.clone(),
-        schema_version: 1,
-    }
-}
-
-/// Creates one canonical persisted item record from a normalized turn item payload.
-pub(crate) fn build_item_record(
-    session_id: SessionId,
-    turn_id: TurnId,
-    item_id: clawcr_core::ItemId,
-    seq: u64,
-    item: TurnItem,
-    turn_status: Option<TurnStatus>,
-    worklog: Option<Worklog>,
-) -> ItemRecord {
-    ItemRecord {
-        id: item_id,
-        session_id,
-        turn_id,
-        seq,
-        timestamp: Utc::now(),
-        attempt_placement: None,
-        turn_status,
-        sibling_turn_ids: Vec::new(),
-        input_items: Vec::new(),
-        output_items: vec![item],
-        worklog,
-        error: None,
-        schema_version: 1,
     }
 }

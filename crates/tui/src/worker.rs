@@ -1,4 +1,7 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use tokio::{
@@ -528,8 +531,8 @@ async fn run_worker_inner(
                         }
                     }
                     Some(OperationCommand::InterruptTurn) => {
-                        if let (Some(turn_id), Some(active_session_id)) = (active_turn_id, session_id) {
-                            if let Err(error) = client
+                        if let (Some(turn_id), Some(active_session_id)) = (active_turn_id, session_id)
+                            && let Err(error) = client
                                 .turn_interrupt(TurnInterruptParams {
                                     session_id: active_session_id,
                                     turn_id,
@@ -544,7 +547,6 @@ async fn run_worker_inner(
                                     total_output_tokens,
                                 });
                             }
-                        }
                     }
                     Some(OperationCommand::Shutdown) | None => {
                         break;
@@ -635,14 +637,13 @@ async fn run_worker_inner(
                                 }
                             }
                             "session/title/updated" => {
-                                if let ServerEvent::SessionTitleUpdated(payload) = event {
-                                    if let Some(title) = payload.session.title {
+                                if let ServerEvent::SessionTitleUpdated(payload) = event
+                                    && let Some(title) = payload.session.title {
                                         let _ = event_tx.send(WorkerEvent::SessionTitleUpdated {
                                             session_id: payload.session.session_id.to_string(),
                                             title,
                                         });
                                     }
-                                }
                             }
                             _ => {}
                         }
@@ -659,7 +660,7 @@ async fn run_worker_inner(
 
 async fn ensure_session_started(
     client: &mut StdioServerClient,
-    cwd: &PathBuf,
+    cwd: &Path,
     model: &str,
     session_id: &mut Option<SessionId>,
 ) -> Result<EnsureSessionOutcome> {
@@ -672,7 +673,7 @@ async fn ensure_session_started(
 
     let session = client
         .session_start(SessionStartParams {
-            cwd: cwd.clone(),
+            cwd: cwd.to_path_buf(),
             ephemeral: false,
             title: None,
             model: Some(model.to_string()),
@@ -686,13 +687,13 @@ async fn ensure_session_started(
 }
 
 async fn spawn_client(
-    cwd: &PathBuf,
+    cwd: &Path,
     env: Vec<(String, String)>,
     server_log_level: Option<String>,
 ) -> Result<StdioServerClient> {
     StdioServerClient::spawn(StdioServerClientConfig {
         program: std::env::current_exe().context("resolve current executable for server launch")?,
-        workspace_root: Some(cwd.clone()),
+        workspace_root: Some(cwd.to_path_buf()),
         env,
         args: server_log_level
             .into_iter()
@@ -850,22 +851,21 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
 
     while index < items.len() {
         let item = &items[index];
-        if item.kind == SessionHistoryItemKind::ToolCall {
-            if let Some(next) = items.get(index + 1) {
-                if matches!(
-                    next.kind,
-                    SessionHistoryItemKind::ToolResult | SessionHistoryItemKind::Error
-                ) {
-                    let merged = if next.kind == SessionHistoryItemKind::Error {
-                        TranscriptItem::tool_error(item.title.clone(), next.body.clone())
-                    } else {
-                        TranscriptItem::restored_tool_result(item.title.clone(), next.body.clone())
-                    };
-                    transcript.push(merged);
-                    index += 2;
-                    continue;
-                }
-            }
+        if item.kind == SessionHistoryItemKind::ToolCall
+            && let Some(next) = items.get(index + 1)
+            && matches!(
+                next.kind,
+                SessionHistoryItemKind::ToolResult | SessionHistoryItemKind::Error
+            )
+        {
+            let merged = if next.kind == SessionHistoryItemKind::Error {
+                TranscriptItem::tool_error(item.title.clone(), next.body.clone())
+            } else {
+                TranscriptItem::restored_tool_result(item.title.clone(), next.body.clone())
+            };
+            transcript.push(merged);
+            index += 2;
+            continue;
         }
 
         let kind = match item.kind {
@@ -1032,7 +1032,7 @@ fn resolve_validation_model(provider: ProviderFamily, model: &str) -> Result<Mod
     }
     Ok(Model {
         slug: model.to_string(),
-        provider: provider,
+        provider,
         ..Model::default()
     })
 }

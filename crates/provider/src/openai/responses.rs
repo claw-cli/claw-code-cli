@@ -131,27 +131,27 @@ fn build_input(request: &ModelRequest) -> Vec<Value> {
 fn build_input_message(role: OpenAIRole, content: &[RequestContent]) -> Value {
     let content = content
         .iter()
-        .filter_map(|block| match block {
-            RequestContent::Text { text } => Some(json!({
+        .map(|block| match block {
+            RequestContent::Text { text } => json!({
                 "type": "input_text",
                 "text": text,
-            })),
-            RequestContent::ToolUse { id, name, input } => Some(json!({
+            }),
+            RequestContent::ToolUse { id, name, input } => json!({
                 "type": "tool_call",
                 "id": id,
                 "name": name,
                 "input": input,
-            })),
+            }),
             RequestContent::ToolResult {
                 tool_use_id,
                 content,
                 is_error,
-            } => Some(json!({
+            } => json!({
                 "type": "function_call_output",
                 "call_id": tool_use_id,
                 "output": content,
                 "is_error": is_error,
-            })),
+            }),
         })
         .collect::<Vec<_>>();
 
@@ -442,8 +442,7 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                 if let Some(item) = chunk.get("item") {
                                     if let Some(reasoning_content) =
                                         item.get("reasoning_content").and_then(Value::as_str)
-                                    {
-                                        if !reasoning_content.is_empty() {
+                                        && !reasoning_content.is_empty() {
                                             if !reasoning_started {
                                                 reasoning_started = true;
                                                 yield StreamEvent::ReasoningStart { index: 1 };
@@ -454,7 +453,6 @@ impl ModelProviderSDK for OpenAIResponsesProvider {
                                                 text: reasoning_content.to_string(),
                                             };
                                         }
-                                    }
                                     if let Some(ResponseContent::ToolUse { id, name, input }) = parse_output_item(item).into_iter().next() {
                                         let key = id.clone();
                                         tool_calls.insert(key.clone(), (id.clone(), name.clone(), input.to_string()));

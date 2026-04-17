@@ -40,14 +40,23 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Server(args)) => run_server_process(args).await,
         Some(Command::Onboard) => {
-            run_agent(true, cli.no_alt_screen, cli.log_level.map(LogLevel::as_str), cli.model.as_deref()).await
+            run_agent(
+                true,
+                cli.no_alt_screen,
+                cli.log_level.map(LogLevel::as_str),
+                cli.model.as_deref(),
+            )
+            .await
         }
         Some(Command::Prompt { input }) => {
-            run_prompt(&input, cli.model.as_deref(), cli.log_level.map(LogLevel::as_str)).await
+            run_prompt(
+                &input,
+                cli.model.as_deref(),
+                cli.log_level.map(LogLevel::as_str),
+            )
+            .await
         }
-        Some(Command::Doctor) => {
-            run_doctor().await
-        }
+        Some(Command::Doctor) => run_doctor().await,
         None => {
             run_agent(
                 false,
@@ -142,7 +151,11 @@ impl LogLevel {
     }
 }
 
-async fn run_prompt(input: &str, model_override: Option<&str>, _log_level: Option<&str>) -> Result<()> {
+async fn run_prompt(
+    input: &str,
+    model_override: Option<&str>,
+    _log_level: Option<&str>,
+) -> Result<()> {
     use clawcr_core::{SessionConfig, SessionState, default_base_instructions};
     use clawcr_tools::{ToolOrchestrator, ToolRegistry};
 
@@ -156,10 +169,8 @@ async fn run_prompt(input: &str, model_override: Option<&str>, _log_level: Optio
     }
 
     let home_dir = find_clawcr_home()?;
-    let provider = clawcr_server::load_server_provider(
-        &home_dir.join("config.toml"),
-        Some(&resolved.model),
-    )?;
+    let provider =
+        clawcr_server::load_server_provider(&home_dir.join("config.toml"), Some(&resolved.model))?;
 
     let mut session_state = SessionState::new(SessionConfig::default(), cwd.clone());
     session_state.push_message(clawcr_core::Message::user(input.to_string()));
@@ -199,11 +210,16 @@ async fn run_prompt(input: &str, model_override: Option<&str>, _log_level: Optio
     match result {
         Ok(()) => {
             let reply = session_state.messages.iter().rev().find_map(|m| {
-                if m.role != clawcr_core::Role::Assistant { return None; }
-                m.content.iter().filter_map(|block| match block {
-                    clawcr_core::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                }).next()
+                if m.role != clawcr_core::Role::Assistant {
+                    return None;
+                }
+                m.content
+                    .iter()
+                    .filter_map(|block| match block {
+                        clawcr_core::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .next()
             });
             match reply {
                 Some(text) => println!("{}", text),
@@ -219,15 +235,15 @@ async fn run_prompt(input: &str, model_override: Option<&str>, _log_level: Optio
 }
 
 async fn run_doctor() -> Result<()> {
-    use std::process::Command;
     use colored::Colorize;
+    use std::process::Command;
 
     println!("{}", "=== Claw CR Doctor ===".bold());
     println!();
 
     let mut all_ok = true;
 
-    println!("{} {}", "✓".green().bold(), "Rust toolchain:");
+    println!("{} Rust toolchain:", "✓".green().bold());
     let rustc = Command::new("rustc").arg("--version").output();
     match rustc {
         Ok(output) => {
@@ -241,7 +257,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Config home (CLAWCR_HOME):");
+    println!("{} Config home (CLAWCR_HOME):", "✓".green().bold());
     match find_clawcr_home() {
         Ok(home) => {
             println!("  {}", home.display());
@@ -253,7 +269,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Config file:");
+    println!("{} Config file:", "✓".green().bold());
     if let Ok(home) = find_clawcr_home() {
         let config_path = home.join("config.toml");
         if config_path.exists() {
@@ -265,27 +281,33 @@ async fn run_doctor() -> Result<()> {
                 println!("  {} api_key or base_url missing", "!".yellow());
                 all_ok = false;
             }
-            let model_line = content.lines()
-                .find(|l| l.starts_with("model"));
+            let model_line = content.lines().find(|l| l.starts_with("model"));
             if let Some(line) = model_line {
                 println!("  default model: {}", line.trim());
             } else {
                 println!("  {} no default model set", "!".yellow());
             }
         } else {
-            println!("  {} not found at {}", "missing".yellow(), config_path.display());
+            println!(
+                "  {} not found at {}",
+                "missing".yellow(),
+                config_path.display()
+            );
             println!("  Run `clawcr onboard` to create it.");
             all_ok = false;
         }
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Provider resolution:");
+    println!("{} Provider resolution:", "✓".green().bold());
     match resolve_provider_settings() {
         Ok(resolved) => {
             println!("  provider:   {}", resolved.provider_id);
             println!("  model:      {}", resolved.model);
-            println!("  base_url:   {}", resolved.base_url.unwrap_or("default".into()));
+            println!(
+                "  base_url:   {}",
+                resolved.base_url.unwrap_or("default".into())
+            );
             println!("  wire_api:   {:?}", resolved.wire_api);
             if resolved.api_key.is_some() {
                 println!("  api_key:    {} (set)", "✓".green());
@@ -301,7 +323,7 @@ async fn run_doctor() -> Result<()> {
     }
     println!();
 
-    println!("{} {}", "✓".green().bold(), "Model catalog:");
+    println!("{} Model catalog:", "✓".green().bold());
     match clawcr_core::PresetModelCatalog::load() {
         Ok(catalog) => {
             let count = catalog.into_inner().len();
@@ -317,7 +339,10 @@ async fn run_doctor() -> Result<()> {
     if all_ok {
         println!("{}", "All checks passed. Ready to use!".green().bold());
     } else {
-        println!("{}", "Some checks failed. See above for details.".yellow().bold());
+        println!(
+            "{}",
+            "Some checks failed. See above for details.".yellow().bold()
+        );
         std::process::exit(1);
     }
 
@@ -356,6 +381,7 @@ mod tests {
     fn cli_logging_overrides_is_empty_without_log_level() {
         let cli = Cli {
             command: None,
+            model: None,
             no_alt_screen: false,
             log_level: None,
         };
@@ -370,6 +396,7 @@ mod tests {
     fn cli_logging_overrides_sets_logging_level() {
         let cli = Cli {
             command: None,
+            model: None,
             no_alt_screen: false,
             log_level: Some(LogLevel::Debug),
         };

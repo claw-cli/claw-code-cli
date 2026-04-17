@@ -56,12 +56,12 @@ impl Tool for ReadTool {
         let offset = input["offset"].as_u64().map(|value| value as usize);
         let limit = input["limit"].as_u64().map(|value| value as usize);
 
-        if let Some(offset) = offset {
-            if offset < 1 {
-                return Ok(ToolOutput::error(
-                    "offset must be greater than or equal to 1",
-                ));
-            }
+        if let Some(offset) = offset
+            && offset < 1
+        {
+            return Ok(ToolOutput::error(
+                "offset must be greater than or equal to 1",
+            ));
         }
 
         if !Path::new(&filepath).is_absolute() {
@@ -97,7 +97,7 @@ fn read_directory(path: &Path, limit: usize, offset: usize) -> anyhow::Result<To
             if is_dir { format!("{name}/") } else { name }
         })
         .collect::<Vec<_>>();
-    items.sort_unstable_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    items.sort_unstable_by_key(|a| a.to_lowercase());
 
     let start = offset.saturating_sub(1);
     let sliced = items
@@ -408,7 +408,7 @@ mod tests {
     fn is_binary_file_detects_null_bytes() {
         let dir = create_temp_dir("binary");
         let path = dir.join("payload.bin");
-        fs::write(&path, &[0u8, 1, 2]).unwrap();
+        fs::write(&path, [0u8, 1, 2]).unwrap();
 
         assert!(is_binary_file(&path).unwrap());
     }

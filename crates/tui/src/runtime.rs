@@ -368,25 +368,19 @@ impl TuiApp {
                     self.scroll = self.scroll.saturating_add(1);
                 }
             }
-            KeyCode::PageUp => {
-                if !self.inline_mode {
-                    if self.follow_output {
-                        self.scroll =
-                            render::get_max_scroll(self, self.transcript_area(terminal_area));
-                        self.follow_output = false;
-                    }
-                    self.scroll = self.scroll.saturating_sub(10);
+            KeyCode::PageUp if !self.inline_mode => {
+                if self.follow_output {
+                    self.scroll = render::get_max_scroll(self, self.transcript_area(terminal_area));
+                    self.follow_output = false;
                 }
+                self.scroll = self.scroll.saturating_sub(10);
             }
-            KeyCode::PageDown => {
-                if !self.inline_mode {
-                    if self.follow_output {
-                        self.scroll =
-                            render::get_max_scroll(self, self.transcript_area(terminal_area));
-                        self.follow_output = false;
-                    }
-                    self.scroll = self.scroll.saturating_add(10);
+            KeyCode::PageDown if !self.inline_mode => {
+                if self.follow_output {
+                    self.scroll = render::get_max_scroll(self, self.transcript_area(terminal_area));
+                    self.follow_output = false;
                 }
+                self.scroll = self.scroll.saturating_add(10);
             }
             KeyCode::Esc => {
                 self.flush_pending_paste_burst(true);
@@ -489,8 +483,9 @@ impl TuiApp {
 
         if self.onboarding_base_url_pending {
             let base_url = prompt.trim();
-            if !base_url.is_empty()
-                && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+            if !(base_url.is_empty()
+                || base_url.starts_with("http://")
+                || base_url.starts_with("https://"))
             {
                 self.status_message = "Base URL must start with http:// or https://".to_string();
                 self.onboarding_prompt = Some("base url".to_string());
@@ -538,7 +533,7 @@ impl TuiApp {
                 self.onboarding_selected_api_key
                     .as_deref()
                     .map(super::worker_events::mask_secret)
-                    .unwrap_or_else(String::new)
+                    .unwrap_or_default()
             ));
             let Some(model) = self.onboarding_selected_model.clone() else {
                 anyhow::bail!("onboarding model selection was lost before validation");

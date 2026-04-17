@@ -282,14 +282,14 @@ impl ServerRuntime {
             total_output_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
-        if let Some(record) = &record {
-            if let Err(error) = self.rollout_store.append_session_meta(record) {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to persist session metadata: {error}"),
-                );
-            }
+        if let Some(record) = &record
+            && let Err(error) = self.rollout_store.append_session_meta(record)
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to persist session metadata: {error}"),
+            );
         }
         let core_session = self.deps.new_session_state(session_id, params.cwd.clone());
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
@@ -361,7 +361,7 @@ impl ServerRuntime {
         for session in sessions {
             summaries.push(session.lock().await.summary.clone());
         }
-        summaries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        summaries.sort_by_key(|right| std::cmp::Reverse(right.updated_at));
         serde_json::to_value(SuccessResponse {
             id: request_id,
             result: SessionListResult {
@@ -762,17 +762,16 @@ impl ServerRuntime {
         };
         self.maybe_assign_provisional_title(params.session_id, &display_input)
             .await;
-        if let Some(record) = session_arc.lock().await.record.clone() {
-            if let Err(error) = self
+        if let Some(record) = session_arc.lock().await.record.clone()
+            && let Err(error) = self
                 .rollout_store
                 .append_turn(&record, build_turn_record(&turn))
-            {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to persist turn start: {error}"),
-                );
-            }
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to persist turn start: {error}"),
+            );
         }
 
         tracing::info!(
@@ -866,17 +865,16 @@ impl ServerRuntime {
             }
             turn
         };
-        if let Some(record) = session_arc.lock().await.record.clone() {
-            if let Err(error) = self
+        if let Some(record) = session_arc.lock().await.record.clone()
+            && let Err(error) = self
                 .rollout_store
                 .append_turn(&record, build_turn_record(&interrupted_turn))
-            {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::InternalError,
-                    format!("failed to persist interrupted turn: {error}"),
-                );
-            }
+        {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::InternalError,
+                format!("failed to persist interrupted turn: {error}"),
+            );
         }
 
         tracing::info!(
@@ -1318,8 +1316,8 @@ impl ServerRuntime {
                                     session_id,
                                     turn_id: turn_for_events.turn_id,
                                     usage,
-                                    total_input_tokens: base.0 + input_tokens as usize,
-                                    total_output_tokens: base.1 + output_tokens as usize,
+                                    total_input_tokens: base.0 + input_tokens,
+                                    total_output_tokens: base.1 + output_tokens,
                                 },
                             ))
                             .await;
@@ -1431,28 +1429,27 @@ impl ServerRuntime {
             session.summary.total_output_tokens = session_total_output_tokens;
             final_turn
         };
-        if let Some(record) = session_arc.lock().await.record.clone() {
-            if let Err(error) = self
+        if let Some(record) = session_arc.lock().await.record.clone()
+            && let Err(error) = self
                 .rollout_store
                 .append_turn(&record, build_turn_record(&final_turn))
-            {
-                tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
-            }
+        {
+            tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
         }
-        if final_turn.status == TurnStatus::Completed {
-            if let Some(first_assistant_reply) = first_assistant_reply {
-                let runtime = Arc::clone(&self);
-                let input_for_title = display_input.clone();
-                tokio::spawn(async move {
-                    runtime
-                        .maybe_generate_final_title(
-                            session_id,
-                            &input_for_title,
-                            &first_assistant_reply,
-                        )
-                        .await;
-                });
-            }
+        if final_turn.status == TurnStatus::Completed
+            && let Some(first_assistant_reply) = first_assistant_reply
+        {
+            let runtime = Arc::clone(&self);
+            let input_for_title = display_input.clone();
+            tokio::spawn(async move {
+                runtime
+                    .maybe_generate_final_title(
+                        session_id,
+                        &input_for_title,
+                        &first_assistant_reply,
+                    )
+                    .await;
+            });
         }
 
         if let Err(error) = result {

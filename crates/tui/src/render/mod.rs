@@ -144,8 +144,7 @@ pub(crate) fn composer_height(app: &TuiApp, area: Rect) -> u16 {
             3,
             area.height
                 .saturating_sub(1)
-                .max(3)
-                .min(layout::COMPOSER_MAX_HEIGHT),
+                .clamp(3, layout::COMPOSER_MAX_HEIGHT),
         );
     base_height
         .saturating_add(aux_panel_height(app))
@@ -231,10 +230,10 @@ fn format_token_count(value: usize) -> String {
 
 fn resolve_git_branch(cwd: &Path) -> Option<String> {
     let key = cwd.to_string_lossy().into_owned();
-    if let Ok(cache) = GIT_BRANCH_CACHE.lock() {
-        if let Some(branch) = cache.get(&key) {
-            return branch.clone();
-        }
+    if let Ok(cache) = GIT_BRANCH_CACHE.lock()
+        && let Some(branch) = cache.get(&key)
+    {
+        return branch.clone();
     }
 
     let branch = Command::new("git")
@@ -523,8 +522,7 @@ fn inline_command_popup_rows(
                 .max(1);
             let name_width = UnicodeWidthStr::width(suggestion.name);
             let gap = 2usize;
-            let description_width =
-                available.saturating_sub((name_width + gap) as u16).max(0) as usize;
+            let description_width = available.saturating_sub((name_width + gap) as u16) as usize;
             let description = truncate_to_width(suggestion.description, description_width);
             let mut spans = vec![
                 Span::styled(
@@ -854,7 +852,7 @@ fn centered_popup_area(base_area: Rect, desired_height: u16, item_count: usize) 
 }
 
 fn onboarding_popup_area(base_area: Rect, desired_height: u16) -> Rect {
-    let width = base_area.width.min(ONBOARDING_OVERLAY_WIDTH).max(56);
+    let width = base_area.width.clamp(56, ONBOARDING_OVERLAY_WIDTH);
     let y = base_area.y.saturating_add(BRAND_HEADER_HEIGHT);
     let available_height = base_area
         .height

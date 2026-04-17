@@ -203,7 +203,7 @@ impl InputBuffer {
         let prompt_prefix = prompt.map(|value| format!("{value}> "));
         let prompt_width = prompt_prefix
             .as_deref()
-            .map(|value| unicode_width::UnicodeWidthStr::width(value) as usize)
+            .map(unicode_width::UnicodeWidthStr::width)
             .unwrap_or(2);
         let mut lines = Vec::new();
         let mut current = prompt_prefix.clone().unwrap_or_else(|| String::from("> "));

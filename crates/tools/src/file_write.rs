@@ -74,13 +74,13 @@ impl Tool for FileWriteTool {
 
         info!(path = %path.display(), bytes = content.len(), "writing file");
 
-        if let Some(parent) = path.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return Ok(ToolOutput::error(format!(
-                    "failed to create directories: {}",
-                    e
-                )));
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return Ok(ToolOutput::error(format!(
+                "failed to create directories: {}",
+                e
+            )));
         }
 
         match tokio::fs::write(&path, content).await {
