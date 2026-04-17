@@ -1,7 +1,1 @@
-{
-  "last_notification_timestamp": "2026-04-17T18:26:34Z",
-  "last_read_timestamp": "1970-01-01T00:00:00Z",
-  "unread_count": 0,
-  "collected_at": "2026-04-17T18:26:34Z",
-  "summary": "No new activity since last check"
-}
+{"last_notification_timestamp": "1970-01-01T00:00:00Z", "last_read_timestamp": "1970-01-01T00:00:00Z", "unread_count": 0, "summary": "Reset for testing - collect all history"}

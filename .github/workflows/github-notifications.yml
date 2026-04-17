@@ -39,9 +39,11 @@ jobs:
         run: |
           mkdir -p notifications
           
-          echo "DEBUG: SINCE=${SINCE}"
+          echo "=== DEBUG START ===" > notifications/debug-log.txt
+          echo "SINCE=${SINCE}" >> notifications/debug-log.txt
           RAW=$(curl -s "https://api.github.com/repos/7df-lab/claw-code-rust/commits?since=${SINCE}&per_page=100")
-          echo "DEBUG: RAW length=$(echo "$RAW" | wc -c)"
+          echo "RAW length=$(echo "$RAW" | wc -c)" >> notifications/debug-log.txt
+          echo "RAW preview: $(echo "$RAW" | head -c 200)" >> notifications/debug-log.txt
           echo "$RAW" > /tmp/raw_commits.json
           
           COMMITS=$(echo "$RAW" | 
@@ -54,7 +56,9 @@ jobs:
               author: .commit.author.name
             }]')
           
-          echo "DEBUG: COMMITS length=$(echo "$COMMITS" | wc -c)"
+          echo "COMMITS length=$(echo "$COMMITS" | wc -c)" >> notifications/debug-log.txt
+          echo "COMMITS preview: $(echo "$COMMITS" | head -c 300)" >> notifications/debug-log.txt
+          echo "=== DEBUG END ===" >> notifications/debug-log.txt
           
           if [ -n "$COMMITS" ] && [ "$COMMITS" != "[]" ] && [ "$COMMITS" != "null" ]; then
             echo "$COMMITS" | jq -c '.[]' >> "notifications/github-activity.jsonl.tmp"
