@@ -11,8 +11,13 @@
 
 ### Streaming Fix ✅ 完成 - read_timeout + null 数组修复
 - .timeout() → .read_timeout()，改进错误信息
-- 修复 OpenAI 兼容 API 返回 null 数组（tool_calls/annotations/choices）的解析问题
-- NVIDIA NIM API (meta/llama-3.1-8b-instruct) 测试通过
+- 修复 OpenAI 兼容 API 返回 null 数组的解析问题
+- PR #38 → 待审核
+
+### Clippy Fix ✅ 完成 - 全工作区 clippy 警告修复
+- 从 30+ 个警告降到 5 个（剩余为 too_many_arguments 和 doc 格式）
+- 涉及 protocol/tui/provider/tools/core/server/cli 7 个 crate
+- PR #39 → 待审核
 
 ### AGENTS.md 配置 ✅ 完成
 - 拆分为：AGENTS.md（宪法）+ docs/agent-rules/（详细规则）
@@ -21,19 +26,14 @@
 ### US-NOTIFY ✅ 完成 - GitHub 活动通知系统
 - .github/workflows/github-notifications.yml（15分钟 cron）
 - notifications/github-meta.json、github-activity.jsonl
-- Agent 会话启动时 + 长会话中按需读取
 
 ### CI Fix ✅ 完成 - 测试 + 格式修复
 - 修复测试中 Cli 结构体缺少 model 字段
 - cargo fmt 格式化
 
-## 验证状态
-- cargo build --release: ✅
-- cargo test --workspace: ✅ (全部通过)
-- clawcr doctor: ✅
-- clawcr prompt: ✅ (meta/llama-3.1-8b-instruct)
-- CI (GitHub Actions): ✅
-- 通知系统: ✅ (手动触发 + cron 均正常)
+## 待审核 PR
+- PR #38: fix null arrays in OpenAI-compatible API responses
+- PR #39: chore fix clippy warnings across workspace
 
 ## 上游动态
 - 64eb42c: 合并 PR #37 ← 我们的 PR！
