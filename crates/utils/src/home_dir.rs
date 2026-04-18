@@ -125,8 +125,12 @@ mod tests {
             .expect("temp clawcr home path should be valid utf-8");
 
         let resolved = find_clawcr_home_from_env(Some(temp_str)).expect("valid CLAWCR_HOME");
-        let expected =
-            super::strip_unc_prefix(temp_home.path().canonicalize().expect("canonicalize temp home"));
+        let expected = super::strip_unc_prefix(
+            temp_home
+                .path()
+                .canonicalize()
+                .expect("canonicalize temp home"),
+        );
         assert_eq!(resolved, expected);
     }
 
