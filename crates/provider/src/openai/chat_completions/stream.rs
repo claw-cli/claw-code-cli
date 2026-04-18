@@ -570,7 +570,7 @@ struct ChatCompletionStreamChunk {
     service_tier: Option<String>,
     #[serde(default)]
     system_fingerprint: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     choices: Vec<ChatCompletionStreamChoice>,
     #[serde(default)]
     usage: Option<OpenAICompletionUsage>,
@@ -598,8 +598,16 @@ struct ChatCompletionStreamDelta {
     reasoning_content: Option<String>,
     #[serde(default)]
     refusal: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     tool_calls: Vec<ChatCompletionStreamToolCallDelta>,
+}
+
+fn deserialize_null_vec<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
 }
 
 #[derive(Debug, Default, Deserialize)]

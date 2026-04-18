@@ -70,7 +70,7 @@ impl OpenAIProvider {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub(super) struct OpenAIChatCompletionResponse {
     id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     choices: Vec<OpenAIChatCompletionChoice>,
     #[serde(default)]
     created: Option<u64>,
@@ -132,13 +132,13 @@ pub(super) struct OpenAIChatCompletionMessage {
     refusal: Option<String>,
     #[serde(default)]
     role: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     annotations: Vec<OpenAIChatCompletionAnnotation>,
     #[serde(default)]
     audio: Option<OpenAIChatCompletionAudio>,
     #[serde(default)]
     function_call: Option<OpenAIChatCompletionFunctionCall>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_vec")]
     tool_calls: Vec<OpenAIChatCompletionMessageToolCall>,
     #[serde(default)]
     reasoning_content: Option<String>,
@@ -516,6 +516,14 @@ pub(super) struct OpenAICompletionTokenDetails {
 /// - Tool results are serialized as `tool` messages with `tool_call_id`.
 /// - Streaming requests add `stream_options: { "include_usage": true }`.
 /// - Additional provider-specific fields may be merged in via `extra_body`.
+fn deserialize_null_vec<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<Vec<T>>::deserialize(deserializer).map(|v| v.unwrap_or_default())
+}
+
 fn build_request(request: &ModelRequest, stream: bool) -> Value {
     let profile = resolve_request_profile(&request.model, OpenAITransport::ChatCompletions);
     let mut messages = Vec::new();
