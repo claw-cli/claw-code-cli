@@ -916,7 +916,7 @@ pub(crate) fn new_session_info(
     show_fast_status: bool,
 ) -> SessionInfoCell {
     // Header box rendered as history (so it appears at the very top)
-    let header = SessionHeaderHistoryCell::new(
+    let header = HeaderHistoryCell::new(
         model.clone(),
         thinking_capability,
         default_reasoning_effort,
@@ -1005,7 +1005,7 @@ pub(crate) fn new_user_prompt(
 }
 
 #[derive(Debug)]
-pub(crate) struct SessionHeaderHistoryCell {
+pub(crate) struct HeaderHistoryCell {
     version: &'static str,
     model: String,
     model_style: Style,
@@ -1016,7 +1016,7 @@ pub(crate) struct SessionHeaderHistoryCell {
     directory: PathBuf,
 }
 
-impl SessionHeaderHistoryCell {
+impl HeaderHistoryCell {
     pub(crate) fn new(
         model: String,
         thinking_capability: ThinkingCapability,
@@ -1116,7 +1116,7 @@ impl SessionHeaderHistoryCell {
     }
 }
 
-impl HistoryCell for SessionHeaderHistoryCell {
+impl HistoryCell for HeaderHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
             return Vec::new();

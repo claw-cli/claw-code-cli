@@ -213,23 +213,7 @@ impl CommandPopup {
 
 impl WidgetRef for CommandPopup {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        let mut rows = self.rows_from_matches(self.filtered());
-        if !self.command_filter.is_empty() {
-            rows.insert(
-                0,
-                GenericDisplayRow {
-                    name: format!("filter: /{}", self.command_filter),
-                    name_prefix_spans: Vec::new(),
-                    match_indices: None,
-                    display_shortcut: None,
-                    description: Some("matching slash commands".to_string()),
-                    category_tag: None,
-                    wrap_indent: None,
-                    is_disabled: true,
-                    disabled_reason: None,
-                },
-            );
-        }
+        let rows = self.rows_from_matches(self.filtered());
         render_rows(
             area.inset(Insets::tlbr(
                 /*top*/ 0, /*left*/ 2, /*bottom*/ 0, /*right*/ 0,

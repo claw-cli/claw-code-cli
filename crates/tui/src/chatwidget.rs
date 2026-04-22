@@ -183,10 +183,15 @@ enum PickerMode {
 }
 
 pub(crate) struct ChatWidget {
+    // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
+    // Frame requester for scheduling future frame draws on the TUI event loop.
     frame_requester: FrameRequester,
+    // The session state utlized for TUI rendering, currently simple: cwd, Model, ProviderWireApi
+    // TODO: Shoule expland the session state, and move thinking_selection into session state.
     session: TuiSessionState,
     thinking_selection: Option<String>,
+    // sub widget, bottom pane, including such input textarea, slash command popup, status summary.
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     active_cell_revision: u64,
@@ -209,7 +214,7 @@ pub(crate) struct ChatWidget {
 }
 
 impl ChatWidget {
-    fn build_session_header(
+    fn build_header_box(
         cwd: &std::path::Path,
         model: Option<&Model>,
         is_first_run: bool,
@@ -345,7 +350,7 @@ impl ChatWidget {
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
     ) {
-        self.history.push(Self::build_session_header(
+        self.history.push(Self::build_header_box(
             &self.session.cwd,
             self.session.model.as_ref(),
             is_first_run,
@@ -415,7 +420,7 @@ impl ChatWidget {
             skills: None,
         });
 
-        let history: Vec<Box<dyn HistoryCell>> = vec![Self::build_session_header(
+        let history: Vec<Box<dyn HistoryCell>> = vec![Self::build_header_box(
             &initial_session.cwd,
             initial_session.model.as_ref(),
             is_first_run,
