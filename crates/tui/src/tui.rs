@@ -1,3 +1,44 @@
+//! Terminal lifecycle and backend plumbing for the interactive TUI.
+//!
+//! If you come from web frontend work, this module is closest to the browser event loop and the
+//! rendering substrate underneath a UI. It does not decide what the app means; it decides how the
+//! app talks to the terminal, when input is observed, and when a redraw is allowed to happen.
+//!
+//! The responsibilities here are deliberately low level:
+//!
+//! - enter and restore terminal modes such as raw input, bracketed paste, focus reporting, and
+//!   keyboard enhancement flags;
+//! - initialize the terminal backend and panic hook so the app can recover cleanly even if the
+//!   process exits unexpectedly;
+//! - expose the `Tui` wrapper, which owns terminal state, redraw requests, alternate-screen
+//!   handling, and temporary restoration for external interactive programs;
+//! - host the `event_stream`, `frame_requester`, and `frame_rate_limiter` submodules, which work
+//!   together like an input pipeline plus a render scheduler;
+//! - keep terminal-specific concerns isolated from `host.rs`, `chatwidget.rs`, and the rest of
+//!   the UI so higher-level code can reason in terms of events, frames, and state transitions
+//!   instead of escape codes.
+//!
+//! The `event_stream` module is the input side of the system. It collects crossterm terminal
+//! events, turns them into the smaller `TuiEvent` enum, and handles the awkward parts of terminal
+//! ownership such as pausing and resuming stdin so can temporarily hand control to another
+//! interactive program. In frontend terms, it is closer to a shared event source and input adapter
+//! than to a widget.
+//!
+//! The `frame_requester` module is the redraw side. It gives widgets and background tasks a cheap
+//! handle for saying "please render again," similar to scheduling a future animation frame or
+//! dispatching a render request from another part of the UI. Requests are funneled through a small
+//! scheduler so many rapid requests collapse into one draw instead of causing redundant work.
+//!
+//! The `frame_rate_limiter` module is the guardrail around that redraw pipeline. It prevents the
+//! TUI from emitting draws faster than a human can perceive, which keeps animations responsive
+//! without turning every tiny state change into unnecessary terminal work. Think of it as the
+//! equivalent of capping an animation loop so repeated invalidations do not starve the rest of the
+//! app.
+//!
+//! Put together, these pieces let the rest of the UI behave as if it has a normal event loop and a
+//! normal render scheduler, even though the underlying environment is a terminal with global stdin,
+//! alternate screen mode, and much more fragile input semantics than a browser.
+
 use std::fmt;
 use std::future::Future;
 use std::io::IsTerminal;
@@ -324,7 +365,7 @@ impl Tui {
     /// Temporarily restore terminal state to run an external interactive program `f`.
     ///
     /// This pauses crossterm's stdin polling by dropping the underlying event stream, restores
-    /// terminal modes (optionally keeping raw mode enabled), then re-applies Codex TUI modes and
+    /// terminal modes (optionally keeping raw mode enabled), then re-applies devo TUI modes and
     /// flushes pending stdin input before resuming events.
     pub async fn with_restored<R, F, Fut>(&mut self, mode: RestoreMode, f: F) -> R
     where

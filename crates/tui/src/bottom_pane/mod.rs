@@ -280,6 +280,14 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn clear_composer(&mut self) {
+        self.composer
+            .set_text_content(String::new(), Vec::new(), Vec::new());
+        self.external_history_active = false;
+        self.external_history_draft = None;
+        self.request_redraw();
+    }
+
     #[allow(dead_code)]
     pub(crate) fn composer_text(&self) -> String {
         self.composer.current_text()

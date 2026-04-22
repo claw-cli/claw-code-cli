@@ -1,3 +1,6 @@
+//! Hosts the interactive TUI event loop and connects app events, worker events, and
+//! terminal rendering into one session.
+
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyModifiers;
@@ -43,6 +46,8 @@ struct InteractiveLoopState {
     total_input_tokens: usize,
     total_output_tokens: usize,
     pending_onboarding: Option<PendingOnboarding>,
+    // True while the resume browser is waiting for the worker's session list.
+    resume_browser_pending: bool,
     // indicate whther LLM worker is working, is started by TurnStarted,
     // it ended by TurnFailed/TurnFinished
     busy: bool,
@@ -96,7 +101,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         initial_thinking_selection: initial_session.thinking_selection.clone(),
         initial_user_message: None,
         enhanced_keys_supported: tui.enhanced_keys_supported(),
-        is_first_run: true,
+        is_first_run: config.saved_models.is_empty(),
         available_models,
         show_model_onboarding: config.show_model_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
@@ -131,9 +136,10 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
                     app_event,
                     &worker,
                     &mut chat_widget,
+                    &mut tui,
+                    &mut loop_state,
                     &config.model_catalog,
                     initial_session.provider,
-                    &mut loop_state,
                 )? {
                     LoopAction::Continue => {}
                     LoopAction::ClearAndExit => {
@@ -208,7 +214,10 @@ fn handle_tui_event(
             // Update time-sensitive widget state before measuring or rendering.
             chat_widget.pre_draw_tick();
 
-            if !chat_widget.is_resume_browser_open() && tui.is_alt_screen_active() {
+            if !chat_widget.is_resume_browser_open()
+                && !loop_state.resume_browser_pending
+                && tui.is_alt_screen_active()
+            {
                 tui.leave_alt_screen()?;
             }
 
@@ -273,9 +282,10 @@ fn handle_app_event(
     app_event: Option<AppEvent>,
     worker: &QueryWorkerHandle,
     chat_widget: &mut ChatWidget,
+    tui: &mut Tui,
+    loop_state: &mut InteractiveLoopState,
     model_catalog: &impl ModelCatalog,
     default_provider: ProviderWireApi,
-    loop_state: &mut InteractiveLoopState,
 ) -> Result<LoopAction> {
     let Some(app_event) = app_event else {
         return Ok(LoopAction::ClearAndExit);
@@ -286,15 +296,18 @@ fn handle_app_event(
     }
 
     if let AppEvent::Command(command) = &app_event {
+        chat_widget.handle_app_event(app_event.clone());
         // Commands that affect sessions, providers, or turns are forwarded to the worker.
         handle_app_command(
             command,
             worker,
             chat_widget,
+            tui,
+            loop_state,
             model_catalog,
             default_provider,
-            &mut loop_state.pending_onboarding,
         )?;
+        return Ok(LoopAction::Continue);
     }
     chat_widget.handle_app_event(app_event);
 
@@ -374,6 +387,13 @@ fn handle_worker_event(
         | WorkerEvent::SessionTitleUpdated { .. }
         | WorkerEvent::InputHistoryLoaded { .. } => {}
     }
+    if matches!(&worker_event, WorkerEvent::SessionsListed { .. }) {
+        loop_state.resume_browser_pending = false;
+    }
+    if loop_state.resume_browser_pending && matches!(&worker_event, WorkerEvent::TurnFailed { .. })
+    {
+        loop_state.resume_browser_pending = false;
+    }
     chat_widget.handle_worker_event(worker_event);
 
     Ok(LoopAction::Continue)
@@ -383,9 +403,10 @@ fn handle_app_command(
     command: &AppCommand,
     worker: &QueryWorkerHandle,
     chat_widget: &mut ChatWidget,
+    tui: &mut Tui,
+    loop_state: &mut InteractiveLoopState,
     model_catalog: &impl ModelCatalog,
     default_provider: ProviderWireApi,
-    pending_onboarding: &mut Option<PendingOnboarding>,
 ) -> Result<()> {
     match command {
         AppCommand::UserTurn {
@@ -421,42 +442,58 @@ fn handle_app_command(
                 worker.set_thinking(thinking.clone())?;
             }
         }
-        AppCommand::RunUserShellCommand { command } if command.starts_with("onboard ") => {
-            let payload = command.trim_start_matches("onboard ");
-            let value: serde_json::Value = serde_json::from_str(payload)?;
-            let model = value
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let base_url = value
-                .get("base_url")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned);
-            let api_key = value
-                .get("api_key")
-                .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned);
-            let provider = model_catalog
-                .get(&model)
-                .map(Model::provider_wire_api)
-                .unwrap_or(default_provider);
-            *pending_onboarding = Some(PendingOnboarding {
-                provider,
-                model: model.clone(),
-                base_url: base_url.clone(),
-                api_key: api_key.clone(),
-            });
-            worker.validate_provider(provider, model, base_url, api_key)?;
+        AppCommand::RunUserShellCommand { command } => {
+            if command == "session list" {
+                tui.enter_alt_screen()?;
+                if let Err(error) = worker.list_sessions() {
+                    let _ = tui.leave_alt_screen();
+                    return Err(error);
+                }
+                loop_state.resume_browser_pending = true;
+                chat_widget.set_status_message("Loading sessions");
+            } else if command == "session new" {
+                worker.start_new_session()?;
+            } else if command.starts_with("onboard ") {
+                let payload = command.trim_start_matches("onboard ");
+                let value: serde_json::Value = serde_json::from_str(payload)?;
+                let model = value
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let base_url = value
+                    .get("base_url")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+                let api_key = value
+                    .get("api_key")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned);
+                let provider = model_catalog
+                    .get(&model)
+                    .map(Model::provider_wire_api)
+                    .unwrap_or(default_provider);
+                loop_state.pending_onboarding = Some(PendingOnboarding {
+                    provider,
+                    model: model.clone(),
+                    base_url: base_url.clone(),
+                    api_key: api_key.clone(),
+                });
+                worker.validate_provider(provider, model, base_url, api_key)?;
+            } else {
+                chat_widget.set_status_message(format!("Unsupported command: {}", command));
+            }
         }
         AppCommand::BrowseInputHistory { direction } => {
             worker.browse_input_history(*direction)?;
         }
         AppCommand::SwitchSession { session_id } => {
+            if tui.is_alt_screen_active() {
+                tui.leave_alt_screen()?;
+            }
+            tui.clear_pending_history_lines();
+            tui.terminal.clear_scrollback_and_visible_screen_ansi()?;
             worker.switch_session(*session_id)?;
-        }
-        _ => {
-            chat_widget.set_status_message(format!("Unsupported command: {}", command.kind()));
         }
     }
     Ok(())
