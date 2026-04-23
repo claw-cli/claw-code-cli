@@ -41,6 +41,7 @@ pub enum QueryEvent {
     /// Incremental reasoning text from the assistant.
     ReasoningDelta(String),
     /// Incremental token usage update from the provider stream.
+    /// TODO: Review the mechanism from the OpenAI API / Anthropic API documentation.
     UsageDelta {
         input_tokens: usize,
         output_tokens: usize,
@@ -154,7 +155,7 @@ fn classify_error(e: &anyhow::Error) -> ErrorClass {
 }
 
 // ---------------------------------------------------------------------------
-// Session compaction (capabilities 1.3 / 1.7)
+// Session compaction
 // ---------------------------------------------------------------------------
 
 /// TODO: The context compact is weired, should compact with a seperate LLM invoke.

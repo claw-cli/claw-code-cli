@@ -1,5 +1,6 @@
 mod model;
 mod render;
+mod spinner;
 
 pub(crate) use model::CommandOutput;
 pub(crate) use render::OutputLinesParams;

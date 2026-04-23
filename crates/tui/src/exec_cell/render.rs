@@ -3,12 +3,12 @@ use std::time::Instant;
 use super::model::CommandOutput;
 use super::model::ExecCall;
 use super::model::ExecCell;
+use crate::exec_cell::spinner::unicode_spinner;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
-use crate::shimmer::shimmer_spans;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::adaptive_wrap_lines;
@@ -226,17 +226,16 @@ pub(crate) fn truncated_tool_output_preview(
 
 pub(crate) fn spinner(start_time: Option<Instant>, animations_enabled: bool) -> Span<'static> {
     if !animations_enabled {
-        return "•".dim();
+        return Span::from("•").dim();
     }
-    let elapsed = start_time.map(|st| st.elapsed()).unwrap_or_default();
     if supports_color::on_cached(supports_color::Stream::Stdout)
         .map(|level| level.has_16m)
         .unwrap_or(false)
     {
-        shimmer_spans("•")[0].clone()
+        unicode_spinner(start_time)
     } else {
-        let blink_on = (elapsed.as_millis() / 600).is_multiple_of(2);
-        if blink_on { "•".into() } else { "◦".dim() }
+        let frame = crate::exec_cell::spinner::spinner_frame(start_time);
+        Span::from(frame).dim()
     }
 }
 
