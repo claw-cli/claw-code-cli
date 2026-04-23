@@ -225,7 +225,7 @@ impl Default for Model {
             display_name: String::new(),
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Disabled,
+            thinking_capability: ThinkingCapability::Unsupported,
             default_reasoning_effort: Some(ReasoningEffort::default()),
             thinking_implementation: None,
             base_instructions: String::new(),
@@ -269,7 +269,7 @@ impl Model {
 
     pub fn effective_thinking_implementation(&self) -> ThinkingImplementation {
         self.thinking_implementation.clone().unwrap_or({
-            if matches!(self.thinking_capability, ThinkingCapability::Disabled) {
+            if matches!(self.thinking_capability, ThinkingCapability::Unsupported) {
                 ThinkingImplementation::Disabled
             } else {
                 ThinkingImplementation::RequestParameter
@@ -283,7 +283,7 @@ impl Model {
 
     pub fn default_thinking_selection(&self) -> Option<String> {
         match &self.thinking_capability {
-            ThinkingCapability::Disabled => None,
+            ThinkingCapability::Unsupported => None,
             ThinkingCapability::Toggle => Some(String::from("enabled")),
             ThinkingCapability::Levels(levels) => self
                 .default_reasoning_effort
@@ -317,7 +317,7 @@ impl Model {
             },
             ThinkingImplementation::RequestParameter => {
                 let request_thinking = match self.effective_thinking_capability() {
-                    ThinkingCapability::Disabled => None,
+                    ThinkingCapability::Unsupported => None,
                     ThinkingCapability::Toggle => normalized_selection
                         .filter(|selection| selection == "enabled" || selection == "disabled"),
                     ThinkingCapability::Levels(_) => normalized_selection.map(|selection| {
@@ -462,7 +462,7 @@ mod tests {
             display_name: slug.into(),
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Disabled,
+            thinking_capability: ThinkingCapability::Unsupported,
             default_reasoning_effort: Some(ReasoningEffort::Medium),
             thinking_implementation: None,
             base_instructions: String::new(),

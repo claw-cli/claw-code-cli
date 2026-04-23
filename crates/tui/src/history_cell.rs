@@ -1089,7 +1089,7 @@ impl HeaderHistoryCell {
     }
 
     fn reasoning_label(&self) -> Option<&'static str> {
-        if matches!(self.thinking_capability, ThinkingCapability::Disabled)
+        if matches!(self.thinking_capability, ThinkingCapability::Unsupported)
             || matches!(
                 self.thinking_implementation,
                 Some(ThinkingImplementation::Disabled)
@@ -1111,7 +1111,7 @@ impl HeaderHistoryCell {
                     ReasoningEffort::High => "high",
                     ReasoningEffort::XHigh => "xhigh",
                 }),
-            ThinkingCapability::Disabled => None,
+            ThinkingCapability::Unsupported => None,
         }
     }
 }

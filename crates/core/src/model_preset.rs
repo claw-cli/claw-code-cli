@@ -94,7 +94,7 @@ impl Default for ModelPreset {
             display_name: String::new(),
             provider: ProviderWireApi::OpenAIChatCompletions,
             description: None,
-            thinking_capability: ThinkingCapability::Disabled,
+            thinking_capability: ThinkingCapability::Unsupported,
             default_reasoning_effort: Some(ReasoningEffort::default()),
             thinking_implementation: None,
             base_instructions: String::new(),
@@ -150,7 +150,7 @@ fn default_input_modalities() -> Vec<InputModality> {
 }
 
 fn default_thinking_capability() -> ThinkingCapability {
-    ThinkingCapability::Disabled
+    ThinkingCapability::Unsupported
 }
 
 fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
