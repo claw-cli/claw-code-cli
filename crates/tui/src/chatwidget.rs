@@ -784,7 +784,7 @@ impl ChatWidget {
                         None,
                     ));
                 }
-                self.set_status_message(format!("Active session: {session_id}"));
+                self.set_status_message("Session switched");
             }
             WorkerEvent::SessionRenamed { session_id, title } => {
                 self.add_to_history(history_cell::new_info_event(
@@ -797,7 +797,7 @@ impl ChatWidget {
                 session_id: _,
                 title,
             } => {
-                self.set_status_message(format!("Session titled: {title}"));
+                self.set_status_message(format!("Session: {title}"));
             }
             WorkerEvent::InputHistoryLoaded { direction: _, text } => {
                 self.bottom_pane.restore_input_from_history(text);
