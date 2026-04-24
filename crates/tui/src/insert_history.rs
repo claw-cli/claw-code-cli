@@ -2,6 +2,8 @@ use std::fmt;
 use std::io;
 use std::io::Write;
 
+use crate::history_cell::ScrollbackLine;
+use crate::history_cell::ScrollbackWrapPolicy;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
 use crate::wrapping::line_contains_url_like;
@@ -55,7 +57,7 @@ impl InsertHistoryMode {
 /// (avoids direct stdout references).
 pub fn insert_history_lines<B>(
     terminal: &mut crate::custom_terminal::Terminal<B>,
-    lines: Vec<Line>,
+    lines: Vec<ScrollbackLine>,
 ) -> io::Result<()>
 where
     B: Backend + Write,
@@ -73,7 +75,7 @@ where
 /// viewport moved to.
 pub fn insert_history_lines_with_mode<B>(
     terminal: &mut crate::custom_terminal::Terminal<B>,
-    lines: Vec<Line>,
+    lines: Vec<ScrollbackLine>,
     mode: InsertHistoryMode,
 ) -> io::Result<()>
 where
@@ -97,20 +99,26 @@ where
     //   unsplit.
     // - Non-URL lines also flow through adaptive wrapping; behavior is
     //   equivalent to standard wrapping when no URL is present.
-    let wrap_width = area.width.max(1) as usize;
+    let screen_wrap_width = usize::from(screen_size.width.max(1));
+    let wrap_width = screen_wrap_width.min(80);
     let mut wrapped = Vec::new();
     let mut wrapped_rows = 0usize;
 
-    for line in &lines {
-        let line_wrapped =
-            if line_contains_url_like(line) && !line_has_mixed_url_and_non_url_tokens(line) {
-                vec![line.clone()]
-            } else {
-                adaptive_wrap_line(line, RtOptions::new(wrap_width))
-            };
+    for scrollback_line in &lines {
+        let line_wrapped = match scrollback_line.wrap_policy {
+            ScrollbackWrapPolicy::NoAdditionalWrapLimit => vec![scrollback_line.line.clone()],
+            ScrollbackWrapPolicy::LimitToEightyColumns => {
+                let line = &scrollback_line.line;
+                if line_contains_url_like(line) && !line_has_mixed_url_and_non_url_tokens(line) {
+                    vec![line.clone()]
+                } else {
+                    adaptive_wrap_line(line, RtOptions::new(wrap_width))
+                }
+            }
+        };
         wrapped_rows += line_wrapped
             .iter()
-            .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(wrap_width))
+            .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(screen_wrap_width))
             .sum::<usize>();
         wrapped.extend(line_wrapped);
     }
@@ -141,7 +149,7 @@ where
             if i > 0 {
                 queue!(writer, Print("\r\n"))?;
             }
-            write_history_line(writer, line, wrap_width)?;
+            write_history_line(writer, line, screen_wrap_width)?;
         }
     } else {
         let cursor_top = if area.bottom() < screen_size.height {
@@ -187,7 +195,7 @@ where
 
         for line in &wrapped {
             queue!(writer, Print("\r\n"))?;
-            write_history_line(writer, line, wrap_width)?;
+            write_history_line(writer, line, screen_wrap_width)?;
         }
 
         queue!(writer, ResetScrollRegion)?;
@@ -445,7 +453,7 @@ mod tests {
         // Build a blockquote-like line: apply line-level green style and prefix "> "
         let mut line: Line<'static> = Line::from(vec!["> ".into(), "Hello world".into()]);
         line = line.style(Color::Green);
-        insert_history_lines(&mut term, vec![line])
+        insert_history_lines(&mut term, vec![line.into()])
             .expect("Failed to insert history lines in test");
 
         let mut saw_colored = false;
@@ -484,7 +492,7 @@ mod tests {
         ]);
         line = line.style(Color::Green);
 
-        insert_history_lines(&mut term, vec![line])
+        insert_history_lines(&mut term, vec![line.into()])
             .expect("Failed to insert history lines in test");
 
         // Parse and inspect the final screen buffer.
@@ -547,7 +555,7 @@ mod tests {
             Span::raw("Hello world"),
         ]);
 
-        insert_history_lines(&mut term, vec![line])
+        insert_history_lines(&mut term, vec![line.into()])
             .expect("Failed to insert history lines in test");
 
         let screen = term.backend().vt100().screen();
@@ -595,7 +603,7 @@ mod tests {
         // Markdown with five levels (ordered → unordered → ordered → unordered → unordered).
         let md = "1. First\n   - Second level\n     1. Third level (ordered)\n        - Fourth level (bullet)\n          - Fifth level to test indent consistency\n";
         let text = render_markdown_text(md);
-        let lines: Vec<Line<'static>> = text.lines.clone();
+        let lines: Vec<ScrollbackLine> = text.lines.into_iter().map(Into::into).collect();
 
         let width: u16 = 60;
         let height: u16 = 12;
@@ -653,7 +661,7 @@ mod tests {
         let url = "http://a-long-url.com/this/that/blablablab/new.aspx/many_people_like_how";
         let line: Line<'static> = Line::from(vec!["  │ ".into(), url.into()]);
 
-        insert_history_lines(&mut term, vec![line]).expect("insert history");
+        insert_history_lines(&mut term, vec![line.into()]).expect("insert history");
 
         let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
 
@@ -680,7 +688,7 @@ mod tests {
             "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890";
         let line: Line<'static> = Line::from(vec!["  │ ".into(), url_like.into()]);
 
-        insert_history_lines(&mut term, vec![line]).expect("insert history");
+        insert_history_lines(&mut term, vec![line.into()]).expect("insert history");
 
         let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
 
@@ -712,7 +720,7 @@ mod tests {
             " tail words".into(),
         ]);
 
-        insert_history_lines(&mut term, vec![line]).expect("insert mixed history");
+        insert_history_lines(&mut term, vec![line.into()]).expect("insert mixed history");
 
         let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
         assert!(
@@ -722,6 +730,39 @@ mod tests {
         assert!(
             rows.iter().any(|r| r.contains("tail words")),
             "expected suffix words to wrap as a phrase, rows: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn vt100_non_ai_history_line_does_not_apply_eighty_column_wrap_limit() {
+        let width: u16 = 24;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
+        let viewport = Rect::new(0, height - 1, width, 1);
+        term.set_viewport_area(viewport);
+
+        let url = "https://example.test/path/abcdef12345";
+        let line: Line<'static> = Line::from(vec![
+            "  │ ".into(),
+            "see ".into(),
+            url.into(),
+            " tail words".into(),
+        ]);
+
+        insert_history_lines(
+            &mut term,
+            vec![ScrollbackLine::new(
+                line,
+                ScrollbackWrapPolicy::NoAdditionalWrapLimit,
+            )],
+        )
+        .expect("insert non-ai history");
+
+        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("ta")) && rows.iter().any(|r| r.contains("il words")),
+            "expected terminal-width wrapping instead of forced 80-column wrapping, rows: {rows:?}"
         );
     }
 
@@ -738,11 +779,11 @@ mod tests {
             "  │ ".into(),
             "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".into(),
         ]);
-        insert_history_lines(&mut term, vec![filler_line]).expect("insert filler history");
+        insert_history_lines(&mut term, vec![filler_line.into()]).expect("insert filler history");
 
         let url_like = "example.test/api/v1/short";
         let url_line: Line<'static> = Line::from(vec!["  │ ".into(), url_like.into()]);
-        insert_history_lines(&mut term, vec![url_line]).expect("insert url-like history");
+        insert_history_lines(&mut term, vec![url_line.into()]).expect("insert url-like history");
 
         let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
         let first_row = rows
@@ -775,14 +816,15 @@ mod tests {
         term.set_viewport_area(viewport);
 
         let prompt = "Write a long URL as output for testing";
-        insert_history_lines(&mut term, vec![Line::from(prompt)]).expect("insert prompt line");
+        insert_history_lines(&mut term, vec![Line::from(prompt).into()])
+            .expect("insert prompt line");
 
         let long_url = format!(
             "https://example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/{}",
             "very-long-segment-".repeat(16),
         );
         let url_line: Line<'static> = Line::from(vec!["• ".into(), long_url.into()]);
-        insert_history_lines(&mut term, vec![url_line]).expect("insert long url line");
+        insert_history_lines(&mut term, vec![url_line.into()]).expect("insert long url line");
 
         let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
         let prompt_row = rows
@@ -810,7 +852,7 @@ mod tests {
         term.set_viewport_area(viewport);
 
         let line: Line<'static> = Line::from("zellij history");
-        insert_history_lines_with_mode(&mut term, vec![line], InsertHistoryMode::Zellij)
+        insert_history_lines_with_mode(&mut term, vec![line.into()], InsertHistoryMode::Zellij)
             .expect("insert zellij history");
 
         let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();

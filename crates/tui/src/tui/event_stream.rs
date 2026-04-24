@@ -456,8 +456,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn lagged_draw_maps_to_draw() {
         let (broker, _handle, draw_tx, draw_rx, terminal_focused, needs_full_repaint) = setup();
-        let mut stream =
-            make_stream(broker, draw_rx.resubscribe(), terminal_focused, needs_full_repaint);
+        let mut stream = make_stream(
+            broker,
+            draw_rx.resubscribe(),
+            terminal_focused,
+            needs_full_repaint,
+        );
 
         // Fill channel to force Lagged on the receiver.
         let _ = draw_tx.send(());
@@ -481,8 +485,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn resume_wakes_paused_stream() {
         let (broker, handle, _draw_tx, draw_rx, terminal_focused, needs_full_repaint) = setup();
-        let mut stream =
-            make_stream(broker.clone(), draw_rx, terminal_focused, needs_full_repaint);
+        let mut stream = make_stream(
+            broker.clone(),
+            draw_rx,
+            terminal_focused,
+            needs_full_repaint,
+        );
 
         broker.pause_events();
 
@@ -506,8 +514,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn resume_wakes_pending_stream() {
         let (broker, handle, _draw_tx, draw_rx, terminal_focused, needs_full_repaint) = setup();
-        let mut stream =
-            make_stream(broker.clone(), draw_rx, terminal_focused, needs_full_repaint);
+        let mut stream = make_stream(
+            broker.clone(),
+            draw_rx,
+            terminal_focused,
+            needs_full_repaint,
+        );
 
         let task = tokio::spawn(async move { stream.next().await });
         tokio::task::yield_now().await;

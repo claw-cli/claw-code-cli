@@ -51,8 +51,10 @@ use crate::events::WorkerEvent;
 use crate::exec_cell::truncated_tool_output_preview;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
+use crate::history_cell::AI_REPLY_WRAP_WIDTH;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
@@ -341,7 +343,7 @@ impl ChatWidget {
         );
 
         format!(
-            "model {model} | thinking {thinking} | tokens {} in / {} out | {context}",
+            "{model} | thinking {thinking} | tokens {} in / {} out | {context}",
             self.total_input_tokens, self.total_output_tokens
         )
     }
@@ -375,8 +377,7 @@ impl ChatWidget {
         self.history.clear();
         self.next_history_flush_index = 0;
         self.push_session_header(
-            /*is_first_run*/ false,
-            /*startup_tooltip_override*/ None,
+            /*is_first_run*/ false, /*startup_tooltip_override*/ None,
         );
 
         tracing::trace!(
@@ -1183,15 +1184,16 @@ impl ChatWidget {
         } else {
             vec![Line::from(title.to_string()).bold()]
         };
+        let markdown_width = usize::from(self.last_known_width().max(1)).min(AI_REPLY_WRAP_WIDTH);
         append_markdown(
             body,
-            Some(usize::from(self.last_known_width().max(1))),
+            Some(markdown_width),
             Some(&self.session.cwd),
             &mut lines,
         );
         if title == "Assistant" || title == "Reasoning" {
             self.add_history_entry_without_redraw(Box::new(
-                history_cell::AgentMessageCell::new_with_prefix(
+                history_cell::AgentMessageCell::new_ai_response_with_prefix(
                     lines,
                     Self::dot_prefix(status),
                     "  ",
@@ -1219,13 +1221,14 @@ impl ChatWidget {
         prefix: Line<'static>,
     ) -> history_cell::AgentMessageCell {
         let mut lines = Vec::new();
+        let markdown_width = usize::from(self.last_known_width().max(1)).min(AI_REPLY_WRAP_WIDTH);
         append_markdown(
             body,
-            Some(self.last_known_width().max(1) as usize),
+            Some(markdown_width),
             Some(&self.session.cwd),
             &mut lines,
         );
-        history_cell::AgentMessageCell::new_with_prefix(lines, prefix, "  ", false)
+        history_cell::AgentMessageCell::new_ai_response_with_prefix(lines, prefix, "  ", false)
     }
 
     fn add_transcript_item(&mut self, item: TranscriptItem) {
@@ -1297,8 +1300,10 @@ impl ChatWidget {
 
     fn push_assistant_stream_delta(&mut self, text: &str) {
         if self.stream_controller.is_none() {
+            let markdown_width = usize::from(self.last_known_width().saturating_sub(2).max(1))
+                .min(AI_REPLY_WRAP_WIDTH);
             self.stream_controller = Some(StreamController::new(
-                Some(self.last_known_width().saturating_sub(2) as usize),
+                Some(markdown_width),
                 &self.session.cwd,
             ));
         }
@@ -1584,7 +1589,7 @@ impl ChatWidget {
             let pending_lines = controller.pending_lines();
             if !pending_lines.is_empty() {
                 lines.extend(
-                    history_cell::AgentMessageCell::new_with_prefix(
+                    history_cell::AgentMessageCell::new_ai_response_with_prefix(
                         pending_lines,
                         Self::pending_dot_prefix(),
                         "  ",
@@ -1598,11 +1603,16 @@ impl ChatWidget {
         lines
     }
 
-    pub(crate) fn drain_scrollback_lines(&mut self, width: u16) -> Vec<Line<'static>> {
+    pub(crate) fn drain_scrollback_lines(&mut self, width: u16) -> Vec<ScrollbackLine> {
         let width = width.max(1);
         let mut lines = Vec::new();
         for cell in self.history.iter().skip(self.next_history_flush_index) {
-            lines.extend(cell.display_lines(width));
+            let wrap_policy = cell.scrollback_wrap_policy();
+            lines.extend(
+                cell.display_lines(width)
+                    .into_iter()
+                    .map(|line| ScrollbackLine::new(line, wrap_policy)),
+            );
         }
         self.next_history_flush_index = self.history.len();
         lines

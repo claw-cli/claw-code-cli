@@ -114,12 +114,14 @@ impl StreamController {
         };
         let is_stream_continuation = self.header_emitted;
         self.header_emitted = true;
-        Some(Box::new(history_cell::AgentMessageCell::new_with_prefix(
-            lines,
-            initial_prefix,
-            "  ",
-            is_stream_continuation,
-        )))
+        Some(Box::new(
+            history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                lines,
+                initial_prefix,
+                "  ",
+                is_stream_continuation,
+            ),
+        ))
     }
 }
 

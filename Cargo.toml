@@ -20,7 +20,7 @@ resolver = "3"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
-version = "0.1.0"
+version = "0.1.1"
 
 [workspace.dependencies]
 ansi-to-tui = "7.0.0"
@@ -37,9 +37,9 @@ colored = "2"
 crossbeam-channel = "0.5.15"
 crossterm = { version = "0.28", features = ["event-stream"] }
 derive_more = "2"
+devo-arg0 = { path = "crates/arg0" }
 devo-client = { path = "crates/client" }
 devo-core = { path = "crates/core" }
-devo-arg0 = { path = "crates/arg0" }
 devo-file-search = { path = "crates/file-search" }
 devo-mcp = { path = "crates/mcp" }
 devo-protocol = { path = "crates/protocol" }
@@ -72,7 +72,11 @@ ratatui = "0.29.0"
 ratatui-macros = "0.6.0"
 regex = "1"
 regex-lite = "0.1.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "stream",
+] }
 reqwest-eventsource = "0.6"
 schemars = "0.8.22"
 serde = { version = "1", features = ["derive"] }

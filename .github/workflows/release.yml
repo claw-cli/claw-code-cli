@@ -15,11 +15,11 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: ""
             archive: tar.gz
-          - os: ubuntu-24.04
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             ext: ""
             archive: tar.gz
@@ -31,7 +31,7 @@ jobs:
             target: x86_64-apple-darwin
             ext: ""
             archive: tar.gz
-          - os: windows-2025
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: ".exe"
             archive: zip

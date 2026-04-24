@@ -446,7 +446,8 @@ where
         }
 
         for y in area.top()..area.bottom() {
-            self.backend.set_cursor_position(Position { x: area.x, y })?;
+            self.backend
+                .set_cursor_position(Position { x: area.x, y })?;
             self.backend.clear_region(ClearType::UntilNewLine)?;
         }
 
@@ -563,6 +564,7 @@ where
         std::io::Write::flush(&mut self.backend)?;
         self.last_known_cursor_pos = Position { x: 0, y: 0 };
         self.visible_history_rows = 0;
+        self.session_origin_top = 0;
         self.reset_draw_buffers();
         Ok(())
     }

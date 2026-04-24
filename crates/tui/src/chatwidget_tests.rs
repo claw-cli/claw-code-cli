@@ -368,7 +368,7 @@ fn streamed_lines_commit_to_history_without_growing_live_viewport_unbounded() {
     let committed_lines = widget.drain_scrollback_lines(80);
     let committed_text = committed_lines
         .iter()
-        .flat_map(|line| line.spans.iter())
+        .flat_map(|line| line.line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert!(committed_text.contains("line 0"));
@@ -418,7 +418,8 @@ fn streamed_history_does_not_insert_blank_lines_between_commits() {
     let non_blank_lines = committed_lines
         .iter()
         .filter(|line| {
-            line.spans
+            line.line
+                .spans
                 .iter()
                 .any(|span| !span.content.trim().is_empty())
         })
@@ -453,13 +454,17 @@ fn batched_history_does_not_insert_blank_lines_between_cells() {
     let blank_lines = committed_lines
         .iter()
         .filter(|line| {
-            line.spans
+            line.line
+                .spans
                 .iter()
                 .all(|span| span.content.trim().is_empty())
         })
         .count();
 
-    assert_eq!(0, blank_lines, "unexpected blank lines: {committed_lines:?}");
+    assert_eq!(
+        0, blank_lines,
+        "unexpected blank lines: {committed_lines:?}"
+    );
 }
 
 #[test]
@@ -505,12 +510,13 @@ fn session_switch_restores_one_header_and_compact_history() {
     let committed_lines = widget.drain_scrollback_lines(80);
     let committed_text = committed_lines
         .iter()
-        .flat_map(|line| line.spans.iter())
+        .flat_map(|line| line.line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
     let has_consecutive_blank_lines = committed_lines.windows(2).any(|window| {
         window.iter().all(|line| {
-            line.spans
+            line.line
+                .spans
                 .iter()
                 .all(|span| span.content.trim().is_empty())
         })
@@ -546,7 +552,8 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
 
     let committed_lines = widget.drain_scrollback_lines(80);
     assert!(!committed_lines.iter().any(|line| {
-        line.spans
+        line.line
+            .spans
             .iter()
             .any(|span| span.content.contains("Turn completed (Completed)"))
     }));
@@ -570,6 +577,31 @@ fn active_response_renders_generating_status_without_devo_title() {
 
     let rendered = rendered_rows(&widget, 80, 12).join("\n");
     assert!(!rendered.contains("Devo -"));
+}
+
+#[test]
+fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "see https://example.test/path/abcdef12345 tail words".to_string(),
+    ));
+
+    let rendered = rendered_rows(&widget, 24, 12).join("\n");
+    assert!(
+        rendered.contains("tail words"),
+        "expected pending streaming reply to wrap suffix words together, got:\n{rendered}"
+    );
 }
 
 // TODO: Still buggy here, need to be fixed.

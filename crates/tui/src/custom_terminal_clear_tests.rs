@@ -2,6 +2,7 @@ use pretty_assertions::assert_eq;
 use ratatui::backend::Backend;
 use ratatui::layout::Position;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 
 use crate::custom_terminal::Terminal;
 use crate::insert_history::insert_history_lines;
@@ -15,7 +16,7 @@ fn clear_managed_inline_area_preserves_rows_above_devo() {
     let mut term = Terminal::with_options(backend).expect("terminal");
     term.set_viewport_area(Rect::new(0, 2, width, 2));
 
-    insert_history_lines(&mut term, vec!["devo line".into()]).expect("insert history");
+    insert_history_lines(&mut term, vec![Line::from("devo line").into()]).expect("insert history");
     let rows_before: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
     let devo_row = rows_before
         .iter()
@@ -47,14 +48,12 @@ fn clear_screen_area_only_clears_target_rows() {
     term.backend_mut()
         .set_cursor_position(Position { x: 0, y: 1 })
         .expect("cursor position");
-    std::io::Write::write_all(term.backend_mut(), b"keep row")
-        .expect("write preserved row");
+    std::io::Write::write_all(term.backend_mut(), b"keep row").expect("write preserved row");
 
     term.backend_mut()
         .set_cursor_position(Position { x: 0, y: 3 })
         .expect("cursor position");
-    std::io::Write::write_all(term.backend_mut(), b"clear me")
-        .expect("write cleared row");
+    std::io::Write::write_all(term.backend_mut(), b"clear me").expect("write cleared row");
 
     term.clear_screen_area(Rect::new(0, 3, width, 1))
         .expect("clear target area");
@@ -85,11 +84,9 @@ fn clear_inline_viewport_preserves_inserted_history_rows() {
     let mut term = Terminal::with_options(backend).expect("terminal");
     term.set_viewport_area(Rect::new(0, 3, width, 2));
 
-    insert_history_lines(&mut term, vec!["history row".into()]).expect("insert history");
-    let history_row = term
-        .viewport_area
-        .top()
-        .saturating_sub(1);
+    insert_history_lines(&mut term, vec![Line::from("history row").into()])
+        .expect("insert history");
+    let history_row = term.viewport_area.top().saturating_sub(1);
     let viewport_top = term.viewport_area.top();
 
     term.backend_mut()

@@ -372,10 +372,10 @@ fn default_shell_android() -> String {
     target_os = "dragonfly"
 ))]
 fn default_shell_unix() -> String {
-    if let Some(shell) = env::var_os("SHELL") {
-        if !shell.is_empty() {
-            return shell.to_string_lossy().into_owned();
-        }
+    if let Some(shell) = env::var_os("SHELL")
+        && !shell.is_empty()
+    {
+        return shell.to_string_lossy().into_owned();
     }
 
     "/bin/sh".to_string()

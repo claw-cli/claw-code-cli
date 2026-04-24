@@ -72,12 +72,12 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::disable_raw_mode;
 use ratatui::crossterm::terminal::enable_raw_mode;
 use ratatui::layout::Size;
-use ratatui::text::Line;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 
 use crate::custom_terminal;
 use crate::custom_terminal::Terminal as CustomTerminal;
+use crate::history_cell::ScrollbackLine;
 use crate::tui::event_stream::EventBroker;
 use crate::tui::event_stream::TuiEventStream;
 use crate::tui::frame_requester::FrameRequester;
@@ -285,7 +285,7 @@ pub struct Tui {
     draw_tx: broadcast::Sender<()>,
     event_broker: Arc<EventBroker>,
     pub(crate) terminal: Terminal,
-    pending_history_lines: Vec<Line<'static>>,
+    pending_history_lines: Vec<ScrollbackLine>,
     alt_saved_viewport: Option<ratatui::layout::Rect>,
     #[cfg(unix)]
     suspend_context: SuspendContext,
@@ -465,7 +465,7 @@ impl Tui {
         Ok(())
     }
 
-    pub fn insert_history_lines(&mut self, lines: Vec<Line<'static>>) {
+    pub fn insert_history_lines(&mut self, lines: Vec<ScrollbackLine>) {
         self.pending_history_lines.extend(lines);
         self.frame_requester().schedule_frame();
     }
@@ -495,7 +495,7 @@ impl Tui {
 
     fn reset_inline_session_ui<B>(
         terminal: &mut CustomTerminal<B>,
-        pending_history_lines: &mut Vec<Line<'static>>,
+        pending_history_lines: &mut Vec<ScrollbackLine>,
     ) -> Result<()>
     where
         B: Backend + std::io::Write,
@@ -592,7 +592,7 @@ impl Tui {
     /// invalidate the diff buffer for a full repaint.
     fn flush_pending_history_lines(
         terminal: &mut Terminal,
-        pending_history_lines: &mut Vec<Line<'static>>,
+        pending_history_lines: &mut Vec<ScrollbackLine>,
         is_zellij: bool,
     ) -> Result<bool> {
         if pending_history_lines.is_empty() {
@@ -676,7 +676,6 @@ impl Tui {
             })
         })?
     }
-
 }
 
 impl Drop for Tui {
@@ -690,9 +689,11 @@ impl Drop for Tui {
 mod tests {
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
+    use ratatui::text::Line;
 
     use super::Tui;
     use crate::custom_terminal::Terminal as CustomTerminal;
+    use crate::history_cell::ScrollbackLine;
     use crate::insert_history::insert_history_lines;
     use crate::test_backend::VT100Backend;
 
@@ -704,8 +705,9 @@ mod tests {
         let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
         terminal.set_viewport_area(Rect::new(0, 2, width, 2));
 
-        insert_history_lines(&mut terminal, vec!["session 1".into()]).expect("insert history");
-        let mut pending_history_lines = vec!["queued line".into()];
+        insert_history_lines(&mut terminal, vec![Line::from("session 1").into()])
+            .expect("insert history");
+        let mut pending_history_lines = vec![ScrollbackLine::from(Line::from("queued line"))];
 
         Tui::reset_inline_session_ui(&mut terminal, &mut pending_history_lines)
             .expect("reset inline session ui");

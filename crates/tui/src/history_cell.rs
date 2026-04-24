@@ -52,6 +52,32 @@ use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+pub(crate) const AI_REPLY_WRAP_WIDTH: usize = 80;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScrollbackWrapPolicy {
+    LimitToEightyColumns,
+    NoAdditionalWrapLimit,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScrollbackLine {
+    pub(crate) line: Line<'static>,
+    pub(crate) wrap_policy: ScrollbackWrapPolicy,
+}
+
+impl ScrollbackLine {
+    pub(crate) fn new(line: Line<'static>, wrap_policy: ScrollbackWrapPolicy) -> Self {
+        Self { line, wrap_policy }
+    }
+}
+
+impl From<Line<'static>> for ScrollbackLine {
+    fn from(line: Line<'static>) -> Self {
+        Self::new(line, ScrollbackWrapPolicy::LimitToEightyColumns)
+    }
+}
+
 /// Represents an event to display in the conversation history. Returns its
 /// `Vec<Line<'static>>` representation to make it easier to display in a
 /// scrollable list.
@@ -133,6 +159,10 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// the first rendered frame even though the main viewport is animating.
     fn transcript_animation_tick(&self) -> Option<u64> {
         None
+    }
+
+    fn scrollback_wrap_policy(&self) -> ScrollbackWrapPolicy {
+        ScrollbackWrapPolicy::NoAdditionalWrapLimit
     }
 }
 
@@ -328,6 +358,7 @@ impl ReasoningSummaryCell {
     }
 
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
+        let width = width.min(AI_REPLY_WRAP_WIDTH as u16);
         let mut lines: Vec<Line<'static>> = Vec::new();
         append_markdown(
             &self.content,
@@ -369,6 +400,10 @@ impl HistoryCell for ReasoningSummaryCell {
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.lines(width)
     }
+
+    fn scrollback_wrap_policy(&self) -> ScrollbackWrapPolicy {
+        ScrollbackWrapPolicy::LimitToEightyColumns
+    }
 }
 
 #[derive(Debug)]
@@ -377,6 +412,7 @@ pub(crate) struct AgentMessageCell {
     initial_prefix: Line<'static>,
     subsequent_prefix: Line<'static>,
     is_stream_continuation: bool,
+    max_wrap_width: Option<usize>,
 }
 
 impl AgentMessageCell {
@@ -390,6 +426,22 @@ impl AgentMessageCell {
             },
             subsequent_prefix: "  ".into(),
             is_stream_continuation: !is_first_line,
+            max_wrap_width: None,
+        }
+    }
+
+    pub(crate) fn new_ai_response_with_prefix(
+        lines: Vec<Line<'static>>,
+        initial_prefix: impl Into<Line<'static>>,
+        subsequent_prefix: impl Into<Line<'static>>,
+        is_stream_continuation: bool,
+    ) -> Self {
+        Self {
+            lines,
+            initial_prefix: initial_prefix.into(),
+            subsequent_prefix: subsequent_prefix.into(),
+            is_stream_continuation,
+            max_wrap_width: Some(AI_REPLY_WRAP_WIDTH),
         }
     }
 
@@ -404,12 +456,16 @@ impl AgentMessageCell {
             initial_prefix: initial_prefix.into(),
             subsequent_prefix: subsequent_prefix.into(),
             is_stream_continuation,
+            max_wrap_width: None,
         }
     }
 }
 
 impl HistoryCell for AgentMessageCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let width = self
+            .max_wrap_width
+            .map_or(width, |max_wrap_width| width.min(max_wrap_width as u16));
         adaptive_wrap_lines(
             &self.lines,
             RtOptions::new(width as usize)
@@ -420,6 +476,14 @@ impl HistoryCell for AgentMessageCell {
 
     fn is_stream_continuation(&self) -> bool {
         self.is_stream_continuation
+    }
+
+    fn scrollback_wrap_policy(&self) -> ScrollbackWrapPolicy {
+        if self.max_wrap_width == Some(AI_REPLY_WRAP_WIDTH) {
+            ScrollbackWrapPolicy::LimitToEightyColumns
+        } else {
+            ScrollbackWrapPolicy::NoAdditionalWrapLimit
+        }
     }
 }
 
