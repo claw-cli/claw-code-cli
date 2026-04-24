@@ -47,27 +47,40 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install cross-compilation dependencies (Linux ARM64)
+      # Cross-compiling aarch64-unknown-linux-gnu needs a gcc cross-toolchain.
+      # openssl-sys is pulled in via reqwest -> native-tls.
+      # We build with vendored openssl to avoid needing arm64 system libraries.
+      - name: Install cross-compilation toolchain (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu \
-            libssl-dev:arm64 \
-            pkg-config-aarch64-linux-gnu
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
-      - name: Set up OpenSSL for cross-compilation
-        if: runner.os == 'Linux' && matrix.target != ''
+      - name: Set cross-compilation env (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         shell: bash
         run: |
-          if [ '${{ matrix.target }}' = 'aarch64-unknown-linux-gnu' ]; then
-            echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-            echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
-            echo "PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
-            echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-          fi
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
+          echo "CARGO_FEATURE_VENDORED_OPENSSL=1" >> "$GITHUB_ENV"
 
-      - name: Build release binary
+      - name: Build release binary (x86_64 Linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo build --release --target ${{ matrix.target }} -p devo-cli
+
+      - name: Build release binary (Linux ARM64, vendored openssl)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          # Build a dummy build script to prime cached dependencies with the host target first,
+          # then cross-compile. This avoids recompiling the whole dep graph for the cross target.
+          OPENSSL_NO_PKG_CONFIG=1 cargo build --release --target ${{ matrix.target }} -p devo-cli
+
+      - name: Build release binary (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --target ${{ matrix.target }} -p devo-cli
+
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
         run: cargo build --release --target ${{ matrix.target }} -p devo-cli
 
       - name: Strip symbols (Linux/macOS)
