@@ -1202,18 +1202,17 @@ impl ChatWidget {
         body: &str,
         status: DotStatus,
     ) {
+        let markdown_width = if title == "Assistant" || title == "Reasoning" {
+            None
+        } else {
+            Some(AI_REPLY_WRAP_WIDTH)
+        };
         let mut lines = if title == "Assistant" || title == "Reasoning" {
             Vec::new()
         } else {
             vec![Line::from(title.to_string()).bold()]
         };
-        let markdown_width = usize::from(self.last_known_width().max(1)).min(AI_REPLY_WRAP_WIDTH);
-        append_markdown(
-            body,
-            Some(markdown_width),
-            Some(&self.session.cwd),
-            &mut lines,
-        );
+        append_markdown(body, markdown_width, Some(&self.session.cwd), &mut lines);
         if title == "Reasoning" {
             Self::patch_lines_style(&mut lines, Self::reasoning_text_style());
         }
@@ -1256,10 +1255,9 @@ impl ChatWidget {
         style: Style,
     ) -> history_cell::AgentMessageCell {
         let mut lines = Vec::new();
-        let markdown_width = usize::from(self.last_known_width().max(1)).min(AI_REPLY_WRAP_WIDTH);
         append_markdown(
             body,
-            Some(markdown_width),
+            /*width*/ None,
             Some(&self.session.cwd),
             &mut lines,
         );

@@ -624,6 +624,71 @@ fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
 }
 
 #[test]
+fn active_assistant_markdown_does_not_double_wrap() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let body = format!("{} betabet gamma", vec!["alpha"; 12].join(" "));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(body));
+
+    let rendered = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered.contains("betabet gamma"),
+        "expected active assistant markdown to keep trailing words together, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn committed_assistant_markdown_does_not_double_wrap() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let body = format!("{} betabet gamma", vec!["alpha"; 12].join(" "));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(body));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Completed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+    });
+
+    let committed = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        committed.contains("betabet gamma"),
+        "expected committed assistant markdown to keep trailing words together, got:\n{committed}"
+    );
+}
+
+#[test]
 fn reasoning_text_commits_to_history_when_turn_finishes() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
