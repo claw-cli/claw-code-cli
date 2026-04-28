@@ -394,8 +394,13 @@ fn handle_worker_event(
         WorkerEvent::SessionCompactionStarted => {
             loop_state.busy = true;
         }
-        WorkerEvent::SessionCompacted => {
+        WorkerEvent::SessionCompacted {
+            total_input_tokens: next_total_input_tokens,
+            total_output_tokens: next_total_output_tokens,
+        } => {
             loop_state.busy = false;
+            loop_state.total_input_tokens = *next_total_input_tokens;
+            loop_state.total_output_tokens = *next_total_output_tokens;
         }
         WorkerEvent::SessionCompactionFailed { .. } => {
             loop_state.busy = false;

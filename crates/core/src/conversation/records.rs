@@ -299,6 +299,8 @@ pub struct CompactionSnapshotLine {
     pub turn_id: TurnId,
     /// The summary item that represents the compacted history.
     pub summary_item_id: ItemId,
+    /// The pre-existing item ids that remain after compaction, in prompt order.
+    pub preserved_item_ids: Vec<ItemId>,
 }
 
 /// Enumerates every canonical line type written to the rollout journal.

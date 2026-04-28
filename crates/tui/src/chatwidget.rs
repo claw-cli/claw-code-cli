@@ -233,6 +233,7 @@ impl ChatWidget {
     fn build_header_box(
         cwd: &std::path::Path,
         model: Option<&Model>,
+        thinking_selection: Option<&str>,
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
     ) -> Box<dyn HistoryCell> {
@@ -242,12 +243,15 @@ impl ChatWidget {
             provider: ProviderWireApi::OpenAIChatCompletions,
             ..Model::default()
         });
+        let effective_effort = model
+            .resolve_thinking_selection(thinking_selection)
+            .effective_reasoning_effort;
         Box::new(history_cell::new_session_info(
             cwd,
             &model.slug,
             model.display_name.clone(),
             model.thinking_capability.clone(),
-            model.default_reasoning_effort,
+            effective_effort,
             model.thinking_implementation.clone(),
             is_first_run,
             startup_tooltip_override,
@@ -370,6 +374,7 @@ impl ChatWidget {
         self.history.push(Self::build_header_box(
             &self.session.cwd,
             self.session.model.as_ref(),
+            self.thinking_selection.as_deref(),
             is_first_run,
             startup_tooltip_override,
         ));
@@ -487,6 +492,7 @@ impl ChatWidget {
         let history: Vec<Box<dyn HistoryCell>> = vec![Self::build_header_box(
             &initial_session.cwd,
             initial_session.model.as_ref(),
+            thinking_selection.as_deref(),
             is_first_run,
             startup_tooltip_override,
         )];
@@ -647,6 +653,7 @@ impl ChatWidget {
             WorkerEvent::TurnStarted { model, thinking } => {
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
+                self.refresh_header_box();
                 self.busy = true;
                 self.active_assistant_text.clear();
                 self.active_reasoning_text.clear();
@@ -907,9 +914,18 @@ impl ChatWidget {
                 self.bottom_pane.set_task_running(true);
                 self.set_status_message("Session compaction in progress");
             }
-            WorkerEvent::SessionCompacted => {
+            WorkerEvent::SessionCompacted {
+                total_input_tokens,
+                total_output_tokens,
+            } => {
                 self.busy = false;
                 self.bottom_pane.set_task_running(false);
+                self.total_input_tokens = total_input_tokens;
+                self.total_output_tokens = total_output_tokens;
+                self.add_to_history(history_cell::new_info_event(
+                    "Session compaction done".to_string(),
+                    None,
+                ));
                 self.set_status_message("Session compacted");
             }
             WorkerEvent::SessionCompactionFailed { message } => {
@@ -1258,10 +1274,6 @@ impl ChatWidget {
             vec![Line::from(title.to_string()).bold()]
         };
         if title == "Reasoning" {
-            lines.push(Line::from(Span::styled(
-                "Thinking:",
-                Self::reasoning_heading_style(),
-            )));
             let mut body_lines = Vec::new();
             append_markdown(
                 body,
@@ -1270,6 +1282,12 @@ impl ChatWidget {
                 &mut body_lines,
             );
             Self::patch_lines_style(&mut body_lines, Self::reasoning_text_style());
+            if let Some(first_line) = body_lines.first_mut() {
+                first_line.spans.insert(
+                    0,
+                    Span::styled("Thinking: ", Self::reasoning_heading_style()),
+                );
+            }
             lines.extend(body_lines);
         } else {
             append_markdown(body, markdown_width, Some(&self.session.cwd), &mut lines);
@@ -1421,10 +1439,6 @@ impl ChatWidget {
 
     fn sync_active_reasoning_cell(&mut self) {
         if !self.active_reasoning_text.trim().is_empty() {
-            let mut lines = vec![Line::from(Span::styled(
-                "Thinking:",
-                Self::reasoning_heading_style(),
-            ))];
             let mut body_lines = Vec::new();
             append_markdown(
                 &self.active_reasoning_text,
@@ -1433,7 +1447,13 @@ impl ChatWidget {
                 &mut body_lines,
             );
             Self::patch_lines_style(&mut body_lines, Self::reasoning_text_style());
-            lines.extend(body_lines);
+            if let Some(first_line) = body_lines.first_mut() {
+                first_line.spans.insert(
+                    0,
+                    Span::styled("Thinking: ", Self::reasoning_heading_style()),
+                );
+            }
+            let lines = body_lines;
             self.active_reasoning_cell =
                 Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
                     lines,
@@ -1468,7 +1488,21 @@ impl ChatWidget {
 
     pub(crate) fn set_thinking_selection(&mut self, selection: Option<String>) {
         self.thinking_selection = selection;
+        self.refresh_header_box();
         self.frame_requester.schedule_frame();
+    }
+
+    fn refresh_header_box(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        self.history[0] = Self::build_header_box(
+            &self.session.cwd,
+            self.session.model.as_ref(),
+            self.thinking_selection.as_deref(),
+            /*is_first_run*/ false,
+            None,
+        );
     }
 
     pub(crate) fn current_model(&self) -> Option<&Model> {
@@ -1747,6 +1781,12 @@ impl ChatWidget {
             );
         }
         self.next_history_flush_index = self.history.len();
+        if !lines.is_empty() {
+            lines.push(ScrollbackLine::new(
+                Line::from(""),
+                history_cell::ScrollbackWrapPolicy::NoAdditionalWrapLimit,
+            ));
+        }
         lines
     }
 
@@ -1828,6 +1868,7 @@ impl ChatWidget {
 
     fn apply_thinking_selection(&mut self, value: String) {
         self.thinking_selection = Some(value.clone());
+        self.refresh_header_box();
         self.app_event_tx
             .send(AppEvent::Command(AppCommand::override_turn_context(
                 /*cwd*/ None,

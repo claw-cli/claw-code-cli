@@ -97,6 +97,20 @@ fn find_row_index(rows: &[String], needle: &str) -> Option<usize> {
     rows.iter().position(|row| row.contains(needle))
 }
 
+fn trim_trailing_blank_scrollback_lines(
+    mut lines: Vec<crate::history_cell::ScrollbackLine>,
+) -> Vec<crate::history_cell::ScrollbackLine> {
+    while lines.last().is_some_and(|line| {
+        line.line
+            .spans
+            .iter()
+            .all(|span| span.content.trim().is_empty())
+    }) {
+        lines.pop();
+    }
+    lines
+}
+
 #[test]
 fn resume_command_opens_loading_browser_immediately() {
     let model = Model {
@@ -448,7 +462,7 @@ fn committed_history_drains_to_scrollback_lines() {
         total_output_tokens: 0,
     });
 
-    let committed_lines = widget.drain_scrollback_lines(80);
+    let committed_lines = trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
     assert!(committed_lines.is_empty());
 }
 
@@ -467,12 +481,12 @@ fn streamed_history_stays_empty_until_turn_finishes() {
         "first\nsecond\n".to_string(),
     ));
 
-    let committed_lines = widget.drain_scrollback_lines(80);
+    let committed_lines = trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
     assert!(committed_lines.is_empty());
 }
 
 #[test]
-fn batched_history_inserts_one_blank_line_between_cells() {
+fn batched_history_inserts_separator_and_trailing_blank_lines() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
         slug: "test-model".to_string(),
@@ -503,13 +517,13 @@ fn batched_history_inserts_one_blank_line_between_cells() {
         .count();
 
     assert_eq!(
-        1, blank_lines,
+        2, blank_lines,
         "unexpected blank lines: {committed_lines:?}"
     );
 }
 
 #[test]
-fn session_switch_restores_one_header_and_compact_history() {
+fn session_switch_restores_header_and_double_blank_line_before_user_input() {
     let initial_cwd = std::env::current_dir().expect("current directory is available");
     let resumed_cwd = initial_cwd.join("resumed");
     let model = Model {
@@ -554,22 +568,25 @@ fn session_switch_restores_one_header_and_compact_history() {
         .flat_map(|line| line.line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
-    let has_consecutive_blank_lines = committed_lines.windows(2).any(|window| {
-        window.iter().all(|line| {
+    let blank_line_indexes = committed_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
             line.line
                 .spans
                 .iter()
                 .all(|span| span.content.trim().is_empty())
+                .then_some(index)
         })
-    });
+        .collect::<Vec<_>>();
 
     assert_eq!(1, committed_text.matches("directory:").count());
     assert!(committed_text.contains("hello"));
     assert!(committed_text.contains("world"));
     assert!(!committed_text.contains("session 1 lingering line"));
     assert!(
-        !has_consecutive_blank_lines,
-        "unexpected consecutive blank lines: {committed_lines:?}"
+        blank_line_indexes.windows(2).any(|window| window == [6, 7]),
+        "expected two blank lines before restored user input: {committed_lines:?}"
     );
 }
 

@@ -650,6 +650,106 @@ async fn session_compact_runs_asynchronously_and_emits_lifecycle_events() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn compacted_session_replays_as_compacted_after_restart() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let runtime = build_runtime(data_root.path())?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+
+    let start_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 61,
+                "method": "session/start",
+                "params": {
+                    "cwd": data_root.path(),
+                    "ephemeral": false,
+                    "title": "Persist compacted session",
+                    "model": "test-model"
+                }
+            }),
+        )
+        .await
+        .context("session/start response")?;
+    let session_id = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionStartResult>,
+    >(start_response)?
+    .result
+    .session
+    .session_id;
+
+    for request_id in 0..3 {
+        let large_prompt = "x".repeat(30_000);
+        let _ = runtime
+            .handle_incoming(
+                connection_id,
+                serde_json::json!({
+                    "id": 62 + request_id,
+                    "method": "turn/start",
+                    "params": {
+                        "session_id": session_id,
+                        "input": [{ "type": "text", "text": large_prompt }],
+                        "model": null,
+                        "sandbox": null,
+                        "approval_policy": null,
+                        "cwd": null
+                    }
+                }),
+            )
+            .await
+            .context("turn/start response")?;
+        wait_for_turn_completed(&mut notifications_rx).await?;
+    }
+
+    let _ = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 70,
+                "method": "session/compact",
+                "params": {
+                    "session_id": session_id
+                }
+            }),
+        )
+        .await
+        .context("session/compact response")?;
+    wait_for_notification_method(&mut notifications_rx, "session/compaction/completed").await?;
+
+    let rebuilt_runtime = build_runtime(data_root.path())?;
+    rebuilt_runtime.load_persisted_sessions().await?;
+    let (rebuilt_connection_id, _notifications_rx) =
+        initialize_connection(&rebuilt_runtime).await?;
+
+    let resume_response = rebuilt_runtime
+        .handle_incoming(
+            rebuilt_connection_id,
+            serde_json::json!({
+                "id": 71,
+                "method": "session/resume",
+                "params": {
+                    "session_id": session_id
+                }
+            }),
+        )
+        .await
+        .context("session/resume response")?;
+    let resume_result = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionResumeResult>,
+    >(resume_response)?
+    .result;
+
+    assert!(
+        resume_result
+            .history_items
+            .iter()
+            .any(|item| item.body.contains("<compaction_summary>")),
+        "expected resumed history to contain compacted summary"
+    );
+    Ok(())
+}
+
 fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
     Ok(ServerRuntime::new(
         data_root.to_path_buf(),

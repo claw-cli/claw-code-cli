@@ -15,7 +15,9 @@ use chrono::SecondsFormat;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
+use devo_core::CompactionSnapshotLine;
 use devo_core::ContentBlock;
+use devo_core::ItemId;
 use devo_core::ItemLine;
 use devo_core::ItemRecord;
 use devo_core::Message;
@@ -37,6 +39,7 @@ use devo_core::TurnRecord;
 use devo_core::TurnStatus;
 use devo_core::Worklog;
 
+use crate::execution::PersistedTurnItem;
 use crate::execution::RuntimeSession;
 use crate::execution::ServerRuntimeDependencies;
 use crate::projection::history_item_from_turn_item;
@@ -181,6 +184,18 @@ impl RolloutStore {
         )
     }
 
+    /// Appends one compaction snapshot line to the durable rollout journal.
+    pub(crate) fn append_compaction_snapshot(
+        &self,
+        record: &SessionRecord,
+        snapshot: CompactionSnapshotLine,
+    ) -> Result<()> {
+        self.append_line(
+            &record.rollout_path,
+            &RolloutLine::CompactionSnapshot(Box::new(snapshot)),
+        )
+    }
+
     /// Loads every durable session that can be rebuilt from canonical rollout files.
     pub(crate) fn load_sessions(
         &self,
@@ -318,6 +333,7 @@ struct ReplayState {
     messages: Vec<Message>,
     history_items: Vec<crate::SessionHistoryItem>,
     pending_items: Vec<ReplayHistoryItem>,
+    latest_compaction_snapshot: Option<CompactionSnapshotLine>,
 }
 
 impl ReplayState {
@@ -372,7 +388,9 @@ impl ReplayState {
                 session.title_state = line.title_state;
                 session.updated_at = line.timestamp;
             }
-            RolloutLine::CompactionSnapshot(_) => {}
+            RolloutLine::CompactionSnapshot(line) => {
+                self.latest_compaction_snapshot = Some(*line);
+            }
         }
         Ok(())
     }
@@ -391,16 +409,25 @@ impl ReplayState {
                 .then_with(|| left.intra_record_order.cmp(&right.intra_record_order))
         });
 
+        if let Some(snapshot) = &self.latest_compaction_snapshot {
+            apply_compaction_snapshot(&mut ordered_items, snapshot);
+        }
+
         let mut replayed_messages = self.messages;
         let mut replayed_history_items = self.history_items;
+        let mut replayed_persisted_turn_items = Vec::with_capacity(ordered_items.len());
         let mut tool_names_by_id = HashMap::new();
         for pending_item in ordered_items {
             apply_turn_item(
                 &mut replayed_messages,
                 &mut replayed_history_items,
                 &mut tool_names_by_id,
-                pending_item.turn_item,
+                pending_item.turn_item.clone(),
             );
+            replayed_persisted_turn_items.push(PersistedTurnItem {
+                item_id: pending_item.item_id,
+                turn_item: pending_item.turn_item,
+            });
         }
 
         core_session.messages = replayed_messages;
@@ -440,6 +467,7 @@ impl ReplayState {
             latest_turn: self.latest_turn_metadata,
             loaded_item_count: self.loaded_item_count,
             history_items: replayed_history_items,
+            persisted_turn_items: replayed_persisted_turn_items,
             steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
@@ -449,6 +477,7 @@ impl ReplayState {
     }
 
     fn collect_item_line(&mut self, item: ItemRecord) {
+        let item_id = item.id;
         let record_timestamp = item.timestamp;
         let line_timestamp = record_timestamp;
         let seq = item.seq;
@@ -456,6 +485,7 @@ impl ReplayState {
 
         for turn_item in item.output_items {
             self.pending_items.push(ReplayHistoryItem {
+                item_id,
                 seq,
                 timestamp: record_timestamp,
                 record_timestamp,
@@ -469,6 +499,7 @@ impl ReplayState {
 
         for turn_item in item.input_items {
             self.pending_items.push(ReplayHistoryItem {
+                item_id,
                 seq,
                 timestamp: record_timestamp,
                 record_timestamp,
@@ -482,8 +513,9 @@ impl ReplayState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ReplayHistoryItem {
+    item_id: ItemId,
     seq: u64,
     timestamp: chrono::DateTime<Utc>,
     record_timestamp: chrono::DateTime<Utc>,
@@ -491,6 +523,47 @@ struct ReplayHistoryItem {
     bucket_priority: u8,
     intra_record_order: usize,
     turn_item: TurnItem,
+}
+
+fn apply_compaction_snapshot(
+    ordered_items: &mut Vec<ReplayHistoryItem>,
+    snapshot: &CompactionSnapshotLine,
+) {
+    let Some(summary_index) = ordered_items
+        .iter()
+        .position(|item| item.item_id == snapshot.summary_item_id)
+    else {
+        return;
+    };
+    let summary_seq = ordered_items[summary_index].seq;
+
+    let mut by_item_id: HashMap<ItemId, ReplayHistoryItem> = ordered_items
+        .iter()
+        .cloned()
+        .map(|item| (item.item_id, item))
+        .collect();
+
+    let mut rebuilt = Vec::new();
+    if let Some(summary_item) = by_item_id.remove(&snapshot.summary_item_id) {
+        rebuilt.push(summary_item);
+    }
+
+    for preserved_id in &snapshot.preserved_item_ids {
+        if let Some(item) = by_item_id.remove(preserved_id) {
+            rebuilt.push(item);
+        }
+    }
+
+    rebuilt.extend(
+        ordered_items
+            .iter()
+            .filter(|item| item.seq > summary_seq)
+            .filter(|item| item.item_id != snapshot.summary_item_id)
+            .filter(|item| !snapshot.preserved_item_ids.contains(&item.item_id))
+            .cloned(),
+    );
+
+    *ordered_items = rebuilt;
 }
 
 fn apply_turn_item(

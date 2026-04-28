@@ -162,11 +162,18 @@ pub async fn compact_history(
     }
 
     // 1. Filter out Reason items.
-    let filtered = normalize::filter_reason(items);
+    let mut filtered = normalize::filter_reason(items);
+    normalize::pair_tool_call_items(&mut filtered);
 
-    // 2. Split into "to compact" (old) and "to preserve" (recent).
-    let (mut to_compact, mut preserved) =
-        split_by_user_message_budget(&filtered, COMPACT_USER_MESSAGE_MAX_TOKENS);
+    // 2. Determine what to summarize vs what to preserve in the final history.
+    let (mut to_compact, mut preserved) = if config.kind == CompactionKind::Proactive {
+        (
+            filtered.clone(),
+            preserve_suffix_from_latest_user_message(&filtered),
+        )
+    } else {
+        split_by_user_message_budget(&filtered, COMPACT_USER_MESSAGE_MAX_TOKENS)
+    };
 
     if to_compact.is_empty() {
         // Nothing to compact — everything is within the preserve budget.
@@ -288,6 +295,16 @@ fn split_by_user_message_budget(
         let preserve = items[preserve_from..].to_vec();
         (compact, preserve)
     }
+}
+
+fn preserve_suffix_from_latest_user_message(items: &[ResponseItem]) -> Vec<ResponseItem> {
+    let Some(latest_user_index) = items.iter().rposition(
+        |item| matches!(item, ResponseItem::Message(msg) if msg.role == devo_protocol::Role::User),
+    ) else {
+        return Vec::new();
+    };
+
+    items[latest_user_index..].to_vec()
 }
 
 /// Merges consecutive `RequestMessage`s that share the same role into a single
@@ -444,6 +461,53 @@ mod tests {
 
         // The preserved part should be the tail.
         assert_eq!(preserve.len() + compact.len(), items.len());
+    }
+
+    #[tokio::test]
+    async fn proactive_compaction_summarizes_all_history_and_preserves_latest_user_suffix() {
+        struct StubSummarizer;
+
+        #[async_trait]
+        impl HistorySummarizer for StubSummarizer {
+            async fn summarize(
+                &self,
+                messages: Vec<RequestMessage>,
+            ) -> Result<String, CompactionError> {
+                assert_eq!(messages.len(), 4);
+                Ok("summary".to_string())
+            }
+        }
+
+        let items = vec![
+            ResponseItem::Message(Message::user("first")),
+            ResponseItem::Message(Message::assistant_text("reply")),
+            ResponseItem::Message(Message::user("latest user")),
+        ];
+        let token_info = TokenInfo {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+        };
+        let config = CompactionConfig {
+            budget: TokenBudget::new(200_000, 8192),
+            kind: CompactionKind::Proactive,
+        };
+
+        let action = compact_history(&items, &token_info, &StubSummarizer, &config)
+            .await
+            .expect("proactive compaction should succeed");
+
+        match action {
+            CompactAction::Replaced(compacted) => {
+                assert_eq!(compacted.len(), 2);
+                assert!(matches!(compacted[0], ResponseItem::Message(_)));
+                assert_eq!(
+                    compacted[1],
+                    ResponseItem::Message(Message::user("latest user"))
+                );
+            }
+            CompactAction::Skipped => panic!("expected proactive compaction to replace history"),
+        }
     }
 
     #[test]

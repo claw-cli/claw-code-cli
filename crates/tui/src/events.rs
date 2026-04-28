@@ -160,7 +160,12 @@ pub(crate) enum WorkerEvent {
     /// The active session started a proactive compaction request.
     SessionCompactionStarted,
     /// The active session completed a proactive compaction request.
-    SessionCompacted,
+    SessionCompacted {
+        /// Total input tokens accumulated in the compacted session.
+        total_input_tokens: usize,
+        /// Total output tokens accumulated in the compacted session.
+        total_output_tokens: usize,
+    },
     /// The active session compaction request failed.
     SessionCompactionFailed {
         /// Human-readable failure reason.

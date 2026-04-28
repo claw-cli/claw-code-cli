@@ -7,8 +7,6 @@ use tracing::debug;
 
 use super::compaction::{CompactionError, HistorySummarizer};
 
-const COMPACTION_LOG_PREVIEW_BYTES: usize = 16_000;
-
 /// Concrete implementation of `HistorySummarizer` that delegates to a
 /// `ModelProviderSDK`.
 ///
@@ -46,20 +44,20 @@ impl DefaultHistorySummarizer {
     }
 }
 
-fn truncate_preview(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-
-    let truncate_at = text
-        .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= max_bytes)
-        .last()
-        .unwrap_or(0);
-    let mut truncated = text[..truncate_at].to_string();
-    truncated.push_str("\n...[truncated]");
-    truncated
+fn sanitize_compaction_summary(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.contains("DSML")
+                && !trimmed.starts_with("<｜")
+                && !trimmed.ends_with("｜>")
+                && !trimmed.starts_with("<|")
+                && !trimmed.ends_with("|>")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 #[async_trait]
@@ -76,11 +74,9 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             reasoning_effort: None,
             extra_body: None,
         };
-        let request_preview = serde_json::to_string_pretty(&request)
-            .map(|json| truncate_preview(&json, COMPACTION_LOG_PREVIEW_BYTES))
-            .unwrap_or_else(|error| {
-                format!("<failed to serialize compaction request for logging: {error}>")
-            });
+        let request_preview = serde_json::to_string_pretty(&request).unwrap_or_else(|error| {
+            format!("<failed to serialize compaction request for logging: {error}>")
+        });
         debug!(
             model = %self.model,
             message_count = request.messages.len(),
@@ -112,18 +108,42 @@ impl HistorySummarizer for DefaultHistorySummarizer {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let text = sanitize_compaction_summary(&text);
+
         if text.is_empty() {
             return Err(CompactionError::EmptyResponse);
         }
 
-        let response_preview = truncate_preview(&text, COMPACTION_LOG_PREVIEW_BYTES);
         debug!(
             model = %self.model,
             response_chars = text.len(),
-            compaction_response = %response_preview,
+            compaction_response = %text,
             "received LLM compaction response"
         );
 
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::sanitize_compaction_summary;
+
+    #[test]
+    fn sanitize_compaction_summary_strips_dsml_tool_markup() {
+        let input = r#"Progress so far
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="grep">
+<｜DSML｜parameter name="path" string="true">src</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>
+Next step"#;
+
+        assert_eq!(
+            sanitize_compaction_summary(input),
+            "Progress so far\nNext step"
+        );
     }
 }

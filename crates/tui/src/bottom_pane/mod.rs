@@ -142,6 +142,7 @@ pub(crate) struct BottomPane {
     /// Status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
     is_task_running: bool,
+    pending_interrupt_esc: bool,
     animations_enabled: bool,
     has_input_focus: bool,
     allow_empty_submit: bool,
@@ -185,6 +186,7 @@ impl BottomPane {
             placeholder_text,
             status: None,
             is_task_running: false,
+            pending_interrupt_esc: false,
             animations_enabled,
             has_input_focus,
             allow_empty_submit: false,
@@ -203,7 +205,17 @@ impl BottomPane {
             && self.is_task_running
             && !self.composer.popup_active()
         {
-            self.app_event_tx.send(AppEvent::Interrupt);
+            if self.pending_interrupt_esc {
+                self.pending_interrupt_esc = false;
+                self.app_event_tx.send(AppEvent::Interrupt);
+                self.restore_status_indicator();
+            } else {
+                self.pending_interrupt_esc = true;
+                if let Some(status) = self.status.as_mut() {
+                    status.set_interrupt_hint_visible(false);
+                    status.update_inline_message(Some("Press ESC again to stop".to_string()));
+                }
+            }
             self.request_redraw();
             return InputResult::None;
         }
@@ -348,6 +360,7 @@ impl BottomPane {
         let was_running = self.is_task_running;
         self.is_task_running = running;
         if running {
+            self.pending_interrupt_esc = false;
             if !was_running {
                 if self.status.is_none() {
                     self.status = Some(StatusIndicatorWidget::new(
@@ -368,7 +381,16 @@ impl BottomPane {
 
     pub(crate) fn hide_status_indicator(&mut self) {
         if self.status.take().is_some() {
+            self.pending_interrupt_esc = false;
             self.request_redraw();
+        }
+    }
+
+    fn restore_status_indicator(&mut self) {
+        self.pending_interrupt_esc = false;
+        if let Some(status) = self.status.as_mut() {
+            status.set_interrupt_hint_visible(true);
+            status.update_inline_message(None);
         }
     }
 

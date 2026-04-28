@@ -1,24 +1,40 @@
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex},
-};
+use std::collections::VecDeque;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 
-use devo_core::{
-    AgentsMdConfig, Model, ModelCatalog, ResolvedSkill, SessionConfig, SessionId, SessionRecord,
-    SessionState, SkillCatalog, SkillError, SkillId, TurnConfig, default_base_instructions,
-    normalize_canonical_path,
-};
+use devo_core::AgentsMdConfig;
+use devo_core::Model;
+use devo_core::ModelCatalog;
+use devo_core::ResolvedSkill;
+use devo_core::SessionConfig;
+use devo_core::SessionId;
+use devo_core::SessionRecord;
+use devo_core::SessionState;
+use devo_core::SkillCatalog;
+use devo_core::SkillError;
+use devo_core::SkillId;
+use devo_core::TurnConfig;
+use devo_core::default_base_instructions;
+use devo_core::normalize_canonical_path;
 use devo_provider::ModelProviderSDK;
 use devo_tools::ToolRegistry;
 
-use crate::{
-    InputItem, SkillRecord,
-    session::{SessionHistoryItem, SessionMetadata},
-    turn::TurnMetadata,
-};
+use crate::InputItem;
+use crate::SkillRecord;
+use crate::session::SessionHistoryItem;
+use crate::session::SessionMetadata;
+use crate::turn::TurnMetadata;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PersistedTurnItem {
+    pub(crate) item_id: devo_core::ItemId,
+    pub(crate) turn_item: devo_core::TurnItem,
+}
 
 /// Shared server-owned runtime dependencies used by live turn execution.
 pub struct ServerRuntimeDependencies {
@@ -205,6 +221,8 @@ pub(crate) struct RuntimeSession {
     pub(crate) loaded_item_count: u64,
     /// Replay-friendly ordered history used by interactive clients during session resume.
     pub(crate) history_items: Vec<SessionHistoryItem>,
+    /// Canonical persisted turn items in prompt order for replay/compaction bookkeeping.
+    pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
     /// Pending same-turn steering inputs.
     pub(crate) steering_queue: Arc<StdMutex<VecDeque<String>>>,
     /// Live query task for the active turn.

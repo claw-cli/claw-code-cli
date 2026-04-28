@@ -74,7 +74,7 @@ async fn run_cli() -> Result<()> {
                 working_root: working_root.clone(),
                 transport: *transport,
             };
-            let _logging = install_server_logging(&args)?;
+            let _logging = install_server_logging(&args, &cli)?;
             run_server_process(args).await
         }
         None => {
@@ -125,9 +125,10 @@ fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
     .map_err(Into::into)
 }
 
-fn install_server_logging(args: &ServerProcessArgs) -> Result<LoggingRuntime> {
+fn install_server_logging(args: &ServerProcessArgs, cli: &Cli) -> Result<LoggingRuntime> {
     let home_dir = find_devo_home()?;
-    let loader = devo_core::FileSystemAppConfigLoader::new(home_dir.clone());
+    let loader = devo_core::FileSystemAppConfigLoader::new(home_dir.clone())
+        .with_cli_overrides(cli_logging_overrides(cli));
     let app_config = loader
         .load(args.working_root.as_deref())
         .unwrap_or_else(|err| {

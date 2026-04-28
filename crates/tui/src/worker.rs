@@ -543,6 +543,7 @@ async fn run_worker_inner(
                                     .clone()
                                     .unwrap_or(model);
                                 thinking_selection = result.session.thinking.clone();
+                                let _ = event_tx.send(WorkerEvent::SessionCompactionStarted);
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -835,13 +836,16 @@ async fn run_worker_inner(
                                     }
                             }
                             "session/compaction/started" => {
-                                if let ServerEvent::SessionCompactionStarted(_) = event {
-                                    let _ = event_tx.send(WorkerEvent::SessionCompactionStarted);
-                                }
+                                let _ = event;
                             }
                             "session/compaction/completed" => {
-                                if let ServerEvent::SessionCompactionCompleted(_) = event {
-                                    let _ = event_tx.send(WorkerEvent::SessionCompacted);
+                                if let ServerEvent::SessionCompactionCompleted(payload) = event {
+                                    total_input_tokens = payload.session.total_input_tokens;
+                                    total_output_tokens = payload.session.total_output_tokens;
+                                    let _ = event_tx.send(WorkerEvent::SessionCompacted {
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                    });
                                 }
                             }
                             "session/compaction/failed" => {

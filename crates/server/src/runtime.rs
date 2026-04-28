@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use chrono::Utc;
+use futures::FutureExt;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -28,6 +30,7 @@ use devo_core::history::compaction::CompactAction;
 use devo_core::history::compaction::CompactionConfig;
 use devo_core::history::compaction::CompactionKind;
 use devo_core::history::compaction::compact_history;
+use devo_core::history::normalize;
 use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
@@ -368,6 +371,7 @@ impl ServerRuntime {
                 latest_turn: None,
                 loaded_item_count: 0,
                 history_items: Vec::new(),
+                persisted_turn_items: Vec::new(),
                 steering_queue,
                 active_task: None,
                 next_item_seq: 1,
@@ -661,6 +665,7 @@ impl ServerRuntime {
         let latest_turn = source.latest_turn.clone();
         let loaded_item_count = source.loaded_item_count;
         let history_items = source.history_items.clone();
+        let persisted_turn_items = source.persisted_turn_items.clone();
         drop(source_core_session);
         drop(source);
         let steering_queue = Arc::clone(&core_session.pending_user_prompts);
@@ -674,6 +679,7 @@ impl ServerRuntime {
                 latest_turn,
                 loaded_item_count,
                 history_items,
+                persisted_turn_items,
                 steering_queue,
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
@@ -766,10 +772,19 @@ impl ServerRuntime {
 
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
-            runtime
-                .run_session_compaction(params.session_id, session_arc)
-                .await;
+            if let Err(panic) =
+                AssertUnwindSafe(runtime.run_session_compaction(params.session_id, session_arc))
+                    .catch_unwind()
+                    .await
+            {
+                tracing::error!(
+                    session_id = %params.session_id,
+                    panic = ?panic,
+                    "session compaction task panicked"
+                );
+            }
         });
+        tracing::info!(session_id = %params.session_id, "accepted async session compaction request");
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -783,6 +798,7 @@ impl ServerRuntime {
         session_id: SessionId,
         session_arc: Arc<tokio::sync::Mutex<crate::execution::RuntimeSession>>,
     ) {
+        tracing::info!(session_id = %session_id, "session compaction task started");
         let started_summary = {
             let runtime_session = session_arc.lock().await;
             runtime_session.summary.clone()
@@ -825,6 +841,15 @@ impl ServerRuntime {
                 model_slug,
                 max_tokens,
             );
+            tracing::debug!(
+                session_id = %session_id,
+                model = %model_slug,
+                item_count = items.len(),
+                input_tokens = token_info.input_tokens,
+                cached_input_tokens = token_info.cached_input_tokens,
+                output_tokens = token_info.output_tokens,
+                "starting compaction summarization"
+            );
 
             let config = CompactionConfig {
                 budget: core_session.config.token_budget.clone(),
@@ -837,6 +862,13 @@ impl ServerRuntime {
         match result {
             Ok(CompactAction::Replaced(compacted_items)) => {
                 let mut runtime_session = session_arc.lock().await;
+                let normalized_persisted_items = Self::normalized_persisted_response_items(
+                    &runtime_session.persisted_turn_items,
+                );
+                let preserved_item_ids = Self::preserved_item_ids_from_compacted(
+                    &normalized_persisted_items,
+                    &compacted_items,
+                );
                 let new_messages: Vec<Message> = compacted_items
                     .iter()
                     .filter_map(|item| match item {
@@ -848,6 +880,11 @@ impl ServerRuntime {
                 {
                     let mut core_session = runtime_session.core_session.lock().await;
                     core_session.messages = new_messages;
+                    let compacted_total_input_tokens = core_session.total_input_tokens;
+                    let compacted_total_output_tokens = core_session.total_output_tokens;
+                    drop(core_session);
+                    runtime_session.summary.total_input_tokens = compacted_total_input_tokens;
+                    runtime_session.summary.total_output_tokens = compacted_total_output_tokens;
                 }
 
                 if let Some(turn_id) = runtime_session
@@ -858,6 +895,7 @@ impl ServerRuntime {
                 {
                     let item_id = devo_core::ItemId::new();
                     let item_seq = runtime_session.next_item_seq;
+                    runtime_session.loaded_item_count += 1;
                     runtime_session.next_item_seq += 1;
 
                     let payload = serde_json::json!({ "title": "Context Compaction" });
@@ -890,9 +928,74 @@ impl ServerRuntime {
                         },
                     }))
                     .await;
+
+                    if let Some(record) = runtime_session.record.clone() {
+                        let summary_turn_item =
+                            Self::summary_turn_item_from_compacted(&compacted_items);
+                        if let Some(history_item) = history_item_from_turn_item(&summary_turn_item)
+                        {
+                            let preserved_history_items = Self::filter_history_items_by_ids(
+                                &runtime_session,
+                                &preserved_item_ids,
+                            );
+                            let mut rebuilt_history_items =
+                                Vec::with_capacity(preserved_history_items.len() + 1);
+                            rebuilt_history_items.push(history_item);
+                            rebuilt_history_items.extend(preserved_history_items);
+                            runtime_session.history_items = rebuilt_history_items;
+                        }
+
+                        let preserved_turn_items = runtime_session
+                            .persisted_turn_items
+                            .iter()
+                            .filter(|item| preserved_item_ids.contains(&item.item_id))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        runtime_session.persisted_turn_items =
+                            std::iter::once(crate::execution::PersistedTurnItem {
+                                item_id,
+                                turn_item: summary_turn_item.clone(),
+                            })
+                            .chain(preserved_turn_items)
+                            .collect();
+
+                        let item_record = crate::persistence::build_item_record(
+                            session_id,
+                            turn_id,
+                            item_id,
+                            item_seq,
+                            summary_turn_item,
+                            None,
+                            None,
+                        );
+                        if let Err(error) = self.rollout_store.append_item(&record, item_record) {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %error,
+                                "failed to persist compaction summary item"
+                            );
+                        }
+                        if let Err(error) = self.rollout_store.append_compaction_snapshot(
+                            &record,
+                            devo_core::CompactionSnapshotLine {
+                                timestamp: Utc::now(),
+                                session_id,
+                                turn_id,
+                                summary_item_id: item_id,
+                                preserved_item_ids: preserved_item_ids.clone(),
+                            },
+                        ) {
+                            tracing::warn!(
+                                session_id = %session_id,
+                                error = %error,
+                                "failed to persist compaction snapshot"
+                            );
+                        }
+                    }
                 }
 
                 let summary = runtime_session.summary.clone();
+                tracing::info!(session_id = %session_id, "session compaction completed with replacement");
                 self.broadcast_event(ServerEvent::SessionCompactionCompleted(
                     SessionEventPayload { session: summary },
                 ))
@@ -901,12 +1004,14 @@ impl ServerRuntime {
             Ok(CompactAction::Skipped) => {
                 let runtime_session = session_arc.lock().await;
                 let summary = runtime_session.summary.clone();
+                tracing::info!(session_id = %session_id, "session compaction completed without replacement");
                 self.broadcast_event(ServerEvent::SessionCompactionCompleted(
                     SessionEventPayload { session: summary },
                 ))
                 .await;
             }
             Err(error) => {
+                tracing::warn!(session_id = %session_id, error = %error, "session compaction failed");
                 self.broadcast_event(ServerEvent::SessionCompactionFailed(
                     SessionCompactionFailedPayload {
                         session_id,
@@ -916,6 +1021,137 @@ impl ServerRuntime {
                 .await;
             }
         }
+    }
+
+    fn normalized_persisted_response_items(
+        persisted_turn_items: &[crate::execution::PersistedTurnItem],
+    ) -> Vec<(ItemId, ResponseItem)> {
+        let mut items = persisted_turn_items
+            .iter()
+            .filter_map(Self::persisted_turn_item_to_response_item)
+            .collect::<Vec<_>>();
+        items.retain(|(_, item)| !item.is_reason());
+        let mut response_items = items
+            .iter()
+            .map(|(_, item)| item.clone())
+            .collect::<Vec<_>>();
+        normalize::pair_tool_call_items(&mut response_items);
+        let mut paired = Vec::with_capacity(response_items.len());
+        let mut source_iter = items.into_iter();
+        for normalized_item in response_items {
+            while let Some((item_id, source_item)) = source_iter.next() {
+                if source_item == normalized_item {
+                    paired.push((item_id, normalized_item.clone()));
+                    break;
+                }
+            }
+        }
+        paired
+    }
+
+    fn persisted_turn_item_to_response_item(
+        item: &crate::execution::PersistedTurnItem,
+    ) -> Option<(ItemId, ResponseItem)> {
+        let response_item = match &item.turn_item {
+            TurnItem::UserMessage(TextItem { text }) | TurnItem::SteerInput(TextItem { text }) => {
+                ResponseItem::Message(Message::user(text.clone()))
+            }
+            TurnItem::AgentMessage(TextItem { text })
+            | TurnItem::Plan(TextItem { text })
+            | TurnItem::WebSearch(TextItem { text })
+            | TurnItem::ImageGeneration(TextItem { text })
+            | TurnItem::ContextCompaction(TextItem { text })
+            | TurnItem::HookPrompt(TextItem { text }) => {
+                ResponseItem::Message(Message::assistant_text(text.clone()))
+            }
+            TurnItem::Reasoning(TextItem { text }) => ResponseItem::Reason { text: text.clone() },
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id,
+                tool_name,
+                input,
+            }) => ResponseItem::ToolCall {
+                id: tool_call_id.clone(),
+                name: tool_name.clone(),
+                input: input.clone(),
+            },
+            TurnItem::ToolResult(ToolResultItem {
+                tool_call_id,
+                output,
+                is_error,
+                ..
+            }) => ResponseItem::ToolCallOutput {
+                tool_use_id: tool_call_id.clone(),
+                content: match output {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                },
+                is_error: *is_error,
+            },
+            TurnItem::ToolProgress(_)
+            | TurnItem::ApprovalRequest(_)
+            | TurnItem::ApprovalDecision(_) => return None,
+        };
+        Some((item.item_id, response_item))
+    }
+
+    fn preserved_item_ids_from_compacted(
+        normalized_persisted_items: &[(ItemId, ResponseItem)],
+        compacted_items: &[ResponseItem],
+    ) -> Vec<ItemId> {
+        let preserved = compacted_items.get(1..).unwrap_or(&[]);
+        if preserved.is_empty() {
+            return Vec::new();
+        }
+        let preserved_len = preserved.len();
+        if normalized_persisted_items.len() < preserved_len {
+            return Vec::new();
+        }
+        let suffix =
+            &normalized_persisted_items[normalized_persisted_items.len() - preserved_len..];
+        if suffix.iter().map(|(_, item)| item).eq(preserved.iter()) {
+            suffix.iter().map(|(item_id, _)| *item_id).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn summary_turn_item_from_compacted(compacted_items: &[ResponseItem]) -> TurnItem {
+        let summary_text = compacted_items
+            .first()
+            .and_then(|item| match item {
+                ResponseItem::Message(message) => {
+                    message.content.iter().find_map(|block| match block {
+                        devo_core::ContentBlock::Text { text } => Some(text.clone()),
+                        devo_core::ContentBlock::Reasoning { .. }
+                        | devo_core::ContentBlock::ToolUse { .. }
+                        | devo_core::ContentBlock::ToolResult { .. } => None,
+                    })
+                }
+                ResponseItem::Reason { text } => Some(text.clone()),
+                ResponseItem::ToolCall { .. } | ResponseItem::ToolCallOutput { .. } => None,
+            })
+            .unwrap_or_default();
+        TurnItem::ContextCompaction(TextItem { text: summary_text })
+    }
+
+    fn filter_history_items_by_ids(
+        runtime_session: &crate::execution::RuntimeSession,
+        preserved_item_ids: &[ItemId],
+    ) -> Vec<crate::SessionHistoryItem> {
+        let preserved_set = preserved_item_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        runtime_session
+            .persisted_turn_items
+            .iter()
+            .zip(runtime_session.history_items.iter())
+            .filter_map(|(item, history_item)| {
+                preserved_set
+                    .contains(&item.item_id)
+                    .then_some(history_item.clone())
+            })
+            .collect()
     }
 
     async fn handle_turn_start(
@@ -2152,6 +2388,12 @@ impl ServerRuntime {
                 if let Some(history_item) = history_item_from_turn_item(&turn_item) {
                     session.history_items.push(history_item);
                 }
+                session
+                    .persisted_turn_items
+                    .push(crate::execution::PersistedTurnItem {
+                        item_id,
+                        turn_item: turn_item.clone(),
+                    });
                 session.record.clone()
             };
             if let Some(record) = record {

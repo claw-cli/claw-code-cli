@@ -321,7 +321,7 @@ impl HistoryCell for UserHistoryCell {
             (!wrapped.is_empty()).then_some(wrapped)
         };
 
-        let mut lines: Vec<Line<'static>> = vec![Line::from("").style(style)];
+        let mut lines: Vec<Line<'static>> = vec![Line::from(""), Line::from("").style(style)];
 
         if let Some(wrapped_message) = wrapped_message {
             lines.extend(prefix_lines(
@@ -332,6 +332,7 @@ impl HistoryCell for UserHistoryCell {
         }
 
         lines.push(Line::from("").style(style));
+        lines.push(Line::from(""));
         lines
     }
 }
