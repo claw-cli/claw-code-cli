@@ -45,10 +45,7 @@ impl DefaultHistorySummarizer {
 
 #[async_trait]
 impl HistorySummarizer for DefaultHistorySummarizer {
-    async fn summarize(
-        &self,
-        messages: Vec<RequestMessage>,
-    ) -> Result<String, CompactionError> {
+    async fn summarize(&self, messages: Vec<RequestMessage>) -> Result<String, CompactionError> {
         let request = ModelRequest {
             model: self.model.clone(),
             system: None,
@@ -70,9 +67,7 @@ impl HistorySummarizer for DefaultHistorySummarizer {
                 {
                     return Err(CompactionError::ContextTooLong);
                 }
-                return Err(CompactionError::SummarizationFailed {
-                    message: err_msg,
-                });
+                return Err(CompactionError::SummarizationFailed { message: err_msg });
             }
         };
 

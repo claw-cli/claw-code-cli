@@ -3,6 +3,7 @@ use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::load_config;
 use devo_core::resolve_provider_settings;
+use devo_core::{AppConfig, AppConfigLoader, FileSystemAppConfigLoader};
 use devo_utils::find_devo_home;
 
 pub(crate) async fn run_prompt(
@@ -31,10 +32,19 @@ pub(crate) async fn run_prompt(
     }
 
     let home_dir = find_devo_home()?;
+    let app_config = FileSystemAppConfigLoader::new(home_dir.clone())
+        .load(Some(cwd.as_path()))
+        .unwrap_or_else(|_| AppConfig::default());
     let provider =
         devo_server::load_server_provider(&home_dir.join("config.toml"), Some(&resolved.model))?;
 
-    let mut session_state = SessionState::new(SessionConfig::default(), cwd.clone());
+    let mut session_state = SessionState::new(
+        SessionConfig {
+            agents_md: app_config.agents_md_config(),
+            ..SessionConfig::default()
+        },
+        cwd.clone(),
+    );
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
     let registry = {

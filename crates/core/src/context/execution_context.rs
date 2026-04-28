@@ -3,9 +3,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use devo_protocol::{Message, Model, ReasoningEffort, RequestContent, RequestMessage, Role, UserInput};
+use devo_protocol::{Message, Model, ReasoningEffort, UserInput};
 
+use crate::context::AgentsMdDiff;
+use crate::context::AgentsMdManager;
+use crate::context::AgentsMdSnapshot;
 use crate::context::ContextualUserFragment;
+use crate::context::user_instructions::UserInstructions;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -55,6 +59,7 @@ impl EnvironmentContext {
 pub struct SessionContext {
     pub base_instructions: String,
     pub workspace_instructions: Option<String>,
+    pub locked_agents_snapshot: Option<AgentsMdSnapshot>,
     pub environment: EnvironmentContext,
     pub persona: Persona,
     pub model: Model,
@@ -67,13 +72,17 @@ impl SessionContext {
         model: &Model,
         thinking_selection: Option<&str>,
         cwd: &Path,
-        workspace_instructions: Option<String>,
+        locked_agents_snapshot: Option<AgentsMdSnapshot>,
     ) -> Self {
         let normalized_thinking_selection = normalize_thinking_selection(thinking_selection);
         let resolved = model.resolve_thinking_selection(normalized_thinking_selection.as_deref());
+        let workspace_instructions = locked_agents_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.rendered_instructions.clone());
         Self {
             base_instructions: model.base_instructions.clone(),
             workspace_instructions,
+            locked_agents_snapshot,
             environment: EnvironmentContext::capture(cwd),
             persona: Persona::Default,
             model: model.clone(),
@@ -88,9 +97,17 @@ impl SessionContext {
 
     pub fn prefix_user_inputs(&self) -> Vec<UserInput> {
         let mut inputs = Vec::new();
-        if let Some(text) = self.workspace_instructions.as_ref().filter(|text| !text.trim().is_empty()) {
+        if let Some(text) = self
+            .workspace_instructions
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
             inputs.push(UserInput::Text {
-                text: text.clone(),
+                text: UserInstructions {
+                    directory: self.environment.cwd.display().to_string(),
+                    text: text.clone(),
+                }
+                .render(),
                 text_elements: Vec::new(),
             });
         }
@@ -109,10 +126,16 @@ pub struct TurnContext {
     pub model: Model,
     pub thinking_selection: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub observed_agents_snapshot: Option<AgentsMdSnapshot>,
 }
 
 impl TurnContext {
-    pub fn capture(model: &Model, thinking_selection: Option<&str>, cwd: &Path) -> Self {
+    pub fn capture(
+        model: &Model,
+        thinking_selection: Option<&str>,
+        cwd: &Path,
+        observed_agents_snapshot: Option<AgentsMdSnapshot>,
+    ) -> Self {
         let normalized_thinking_selection = normalize_thinking_selection(thinking_selection);
         let resolved = model.resolve_thinking_selection(normalized_thinking_selection.as_deref());
         Self {
@@ -121,6 +144,7 @@ impl TurnContext {
             model: model.clone(),
             thinking_selection: normalized_thinking_selection,
             reasoning_effort: resolved.effective_reasoning_effort,
+            observed_agents_snapshot,
         }
     }
 
@@ -160,7 +184,10 @@ impl TurnContext {
             ));
         }
         if self.model.slug != previous.model.slug {
-            changes.push(format!("model: {} -> {}", previous.model.slug, self.model.slug));
+            changes.push(format!(
+                "model: {} -> {}",
+                previous.model.slug, self.model.slug
+            ));
         }
         if self.thinking_selection != previous.thinking_selection {
             changes.push(format!(
@@ -204,44 +231,46 @@ impl ContextualUserFragment for ContextDiffFragment {
     }
 }
 
-pub fn prepend_user_inputs(messages: &mut Vec<RequestMessage>, user_inputs: &[UserInput]) {
-    messages.splice(
-        0..0,
-        user_inputs.iter().filter_map(|input| match input {
-            UserInput::Text { text, .. } if !text.trim().is_empty() => Some(RequestMessage {
-                role: Role::User.as_str().to_string(),
-                content: vec![RequestContent::Text { text: text.clone() }],
-            }),
-            UserInput::Text { .. }
-            | UserInput::Image { .. }
-            | UserInput::LocalImage { .. }
-            | UserInput::Skill { .. }
-            | UserInput::Mention { .. }
-            | _ => None,
-        }),
-    );
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsMdDiffFragment {
+    diff: AgentsMdDiff,
 }
 
-pub fn load_workspace_instructions(cwd: &Path) -> Option<String> {
-    let paths = [cwd.join("prompt.md"), cwd.join("AGENTS.md"), cwd.join("CLAUDE.md")];
-    let mut sections = Vec::new();
-
-    for path in &paths {
-        let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("prompt.md");
-        if let Ok(content) = std::fs::read_to_string(path) {
-            let content = content.trim().to_string();
-            if !content.is_empty() {
-                sections.push(format!(
-                    "# {} instructions for {}\n\n <INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
-                    file_name,
-                    cwd.display(),
-                    content,
-                ));
-            }
-        }
+impl AgentsMdDiffFragment {
+    pub fn new(diff: AgentsMdDiff) -> Self {
+        Self { diff }
     }
 
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
+    pub fn to_message(&self) -> Message {
+        Message::user(self.render())
+    }
+}
+
+impl ContextualUserFragment for AgentsMdDiffFragment {
+    const ROLE: &'static str = "user";
+    const START_MARKER: &'static str = "<agents_md_updates>";
+    const END_MARKER: &'static str = "</agents_md_updates>";
+
+    fn body(&self) -> String {
+        let mut lines = Vec::new();
+        for path in &self.diff.added {
+            lines.push(format!("added: {}", path.display()));
+        }
+        for path in &self.diff.removed {
+            lines.push(format!("removed: {}", path.display()));
+        }
+        for path in &self.diff.changed {
+            lines.push(format!("changed: {}", path.display()));
+        }
+        format!("\n{}\n", lines.join("\n"))
+    }
+}
+
+pub fn load_workspace_instructions(
+    cwd: &Path,
+    manager: &AgentsMdManager,
+) -> Option<AgentsMdSnapshot> {
+    manager.load(cwd)
 }
 
 fn normalize_thinking_selection(thinking_selection: Option<&str>) -> Option<String> {
@@ -336,7 +365,9 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::{ContextDiffFragment, EnvironmentContext, SessionContext, TurnContext};
-    use crate::{ContextualUserFragment, Model, ReasoningEffort, ThinkingCapability};
+    use crate::{
+        AgentsMdSnapshot, ContextualUserFragment, Model, ReasoningEffort, ThinkingCapability,
+    };
 
     #[test]
     fn session_context_prefix_contains_locked_environment() {
@@ -347,7 +378,12 @@ mod tests {
             },
             Some("enabled"),
             Path::new("/tmp/project"),
-            Some("workspace".into()),
+            Some(AgentsMdSnapshot {
+                cwd: PathBuf::from("/tmp/project"),
+                project_root: PathBuf::from("/tmp"),
+                documents: Vec::new(),
+                rendered_instructions: "workspace".into(),
+            }),
         );
 
         let prefix = context.prefix_user_inputs();
@@ -376,6 +412,7 @@ mod tests {
             },
             thinking_selection: Some("enabled".into()),
             reasoning_effort: Some(ReasoningEffort::Medium),
+            observed_agents_snapshot: None,
         };
         let current = TurnContext {
             environment: EnvironmentContext {
@@ -392,6 +429,7 @@ mod tests {
             },
             thinking_selection: Some("disabled".into()),
             reasoning_effort: None,
+            observed_agents_snapshot: None,
         };
 
         let diff = current.diff_since(&previous).expect("diff should exist");

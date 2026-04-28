@@ -46,10 +46,12 @@ fn find_pair_index(items: &[ResponseItem], removed: &ResponseItem) -> Option<usi
             ResponseItem::ToolCallOutput { tool_use_id, .. } => tool_use_id == id,
             _ => false,
         }),
-        ResponseItem::ToolCallOutput { tool_use_id, .. } => items.iter().position(|item| match item {
-            ResponseItem::ToolCall { id, .. } => id == tool_use_id,
-            _ => false,
-        }),
+        ResponseItem::ToolCallOutput { tool_use_id, .. } => {
+            items.iter().position(|item| match item {
+                ResponseItem::ToolCall { id, .. } => id == tool_use_id,
+                _ => false,
+            })
+        }
         _ => None,
     }
 }
@@ -67,7 +69,10 @@ fn find_pair_index(items: &[ResponseItem], removed: &ResponseItem) -> Option<usi
 ///
 /// `Reason`, `ToolCall`, and `ToolCallOutput` items are always preserved
 /// regardless of modality.
-pub fn filter_by_modality(items: &[ResponseItem], modalities: &[InputModality]) -> Vec<ResponseItem> {
+pub fn filter_by_modality(
+    items: &[ResponseItem],
+    modalities: &[InputModality],
+) -> Vec<ResponseItem> {
     let supports_text = modalities.contains(&InputModality::Text);
     let _supports_image = modalities.contains(&InputModality::Image);
 

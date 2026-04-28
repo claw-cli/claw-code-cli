@@ -129,9 +129,7 @@ impl From<&ResponseItem> for RequestMessage {
         match item {
             ResponseItem::Reason { text } => RequestMessage {
                 role: Role::Assistant.as_str().to_string(),
-                content: vec![RequestContent::Reasoning {
-                    text: text.clone(),
-                }],
+                content: vec![RequestContent::Reasoning { text: text.clone() }],
             },
             ResponseItem::Message(msg) => msg.to_request_message(),
             ResponseItem::ToolCall { id, name, input } => RequestMessage {
@@ -330,9 +328,7 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: vec![
-                ContentBlock::Reasoning {
-                    text: "hmm".into(),
-                },
+                ContentBlock::Reasoning { text: "hmm".into() },
                 ContentBlock::Text {
                     text: "hello".into(),
                 },

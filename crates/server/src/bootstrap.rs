@@ -116,6 +116,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             model_catalog,
             skill_workspace_root,
             skill_catalog,
+            config.agents_md_config(),
         ),
     );
     tracing::info!("starting persisted session restore");

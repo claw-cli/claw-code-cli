@@ -150,6 +150,7 @@ fn build_runtime_with_registry(
                 workspace_roots: workspace_skill_roots,
                 watch_for_changes: false,
             })),
+            devo_core::AgentsMdConfig::default(),
         ),
     )
 }

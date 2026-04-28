@@ -28,17 +28,21 @@ use crate::Model;
 use crate::Role;
 use crate::SessionState;
 use crate::TurnConfig;
+use crate::context::AgentsMdDiffFragment;
+use crate::context::AgentsMdManager;
 use crate::context::ContextualUserFragment;
 use crate::context::SessionContext;
 use crate::context::TurnContext;
 use crate::context::load_workspace_instructions;
-use crate::context::prepend_user_inputs;
 use crate::context::turn_aborted::TurnAborted;
+use crate::history::ContextView;
+use crate::history::History;
 use crate::history::TokenInfo;
 use crate::history::compaction::CompactAction;
 use crate::history::compaction::CompactionConfig;
 use crate::history::compaction::CompactionKind;
 use crate::history::compaction::compact_history;
+use crate::history::insert_context_diff_message;
 use crate::history::summarizer::DefaultHistorySummarizer;
 use crate::response_item::ResponseItem;
 
@@ -260,7 +264,7 @@ async fn summarize_and_compact(
 }
 
 // ---------------------------------------------------------------------------
-// Micro compact (capability 1.4)
+// Micro compact
 // ---------------------------------------------------------------------------
 
 /// TODO: Now, the micro compact acts like a truncation, however, we already
@@ -323,26 +327,40 @@ pub async fn query(
         }
     };
 
+    let agents_md_manager = AgentsMdManager::new(session.config.agents_md.clone());
+    let current_agents_snapshot = load_workspace_instructions(&session.cwd, &agents_md_manager);
+
     if session.session_context.is_none() {
         session.session_context = Some(SessionContext::capture(
             &turn_config.model,
             turn_config.thinking_selection.as_deref(),
             &session.cwd,
-            load_workspace_instructions(&session.cwd),
+            current_agents_snapshot.clone(),
         ));
     }
     let current_turn_context = TurnContext::capture(
         &turn_config.model,
         turn_config.thinking_selection.as_deref(),
         &session.cwd,
+        current_agents_snapshot.clone(),
     );
     if let Some(diff) = session
         .latest_turn_context
         .as_ref()
         .and_then(|previous| current_turn_context.diff_since(previous))
     {
-        let insert_at = session.messages.len().saturating_sub(1);
-        session.messages.insert(insert_at, diff.to_message());
+        insert_context_diff_message(&mut session.messages, diff.to_message());
+    }
+    if let Some(previous_turn_context) = session.latest_turn_context.as_ref()
+        && let Some(diff) = AgentsMdManager::diff(
+            previous_turn_context.observed_agents_snapshot.as_ref(),
+            current_agents_snapshot.as_ref(),
+        )
+    {
+        insert_context_diff_message(
+            &mut session.messages,
+            AgentsMdDiffFragment::new(diff).to_message(),
+        );
     }
     session.latest_turn_context = Some(current_turn_context);
     let session_context = session
@@ -416,8 +434,29 @@ pub async fn query(
             .model
             .resolve_thinking_selection(turn_config.thinking_selection.as_deref());
 
-        let mut messages = session.to_request_messages();
-        prepend_user_inputs(&mut messages, &prefetched_user_inputs);
+        let history = History {
+            items: session
+                .messages
+                .iter()
+                .cloned()
+                .map(ResponseItem::Message)
+                .collect(),
+            token_info: TokenInfo::default(),
+            context: ContextView::new(
+                std::env::consts::OS,
+                session_context.environment.shell.clone(),
+                session_context.environment.timezone.clone(),
+                session_context.model.slug.clone(),
+                session_context
+                    .reasoning_effort
+                    .map(|effort| effort.label().to_lowercase()),
+                Some(session_context.persona.as_str().to_string()),
+                session_context.environment.current_date.clone(),
+                session_context.environment.cwd.display().to_string(),
+            ),
+        };
+        let messages = history
+            .for_prompt_with_prefix(&prefetched_user_inputs, &turn_config.model.input_modalities);
 
         let request = ModelRequest {
             model: request_model,

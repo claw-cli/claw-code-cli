@@ -307,7 +307,7 @@ pub enum RolloutLine {
     /// Session metadata line.
     SessionMeta(Box<SessionMetaLine>),
     /// Turn metadata line.
-    Turn(TurnLine),
+    Turn(Box<TurnLine>),
     /// Item record line.
     Item(ItemLine),
     /// Session-title update line.
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn rollout_line_roundtrip() {
-        let line = RolloutLine::Turn(TurnLine {
+        let line = RolloutLine::Turn(Box::new(TurnLine {
             timestamp: Utc::now(),
             turn: TurnRecord {
                 id: TurnId::new(),
@@ -414,7 +414,7 @@ mod tests {
                 turn_context: None,
                 schema_version: 2,
             },
-        });
+        }));
 
         let json = serde_json::to_string(&line).expect("serialize");
         let restored: RolloutLine = serde_json::from_str(&json).expect("deserialize");

@@ -204,6 +204,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             Arc::new(PresetModelCatalog::default()),
             None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
+            devo_core::AgentsMdConfig::default(),
         ),
     );
     let listen = vec![format!("ws://{bind_address}")];

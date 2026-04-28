@@ -4,7 +4,7 @@ pub mod summarizer;
 
 use serde::{Deserialize, Serialize};
 
-use devo_protocol::{InputModality, RequestMessage};
+use devo_protocol::{InputModality, Message, RequestContent, RequestMessage, Role, UserInput};
 
 use crate::context::ContextualUserFragment;
 use crate::response_item::ResponseItem;
@@ -259,8 +259,7 @@ impl History {
         let truncate_at = if start > 0
             && matches!(&self.items[start - 1], ResponseItem::Message(msg) if msg.content.iter().any(|block| {
                 matches!(block, devo_protocol::ContentBlock::Text { text } if crate::context::compaction_summary::CompactionSummary::matches_text(text))
-            }))
-        {
+            })) {
             start - 1
         } else {
             start
@@ -293,6 +292,48 @@ impl History {
         self.context = new_context;
         diff
     }
+
+    /// Builds prompt-visible request messages by prepending locked session
+    /// inputs and normalizing the existing history items.
+    pub fn for_prompt_with_prefix(
+        &self,
+        prefix_user_inputs: &[UserInput],
+        modalities: &[InputModality],
+    ) -> Vec<RequestMessage> {
+        let mut messages = self.for_prompt(modalities);
+        prepend_user_inputs(&mut messages, prefix_user_inputs);
+        messages
+    }
+}
+
+/// Inserts one context-diff message immediately before the most recent user
+/// message so that turn-local config changes are scoped to the next request.
+pub fn insert_context_diff_message(messages: &mut Vec<Message>, diff: Message) {
+    let insert_at = messages
+        .iter()
+        .rposition(|message| message.role == Role::User)
+        .unwrap_or(messages.len());
+    messages.insert(insert_at, diff);
+}
+
+/// Converts locked prefix `UserInput`s into request messages and prepends them
+/// ahead of the existing prompt-visible history.
+pub fn prepend_user_inputs(messages: &mut Vec<RequestMessage>, user_inputs: &[UserInput]) {
+    messages.splice(
+        0..0,
+        user_inputs.iter().filter_map(|input| match input {
+            UserInput::Text { text, .. } if !text.trim().is_empty() => Some(RequestMessage {
+                role: Role::User.as_str().to_string(),
+                content: vec![RequestContent::Text { text: text.clone() }],
+            }),
+            UserInput::Text { .. }
+            | UserInput::Image { .. }
+            | UserInput::LocalImage { .. }
+            | UserInput::Skill { .. }
+            | UserInput::Mention { .. }
+            | _ => None,
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -393,16 +434,61 @@ mod tests {
         let mut h = History::new(test_context());
         h.push(ResponseItem::Message(Message {
             role: Role::User,
-            content: vec![
-                ContentBlock::Text {
-                    text: "hello".into(),
-                },
-            ],
+            content: vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
         }));
         h.push(ResponseItem::Message(Message::assistant_text("hi")));
 
         let msgs = h.for_prompt(&[InputModality::Text]);
         assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn history_for_prompt_with_prefix_prepends_user_inputs() {
+        let mut h = History::new(test_context());
+        h.push(ResponseItem::Message(Message::user("hello")));
+
+        let msgs = h.for_prompt_with_prefix(
+            &[UserInput::Text {
+                text: "<environment_context>locked</environment_context>".into(),
+                text_elements: Vec::new(),
+            }],
+            &[InputModality::Text],
+        );
+
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        let RequestContent::Text { text } = &msgs[0].content[0] else {
+            panic!("expected text prefix");
+        };
+        assert!(text.contains("environment_context"));
+    }
+
+    #[test]
+    fn insert_context_diff_message_places_diff_before_latest_user_message() {
+        let mut messages = vec![
+            Message::user("first"),
+            Message::assistant_text("reply"),
+            Message::user("second"),
+        ];
+
+        insert_context_diff_message(
+            &mut messages,
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "<context_changes>\nmodel: a -> b\n</context_changes>".into(),
+                }],
+            },
+        );
+
+        assert_eq!(messages.len(), 4);
+        let ContentBlock::Text { text } = &messages[2].content[0] else {
+            panic!("expected diff text");
+        };
+        assert!(text.contains("<context_changes>"));
+        assert_eq!(messages[3], Message::user("second"));
     }
 
     #[test]

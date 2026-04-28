@@ -24,10 +24,10 @@ use devo_core::TurnItem;
 use devo_core::TurnStatus;
 use devo_core::TurnUsage;
 use devo_core::Worklog;
-use devo_core::history::compaction::compact_history;
 use devo_core::history::compaction::CompactAction;
 use devo_core::history::compaction::CompactionConfig;
 use devo_core::history::compaction::CompactionKind;
+use devo_core::history::compaction::compact_history;
 use devo_core::history::summarizer::DefaultHistorySummarizer;
 use devo_core::message_to_response_items;
 use devo_core::query;
@@ -747,13 +747,7 @@ impl ServerRuntime {
             }
         };
 
-        let session_arc = match self
-            .sessions
-            .lock()
-            .await
-            .get(&params.session_id)
-            .cloned()
-        {
+        let session_arc = match self.sessions.lock().await.get(&params.session_id).cloned() {
             Some(session) => session,
             None => {
                 return self.error_response(
@@ -792,8 +786,11 @@ impl ServerRuntime {
                 .and_then(|m| m.max_tokens.map(|t| t as usize))
                 .unwrap_or(4096);
 
-            let summarizer =
-                DefaultHistorySummarizer::with_slug(self.deps.provider.clone(), model_slug, max_tokens);
+            let summarizer = DefaultHistorySummarizer::with_slug(
+                self.deps.provider.clone(),
+                model_slug,
+                max_tokens,
+            );
 
             let config = CompactionConfig {
                 budget: core_session.config.token_budget.clone(),
@@ -839,7 +836,11 @@ impl ServerRuntime {
                             item_id: Some(item_id),
                             seq: item_seq,
                         },
-                        item: ItemEnvelope { item_id, item_kind: ItemKind::ContextCompaction, payload: payload.clone() },
+                        item: ItemEnvelope {
+                            item_id,
+                            item_kind: ItemKind::ContextCompaction,
+                            payload: payload.clone(),
+                        },
                     }))
                     .await;
 
@@ -850,7 +851,11 @@ impl ServerRuntime {
                             item_id: Some(item_id),
                             seq: item_seq,
                         },
-                        item: ItemEnvelope { item_id, item_kind: ItemKind::ContextCompaction, payload },
+                        item: ItemEnvelope {
+                            item_id,
+                            item_kind: ItemKind::ContextCompaction,
+                            payload,
+                        },
                     }))
                     .await;
                 }

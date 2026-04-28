@@ -21,10 +21,6 @@ impl ContextualUserFragment for CompactionSummary {
     const END_MARKER: &'static str = "</compaction_summary>";
 
     fn body(&self) -> String {
-        format!(
-            "\n{}\n{}\n",
-            SUMMARY_PREFIX.trim(),
-            self.summary.trim()
-        )
+        format!("\n{}\n{}\n", SUMMARY_PREFIX.trim(), self.summary.trim())
     }
 }

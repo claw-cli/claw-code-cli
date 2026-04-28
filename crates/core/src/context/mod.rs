@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use devo_protocol::{ContentBlock, Message, Role};
 use crate::{ItemId, ResponseItem, SessionId, SummaryModelSelection, TurnId};
+use devo_protocol::{ContentBlock, Message, Role};
 
 // ---------------------------------------------------------------------------
 // Contextual user fragment traits and registration
@@ -94,7 +94,9 @@ pub trait ContextualUserFragment {
         };
         ResponseItem::Message(Message {
             role,
-            content: vec![ContentBlock::Text { text: self.render() }],
+            content: vec![ContentBlock::Text {
+                text: self.render(),
+            }],
         })
     }
 }
@@ -358,11 +360,13 @@ pub trait ContextCompactor: Send + Sync {
     ) -> Result<ContextSummaryPayload, CompactionError>;
 }
 
+mod agents_md;
 pub(crate) mod compaction_summary;
 mod execution_context;
 pub(crate) mod turn_aborted;
 pub(crate) mod user_instructions;
 
+pub use agents_md::*;
 pub use execution_context::*;
 
 #[cfg(test)]

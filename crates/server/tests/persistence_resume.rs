@@ -389,6 +389,7 @@ fn build_runtime(data_root: &std::path::Path) -> Result<Arc<ServerRuntime>> {
             Arc::new(PresetModelCatalog::default()),
             None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
+            devo_core::AgentsMdConfig::default(),
         ),
     ))
 }

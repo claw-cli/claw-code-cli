@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use devo_utils::FileSystemConfigPathResolver;
 
+use crate::AgentsMdConfig;
 use crate::SkillsConfig;
 use crate::config::{
     AppConfigError, ContextManageConfig, LogRotation, LoggingConfig, LoggingFileConfig,
@@ -99,6 +100,15 @@ impl Default for AppConfig {
                 watch_for_changes: true,
             },
             project_root_markers: vec![".git".into()],
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn agents_md_config(&self) -> AgentsMdConfig {
+        AgentsMdConfig {
+            project_root_markers: self.project_root_markers.clone(),
+            ..AgentsMdConfig::default()
         }
     }
 }

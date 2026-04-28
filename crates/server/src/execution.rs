@@ -7,8 +7,8 @@ use std::{
 use tokio::{sync::Mutex, task::JoinHandle};
 
 use devo_core::{
-    Model, ModelCatalog, ResolvedSkill, SessionConfig, SessionId, SessionRecord, SessionState,
-    SkillCatalog, SkillError, SkillId, TurnConfig, default_base_instructions,
+    AgentsMdConfig, Model, ModelCatalog, ResolvedSkill, SessionConfig, SessionId, SessionRecord,
+    SessionState, SkillCatalog, SkillError, SkillId, TurnConfig, default_base_instructions,
     normalize_canonical_path,
 };
 use devo_provider::ModelProviderSDK;
@@ -34,6 +34,8 @@ pub struct ServerRuntimeDependencies {
     pub(crate) skill_workspace_root: Option<PathBuf>,
     /// Skill catalog for discovering and loading skills.
     pub(crate) skill_catalog: StdMutex<Box<dyn SkillCatalog + Send>>,
+    /// AGENTS.md discovery configuration applied to new sessions.
+    pub(crate) agents_md: AgentsMdConfig,
 }
 
 impl ServerRuntimeDependencies {
@@ -45,6 +47,7 @@ impl ServerRuntimeDependencies {
         model_catalog: Arc<dyn ModelCatalog>,
         skill_workspace_root: Option<PathBuf>,
         skill_catalog: Box<dyn SkillCatalog + Send>,
+        agents_md: AgentsMdConfig,
     ) -> Self {
         Self {
             provider,
@@ -53,12 +56,19 @@ impl ServerRuntimeDependencies {
             model_catalog,
             skill_workspace_root,
             skill_catalog: StdMutex::new(skill_catalog),
+            agents_md,
         }
     }
 
     /// Creates an initial core session state for a newly created server session.
     pub(crate) fn new_session_state(&self, session_id: SessionId, cwd: PathBuf) -> SessionState {
-        let mut state = SessionState::new(SessionConfig::default(), cwd);
+        let mut state = SessionState::new(
+            SessionConfig {
+                agents_md: self.agents_md.clone(),
+                ..SessionConfig::default()
+            },
+            cwd,
+        );
         state.id = session_id.to_string();
         state
     }

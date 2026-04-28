@@ -119,10 +119,10 @@ impl RolloutStore {
     pub(crate) fn append_turn(&self, record: &SessionRecord, turn: TurnRecord) -> Result<()> {
         self.append_line(
             &record.rollout_path,
-            &RolloutLine::Turn(TurnLine {
+            &RolloutLine::Turn(Box::new(TurnLine {
                 timestamp: Utc::now(),
                 turn,
-            }),
+            })),
         )
     }
 
@@ -665,16 +665,16 @@ mod tests {
     use devo_core::SessionId;
     use devo_core::SessionMetaLine;
     use devo_core::SessionRecord;
+    use devo_core::SessionTitleState;
     use devo_core::TextItem;
     use devo_core::ToolCallItem;
     use devo_core::ToolResultItem;
+    use devo_core::TurnContext;
     use devo_core::TurnId;
     use devo_core::TurnItem;
     use devo_core::TurnLine;
     use devo_core::TurnRecord;
     use devo_core::TurnStatus;
-    use devo_core::SessionTitleState;
-    use devo_core::TurnContext;
 
     #[test]
     fn replay_orders_items_by_sequence_before_timestamp() {
@@ -794,6 +794,7 @@ mod tests {
         let session_context = SessionContext {
             base_instructions: "base".into(),
             workspace_instructions: Some("workspace".into()),
+            locked_agents_snapshot: None,
             environment: EnvironmentContext {
                 cwd: PathBuf::from("/tmp/root"),
                 shell: "bash".into(),
@@ -822,6 +823,7 @@ mod tests {
             },
             thinking_selection: Some("enabled".into()),
             reasoning_effort: None,
+            observed_agents_snapshot: None,
         };
         let mut replay = ReplayState::default();
 
@@ -860,7 +862,7 @@ mod tests {
             })))
             .expect("apply session meta");
         replay
-            .apply_line(RolloutLine::Turn(TurnLine {
+            .apply_line(RolloutLine::Turn(Box::new(TurnLine {
                 timestamp: now,
                 turn: TurnRecord {
                     id: turn_id,
@@ -879,7 +881,7 @@ mod tests {
                     turn_context: Some(turn_context.clone()),
                     schema_version: 2,
                 },
-            }))
+            })))
             .expect("apply turn line");
 
         assert_eq!(replay.session_context, Some(session_context));

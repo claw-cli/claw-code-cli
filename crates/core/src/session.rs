@@ -6,13 +6,14 @@ use std::{
 
 use devo_safety::legacy_permissions::PermissionMode;
 
-use crate::{Message, Model, SessionContext, TokenBudget, TurnContext};
+use crate::{AgentsMdConfig, Message, Model, SessionContext, TokenBudget, TurnContext};
 
 /// Configuration for a session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub token_budget: TokenBudget,
     pub permission_mode: PermissionMode,
+    pub agents_md: AgentsMdConfig,
 }
 
 impl Default for SessionConfig {
@@ -20,6 +21,7 @@ impl Default for SessionConfig {
         Self {
             token_budget: TokenBudget::default(),
             permission_mode: PermissionMode::AutoApprove,
+            agents_md: AgentsMdConfig::default(),
         }
     }
 }
