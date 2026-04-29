@@ -1205,9 +1205,13 @@ impl ServerRuntime {
                         created_at: chrono::Utc::now(),
                     });
                 }
-                // Broadcast queue state; this is the only .await in the path
-                // so the client sees the response without noticeable delay.
-                self.broadcast_updated_queue(params.session_id).await;
+                // Respond immediately so the client never sees a timeout.
+                // Broadcast the queue update asynchronously in the background.
+                let sid = params.session_id;
+                let runtime = Arc::clone(&self);
+                tokio::spawn(async move {
+                    runtime.broadcast_updated_queue(sid).await;
+                });
                 return serde_json::to_value(SuccessResponse {
                     id: request_id,
                     result: TurnStartResult {
