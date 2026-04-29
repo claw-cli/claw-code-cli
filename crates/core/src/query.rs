@@ -387,9 +387,14 @@ pub async fn query(
 
     let mut retry_count: usize = 0;
     let mut context_compacted = false;
+    let mut budget_steer_injected = false;
+
+    if session.turn_state.is_none() {
+        session.start_turn(devo_protocol::TurnKind::Regular);
+    }
 
     'query_loop: loop {
-        let pending = session.drain_pending_user_prompts();
+        let pending = session.take_turn_pending_input();
 
         // If the user interrupted the assistant mid-turn, explain the interruption
         if !pending.is_empty()
@@ -404,8 +409,27 @@ pub async fn query(
             }
         }
 
-        for prompt in pending {
-            session.push_message(Message::user(prompt));
+        for item in &pending {
+            match &item.kind {
+                devo_protocol::PendingInputKind::UserText { text } => {
+                    session.push_message(Message::user(text.clone()));
+                }
+                devo_protocol::PendingInputKind::ToolCallBlockedByHook {
+                    tool_use_id,
+                    reason,
+                } => {
+                    session.push_message(Message::user(format!(
+                        "[Tool call {} was blocked: {}]",
+                        tool_use_id, reason
+                    )));
+                }
+                devo_protocol::PendingInputKind::BudgetLimitSteering => {
+                    session.push_message(Message::system(
+                        "Note: The conversation is approaching the token budget limit. \
+                         Please be concise and consider wrapping up the current task.",
+                    ));
+                }
+            }
         }
 
         // 1.3 + 1.7: Check token budget and compact before building the request
@@ -415,6 +439,16 @@ pub async fn query(
                 .token_budget
                 .should_compact(session.last_input_tokens)
         {
+            if !budget_steer_injected {
+                if let Some(turn) = session.turn_state.as_mut() {
+                    turn.push_pending_input(devo_protocol::PendingInputItem {
+                        kind: devo_protocol::PendingInputKind::BudgetLimitSteering,
+                        metadata: None,
+                        created_at: chrono::Utc::now(),
+                    });
+                }
+                budget_steer_injected = true;
+            }
             info!("token budget threshold exceeded, running LLM compaction");
             summarize_and_compact(
                 session,
@@ -758,6 +792,7 @@ pub async fn query(
                 emit(QueryEvent::TurnComplete { stop_reason: sr });
             }
             debug!("no tool calls, ending query loop");
+            session.end_turn();
             return Ok(());
         }
 

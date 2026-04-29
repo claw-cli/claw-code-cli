@@ -11,6 +11,7 @@ pub struct TurnMetadata {
     pub session_id: SessionId,
     pub sequence: u32,
     pub status: TurnStatus,
+    pub kind: TurnKind,
     pub model: String,
     pub thinking: Option<String>,
     pub request_model: String,
@@ -81,6 +82,12 @@ pub enum TurnKind {
     Other(String),
 }
 
+impl Default for TurnKind {
+    fn default() -> Self {
+        Self::Regular
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SteerInputRecord {
     pub item_id: ItemId,
@@ -93,6 +100,21 @@ pub struct ActiveTurnSteeringState {
     pub turn_id: TurnId,
     pub turn_kind: TurnKind,
     pub pending_inputs: VecDeque<SteerInputRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInputItem {
+    pub kind: PendingInputKind,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PendingInputKind {
+    UserText { text: String },
+    ToolCallBlockedByHook { tool_use_id: String, reason: String },
+    BudgetLimitSteering,
 }
 
 #[cfg(test)]
@@ -109,6 +131,7 @@ mod tests {
             session_id: SessionId::new(),
             sequence: 1,
             status: TurnStatus::Completed,
+            kind: TurnKind::Regular,
             model: "logical-model".to_string(),
             thinking: Some("high".to_string()),
             request_model: "provider-model".to_string(),
@@ -126,5 +149,63 @@ mod tests {
         let json = serde_json::to_string(&metadata).expect("serialize");
         let restored: TurnMetadata = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, metadata);
+    }
+
+    #[test]
+    fn pending_input_item_user_text_roundtrips() {
+        let item = PendingInputItem {
+            kind: PendingInputKind::UserText {
+                text: "hello".into(),
+            },
+            metadata: Some(serde_json::json!({"source": "tui"})),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: PendingInputItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(item.created_at, restored.created_at);
+        assert_eq!(item.metadata, restored.metadata);
+        assert_eq!(format!("{:?}", item.kind), format!("{:?}", restored.kind));
+    }
+
+    #[test]
+    fn pending_input_item_tool_call_blocked_roundtrips() {
+        let item = PendingInputItem {
+            kind: PendingInputKind::ToolCallBlockedByHook {
+                tool_use_id: "tool-1".into(),
+                reason: "blocked by safety".into(),
+            },
+            metadata: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: PendingInputItem = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(item.created_at, restored.created_at);
+    }
+
+    #[test]
+    fn pending_input_item_budget_limit_steering_roundtrips() {
+        let item = PendingInputItem {
+            kind: PendingInputKind::BudgetLimitSteering,
+            metadata: None,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        let restored: PendingInputItem = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            restored.kind,
+            PendingInputKind::BudgetLimitSteering
+        ));
+    }
+
+    #[test]
+    fn pending_input_kind_serializes_tagged_shape() {
+        let json = serde_json::json!({"type": "user_text", "text": "hello"});
+        let kind: PendingInputKind = serde_json::from_value(json).expect("deserialize");
+        assert!(matches!(kind, PendingInputKind::UserText { .. }));
+    }
+
+    #[test]
+    fn turn_kind_default_is_regular() {
+        assert_eq!(TurnKind::default(), TurnKind::Regular);
     }
 }

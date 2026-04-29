@@ -36,6 +36,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 
+use devo_protocol::TurnId;
+
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -223,6 +225,9 @@ pub(crate) struct ChatWidget {
     total_input_tokens: usize,
     total_output_tokens: usize,
     prompt_token_estimate: usize,
+    pending_steers: Vec<String>,
+    rejected_steers: Vec<String>,
+    active_turn_id: Option<TurnId>,
     busy: bool,
 }
 
@@ -359,6 +364,19 @@ impl ChatWidget {
             "{model} | thinking {thinking} | tokens {} in / {} out | {context}",
             self.total_input_tokens, self.total_output_tokens
         )
+    }
+
+    fn sync_pending_preview(&mut self) {
+        self.bottom_pane
+            .set_pending_steers(self.pending_steers.clone());
+        self.bottom_pane
+            .set_rejected_steers(self.rejected_steers.clone());
+        let queued_texts: Vec<String> = self
+            .queued_user_messages
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        self.bottom_pane.set_queued_messages(queued_texts);
     }
 
     fn sync_bottom_pane_summary(&mut self) {
@@ -528,6 +546,9 @@ impl ChatWidget {
             total_input_tokens: 0,
             total_output_tokens: 0,
             prompt_token_estimate: 0,
+            pending_steers: Vec::new(),
+            rejected_steers: Vec::new(),
+            active_turn_id: None,
             busy: false,
         };
 
@@ -652,7 +673,13 @@ impl ChatWidget {
 
     pub(crate) fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
-            WorkerEvent::TurnStarted { model, thinking } => {
+            WorkerEvent::TurnStarted {
+                model,
+                thinking,
+                turn_id,
+                ..
+            } => {
+                self.active_turn_id = Some(turn_id);
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.refresh_header_box();
@@ -805,10 +832,7 @@ impl ChatWidget {
                     .unwrap_or_default();
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
-                self.add_to_history(history_cell::TurnSummaryCell::new(
-                    model_name,
-                    elapsed,
-                ));
+                self.add_to_history(history_cell::TurnSummaryCell::new(model_name, elapsed));
             }
             WorkerEvent::TurnFailed {
                 message,
@@ -974,6 +998,17 @@ impl ChatWidget {
             WorkerEvent::InputHistoryLoaded { direction: _, text } => {
                 self.bottom_pane.restore_input_from_history(text);
             }
+            WorkerEvent::InputQueueUpdated {
+                pending_count: _,
+                pending_texts,
+            } => {
+                self.pending_steers = pending_texts;
+                self.sync_pending_preview();
+                self.frame_requester.schedule_frame();
+            }
+            WorkerEvent::SteerAccepted { .. } => {
+                self.set_status_message("Steer accepted");
+            }
         }
     }
 
@@ -1096,6 +1131,18 @@ impl ChatWidget {
                         command: "session list".to_string(),
                     }));
                 self.set_status_message("Loading sessions");
+            }
+            SlashCommand::Btw => {
+                if let Some(turn_id) = self.active_turn_id {
+                    self.app_event_tx
+                        .send(AppEvent::Command(AppCommand::SteerTurn {
+                            input: vec![devo_protocol::InputItem::Text { text: argument }],
+                            expected_turn_id: turn_id,
+                        }));
+                    self.set_status_message("Steer sent");
+                } else {
+                    self.set_status_message("No active turn to steer");
+                }
             }
             SlashCommand::Diff => {
                 self.set_status_message("Computing diff");

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use devo_protocol::InputItem;
 use devo_protocol::SessionId;
+use devo_protocol::TurnId;
 use devo_protocol::TurnStartParams;
 use serde::Serialize;
 
@@ -36,6 +37,10 @@ pub(crate) enum AppCommand {
         thinking: Option<Option<String>>,
         sandbox: Option<Option<String>>,
         approval_policy: Option<Option<String>>,
+    },
+    SteerTurn {
+        input: Vec<InputItem>,
+        expected_turn_id: TurnId,
     },
     BrowseInputHistory {
         direction: InputHistoryDirection,
@@ -167,6 +172,7 @@ impl AppCommand {
             Self::Compact => "compact",
             Self::UserTurn { .. } => "user_turn",
             Self::OverrideTurnContext { .. } => "override_turn_context",
+            Self::SteerTurn { .. } => "steer_turn",
             Self::BrowseInputHistory { .. } => "browse_input_history",
             Self::SwitchSession { .. } => "switch_session",
         }
@@ -207,6 +213,7 @@ impl AppCommand {
                 sandbox,
                 approval_policy,
             },
+            Self::SteerTurn { input, .. } => AppCommandView::SteerTurn { input },
             Self::BrowseInputHistory { direction } => AppCommandView::BrowseInputHistory {
                 direction: *direction,
             },

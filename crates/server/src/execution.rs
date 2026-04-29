@@ -21,6 +21,7 @@ use devo_core::SkillId;
 use devo_core::TurnConfig;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
+use devo_protocol::PendingInputItem;
 use devo_provider::ModelProviderSDK;
 use devo_tools::ToolRegistry;
 
@@ -226,7 +227,7 @@ pub(crate) struct RuntimeSession {
     /// Latest compaction snapshot used to rebuild the model-facing prompt view.
     pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
     /// Pending same-turn steering inputs.
-    pub(crate) steering_queue: Arc<StdMutex<VecDeque<String>>>,
+    pub(crate) steering_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
     /// Live query task for the active turn.
     pub(crate) active_task: Option<JoinHandle<()>>,
     /// Monotonic session-scoped item sequence counter.

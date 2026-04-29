@@ -31,6 +31,8 @@ pub struct SavedModelEntry {
     pub api_key: Option<String>,
 }
 
+use devo_protocol::TurnId;
+
 /// One event emitted by the background query worker into the interactive UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WorkerEvent {
@@ -40,7 +42,16 @@ pub(crate) enum WorkerEvent {
         model: String,
         /// The logical thinking selection used for this turn.
         thinking: Option<String>,
+        /// The server-assigned turn identifier.
+        turn_id: TurnId,
     },
+    /// Input queue state updated by the server.
+    InputQueueUpdated {
+        pending_count: usize,
+        pending_texts: Vec<String>,
+    },
+    /// A steer (/btw) was accepted by the server.
+    SteerAccepted { turn_id: TurnId },
     /// Incremental assistant text.
     TextDelta(String),
     /// Incremental reasoning text.

@@ -41,6 +41,7 @@ use devo_server::ToolResultPayload;
 use devo_server::TurnEventPayload;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
+use devo_server::TurnSteerParams;
 
 use crate::app_command::InputHistoryDirection;
 use crate::events::SessionListEntry;
@@ -111,6 +112,11 @@ enum OperationCommand {
     RenameSession(String),
     /// Interrupt the active turn when one is running.
     InterruptTurn,
+    /// Steer text into the currently active turn.
+    SteerTurn {
+        input: Vec<InputItem>,
+        expected_turn_id: TurnId,
+    },
     /// Browse persisted input history via the server/runtime session state.
     BrowseInputHistory(InputHistoryDirection),
     /// Stop the worker loop.
@@ -243,6 +249,16 @@ impl QueryWorkerHandle {
     pub(crate) fn interrupt_turn(&self) -> Result<()> {
         self.command_tx
             .send(OperationCommand::InterruptTurn)
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    /// Steer text into the currently active turn.
+    pub(crate) fn submit_steer(&self, text: String, expected_turn_id: TurnId) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::SteerTurn {
+                input: vec![devo_server::InputItem::Text { text }],
+                expected_turn_id,
+            })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -676,6 +692,36 @@ async fn run_worker_inner(
                                 });
                             }
                     }
+                    Some(OperationCommand::SteerTurn {
+                        input,
+                        expected_turn_id,
+                    }) => {
+                        if let Some(active_session_id) = session_id {
+                            match client
+                                .turn_steer(TurnSteerParams {
+                                    session_id: active_session_id,
+                                    expected_turn_id,
+                                    input,
+                                })
+                                .await
+                            {
+                                Ok(result) => {
+                                    let _ = event_tx.send(WorkerEvent::SteerAccepted {
+                                        turn_id: result.turn_id,
+                                    });
+                                }
+                                Err(error) => {
+                                    let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                        message: error.to_string(),
+                                        turn_count,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        prompt_token_estimate: total_input_tokens,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     Some(OperationCommand::BrowseInputHistory(direction)) => {
                         let text = if let Some(active_session_id) = session_id {
                             match client
@@ -754,6 +800,7 @@ async fn run_worker_inner(
                                     let _ = event_tx.send(WorkerEvent::TurnStarted {
                                         model: payload.turn.model,
                                         thinking: payload.turn.thinking,
+                                        turn_id: payload.turn.turn_id,
                                     });
                                 }
                                 latest_completed_agent_message = None;
@@ -849,6 +896,14 @@ async fn run_worker_inner(
                                             .as_ref()
                                             .map(|usage| usage.input_tokens as usize)
                                             .unwrap_or(total_input_tokens),
+                                    });
+                                }
+                            }
+                            "inputQueue/updated" => {
+                                if let ServerEvent::InputQueueUpdated(payload) = event {
+                                    let _ = event_tx.send(WorkerEvent::InputQueueUpdated {
+                                        pending_count: payload.pending_count,
+                                        pending_texts: payload.pending_texts,
                                     });
                                 }
                             }

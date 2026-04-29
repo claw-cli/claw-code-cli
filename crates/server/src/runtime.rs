@@ -1184,11 +1184,39 @@ impl ServerRuntime {
         let turn = {
             let mut session = session_arc.lock().await;
             if session.active_turn.is_some() {
-                return self.error_response(
-                    request_id,
-                    ProtocolErrorCode::TurnAlreadyRunning,
-                    "session already has an active turn",
-                );
+                // Queue instead of rejecting — the input will be consumed when
+                // the current turn completes.
+                let core_session = session.core_session.lock().await;
+                core_session.enqueue_pending_input(devo_core::PendingInputItem {
+                    kind: devo_core::PendingInputKind::UserText {
+                        text: input_text.clone(),
+                    },
+                    metadata: None,
+                    created_at: chrono::Utc::now(),
+                });
+                let pending_count = core_session
+                    .pending_user_prompts
+                    .lock()
+                    .expect("lock")
+                    .len();
+                drop(core_session);
+                self.broadcast_event(ServerEvent::InputQueueUpdated(
+                    devo_core::InputQueueUpdatedPayload {
+                        session_id: params.session_id,
+                        pending_count,
+                        pending_texts: vec![display_input.clone()],
+                    },
+                ))
+                .await;
+                return serde_json::to_value(SuccessResponse {
+                    id: request_id,
+                    result: TurnStartResult {
+                        turn_id: session.active_turn.as_ref().expect("active turn").turn_id,
+                        status: TurnStatus::Running,
+                        accepted_at: now,
+                    },
+                })
+                .expect("serialize turn/start response");
             }
             if let Some(cwd) = params.cwd.clone() {
                 session.summary.cwd = cwd.clone();
@@ -1215,6 +1243,7 @@ impl ServerRuntime {
                     .as_ref()
                     .map_or(1, |turn| turn.sequence + 1),
                 status: TurnStatus::Running,
+                kind: devo_core::TurnKind::Regular,
                 model: turn_config.model.slug.clone(),
                 thinking: turn_config.thinking_selection.clone(),
                 request_model: resolved_request.request_model,
@@ -1477,6 +1506,14 @@ impl ServerRuntime {
                     "active turn did not match expectedTurnId",
                 );
             }
+            let active_turn = session.active_turn.as_ref().expect("active turn exists");
+            if active_turn.kind != devo_core::TurnKind::Regular {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::ActiveTurnNotSteerable,
+                    "cannot steer a non-regular turn",
+                );
+            }
             (
                 turn_id,
                 session.summary.cwd.clone(),
@@ -1528,7 +1565,11 @@ impl ServerRuntime {
         steering_queue
             .lock()
             .expect("steering queue mutex should not be poisoned")
-            .push_back(prompt_text);
+            .push_back(devo_core::PendingInputItem {
+                kind: devo_core::PendingInputKind::UserText { text: prompt_text },
+                metadata: None,
+                created_at: chrono::Utc::now(),
+            });
 
         self.emit_to_connection(
             connection_id,

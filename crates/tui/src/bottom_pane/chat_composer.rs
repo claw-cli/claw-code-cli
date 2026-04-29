@@ -3818,6 +3818,5 @@ impl ChatComposer {
                 }
             }
         }
-
     }
 }

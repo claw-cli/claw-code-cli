@@ -103,6 +103,7 @@ pub struct TurnUsage {
 pub enum Role {
     User,
     Assistant,
+    System,
 }
 
 impl Role {
@@ -110,6 +111,7 @@ impl Role {
         match self {
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::System => "system",
         }
     }
 }
@@ -153,6 +155,13 @@ impl Message {
     pub fn assistant_text(text: impl Into<String>) -> Self {
         Self {
             role: Role::Assistant,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    pub fn system(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::System,
             content: vec![ContentBlock::Text { text: text.into() }],
         }
     }
@@ -201,5 +210,51 @@ impl Message {
             role: self.role.as_str().to_string(),
             content,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn role_system_as_str() {
+        assert_eq!(Role::System.as_str(), "system");
+    }
+
+    #[test]
+    fn role_user_as_str() {
+        assert_eq!(Role::User.as_str(), "user");
+    }
+
+    #[test]
+    fn role_assistant_as_str() {
+        assert_eq!(Role::Assistant.as_str(), "assistant");
+    }
+
+    #[test]
+    fn message_system_creates_system_role() {
+        let msg = Message::system("budget notice");
+        assert_eq!(msg.role, Role::System);
+        assert_eq!(msg.content.len(), 1);
+        assert!(
+            matches!(msg.content[0], ContentBlock::Text { ref text } if text == "budget notice")
+        );
+    }
+
+    #[test]
+    fn message_system_to_request_message() {
+        let msg = Message::system("system instruction");
+        let req = msg.to_request_message();
+        assert_eq!(req.role, "system");
+    }
+
+    #[test]
+    fn message_user_to_request_message_role() {
+        let msg = Message::user("hello");
+        let req = msg.to_request_message();
+        assert_eq!(req.role, "user");
     }
 }

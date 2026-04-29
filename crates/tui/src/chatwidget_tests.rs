@@ -466,10 +466,19 @@ fn committed_history_drains_to_scrollback_lines() {
 
     let committed_lines = trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
     // TurnSummaryCell is now added on TurnFinished, so scrollback is non-empty.
-    assert!(!committed_lines.is_empty(), "TurnSummaryCell should be committed");
-    assert!(committed_lines.iter().any(|line| {
-        line.line.spans.iter().any(|span| span.content.contains("▣"))
-    }), "expected ▣ symbol in turn summary");
+    assert!(
+        !committed_lines.is_empty(),
+        "TurnSummaryCell should be committed"
+    );
+    assert!(
+        committed_lines.iter().any(|line| {
+            line.line
+                .spans
+                .iter()
+                .any(|span| span.content.contains("▣"))
+        }),
+        "expected ▣ symbol in turn summary"
+    );
 }
 
 #[test]
@@ -638,6 +647,7 @@ fn active_response_renders_generating_status_without_devo_title() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
+        turn_id: Default::default(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta("hello".to_string()));
 
@@ -658,6 +668,7 @@ fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
+        turn_id: Default::default(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
         "see https://example.test/path/abcdef12345 tail words".to_string(),
@@ -684,6 +695,7 @@ fn active_assistant_markdown_does_not_double_wrap() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
+        turn_id: Default::default(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(body));
 
@@ -708,6 +720,7 @@ fn committed_assistant_markdown_does_not_double_wrap() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
+        turn_id: Default::default(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(body));
     widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
@@ -749,6 +762,7 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
+        turn_id: Default::default(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
         "thinking text\n".to_string(),
@@ -816,6 +830,7 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
+        turn_id: Default::default(),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
         "thinking".to_string(),

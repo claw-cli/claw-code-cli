@@ -394,6 +394,21 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn set_pending_steers(&mut self, steers: Vec<String>) {
+        self.pending_input_preview.pending_steers = steers;
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_rejected_steers(&mut self, steers: Vec<String>) {
+        self.pending_input_preview.rejected_steers = steers;
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_queued_messages(&mut self, messages: Vec<String>) {
+        self.pending_input_preview.queued_messages = messages;
+        self.request_redraw();
+    }
+
     pub(crate) fn ensure_status_indicator(&mut self) {
         if self.status.is_none() {
             self.status = Some(StatusIndicatorWidget::new(

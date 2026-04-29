@@ -190,6 +190,7 @@ impl TurnProjector for DefaultProjection {
             session_id: turn.session_id,
             sequence: turn.sequence,
             status: turn.status.clone(),
+            kind: turn.kind.clone(),
             model: turn.model.clone(),
             thinking: turn.thinking.clone(),
             request_model: turn.request_model.clone(),

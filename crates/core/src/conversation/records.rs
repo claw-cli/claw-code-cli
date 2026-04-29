@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::conversation::{ItemId, SessionId, SessionTitleState, TurnId, TurnStatus, TurnUsage};
-use crate::{SessionContext, TurnContext};
+use crate::{SessionContext, TurnContext, TurnKind};
 
 /// Stores persistent metadata for one session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -82,6 +82,9 @@ pub struct TurnRecord {
     pub completed_at: Option<DateTime<Utc>>,
     /// The current lifecycle status of the turn.
     pub status: TurnStatus,
+    /// The kind of turn (Regular, Review, ManualCompaction, etc.).
+    #[serde(default)]
+    pub kind: TurnKind,
     /// The logical model selection used for the turn.
     pub model: String,
     /// The logical thinking selection used for the turn.
@@ -406,6 +409,7 @@ mod tests {
                 started_at: Utc::now(),
                 completed_at: None,
                 status: TurnStatus::Pending,
+                kind: crate::TurnKind::Regular,
                 model: "test-model".into(),
                 thinking: None,
                 request_model: "test-model".into(),

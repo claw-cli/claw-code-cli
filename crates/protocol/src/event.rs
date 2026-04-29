@@ -89,6 +89,19 @@ pub struct ServerRequestResolvedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputQueueUpdatedPayload {
+    pub session_id: SessionId,
+    pub pending_count: usize,
+    pub pending_texts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteerAcceptedPayload {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
     UserMessage,
@@ -171,6 +184,8 @@ pub enum ServerEvent {
     TurnPlanUpdated(TurnEventPayload),
     TurnDiffUpdated(TurnEventPayload),
     TurnUsageUpdated(TurnUsageUpdatedPayload),
+    InputQueueUpdated(InputQueueUpdatedPayload),
+    SteerAccepted(SteerAcceptedPayload),
     ItemStarted(ItemEventPayload),
     ItemCompleted(ItemEventPayload),
     ItemDelta {
@@ -199,6 +214,8 @@ impl ServerEvent {
             | Self::TurnPlanUpdated(payload)
             | Self::TurnDiffUpdated(payload) => Some(payload.session_id),
             Self::TurnUsageUpdated(payload) => Some(payload.session_id),
+            Self::InputQueueUpdated(payload) => Some(payload.session_id),
+            Self::SteerAccepted(payload) => Some(payload.session_id),
             Self::ItemStarted(payload) | Self::ItemCompleted(payload) => {
                 Some(payload.context.session_id)
             }
@@ -225,6 +242,8 @@ impl ServerEvent {
             Self::TurnPlanUpdated(_) => "turn/plan/updated",
             Self::TurnDiffUpdated(_) => "turn/diff/updated",
             Self::TurnUsageUpdated(_) => "turn/usage/updated",
+            Self::InputQueueUpdated(_) => "inputQueue/updated",
+            Self::SteerAccepted(_) => "steer/accepted",
             Self::ItemStarted(_) => "item/started",
             Self::ItemCompleted(_) => "item/completed",
             Self::ItemDelta { delta_kind, .. } => match delta_kind {
@@ -245,9 +264,62 @@ impl ServerEvent {
                 payload.context.seq = seq;
             }
             Self::ItemDelta { payload, .. } => payload.context.seq = seq,
-            Self::TurnUsageUpdated(_) => {}
+            Self::TurnUsageUpdated(_) | Self::InputQueueUpdated(_) | Self::SteerAccepted(_) => {}
             _ => {}
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn input_queue_updated_event_roundtrips() {
+        let payload = InputQueueUpdatedPayload {
+            session_id: SessionId::new(),
+            pending_count: 3,
+            pending_texts: vec!["first".into(), "second".into()],
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let restored: InputQueueUpdatedPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.pending_count, 3);
+        assert_eq!(restored.pending_texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn steer_accepted_event_roundtrips() {
+        let turn_id = TurnId::new();
+        let payload = SteerAcceptedPayload {
+            session_id: SessionId::new(),
+            turn_id,
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let restored: SteerAcceptedPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(restored.turn_id, turn_id);
+    }
+
+    #[test]
+    fn server_event_input_queue_updated_method_name() {
+        let event = ServerEvent::InputQueueUpdated(InputQueueUpdatedPayload {
+            session_id: SessionId::new(),
+            pending_count: 0,
+            pending_texts: vec![],
+        });
+        assert_eq!(event.method_name(), "inputQueue/updated");
+        assert!(event.session_id().is_some());
+    }
+
+    #[test]
+    fn server_event_steer_accepted_method_name() {
+        let event = ServerEvent::SteerAccepted(SteerAcceptedPayload {
+            session_id: SessionId::new(),
+            turn_id: TurnId::new(),
+        });
+        assert_eq!(event.method_name(), "steer/accepted");
+        assert!(event.session_id().is_some());
     }
 }

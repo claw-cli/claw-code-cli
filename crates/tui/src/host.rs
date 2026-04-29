@@ -420,7 +420,9 @@ fn handle_worker_event(
         | WorkerEvent::NewSessionPrepared { .. }
         | WorkerEvent::SessionRenamed { .. }
         | WorkerEvent::SessionTitleUpdated { .. }
-        | WorkerEvent::InputHistoryLoaded { .. } => {}
+        | WorkerEvent::InputHistoryLoaded { .. }
+        | WorkerEvent::InputQueueUpdated { .. }
+        | WorkerEvent::SteerAccepted { .. } => {}
     }
     if matches!(&worker_event, WorkerEvent::SessionsListed { .. }) {
         loop_state.resume_browser_pending = false;
@@ -465,6 +467,20 @@ fn handle_app_command(
                 .collect::<Vec<_>>()
                 .join("\n");
             worker.submit_prompt(prompt)?;
+        }
+        AppCommand::SteerTurn {
+            input,
+            expected_turn_id,
+        } => {
+            let prompt = input
+                .iter()
+                .filter_map(|item| match item {
+                    devo_protocol::InputItem::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            worker.submit_steer(prompt, *expected_turn_id)?;
         }
         AppCommand::OverrideTurnContext {
             model, thinking, ..

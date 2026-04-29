@@ -235,6 +235,7 @@ fn turn_projection_preserves_turn_status_vocabulary() {
         started_at: Utc::now(),
         completed_at: None,
         status: TurnStatus::Running,
+        kind: devo_core::TurnKind::Regular,
         model: "claude-sonnet".into(),
         thinking: None,
         request_model: "claude-sonnet".into(),

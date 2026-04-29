@@ -323,11 +323,7 @@ impl HistoryCell for UserHistoryCell {
         let mut lines: Vec<Line<'static>> = vec![Line::from("")];
 
         if let Some(wrapped_message) = wrapped_message {
-            lines.extend(prefix_lines(
-                wrapped_message,
-                "┃ ".cyan(),
-                "┃ ".cyan(),
-            ));
+            lines.extend(prefix_lines(wrapped_message, "┃ ".cyan(), "┃ ".cyan()));
         }
 
         lines.push(Line::from(""));
