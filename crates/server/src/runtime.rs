@@ -1407,7 +1407,7 @@ impl ServerRuntime {
     }
 
     async fn handle_turn_interrupt(
-        &self,
+        self: &Arc<Self>,
         request_id: serde_json::Value,
         params: serde_json::Value,
     ) -> serde_json::Value {
@@ -1510,6 +1510,16 @@ impl ServerRuntime {
             },
         ))
         .await;
+
+        // After interrupting the current turn, drain the steering queue and
+        // start the next turn. Without this, queued inputs would be orphaned
+        // because the aborted execute_turn task never reaches its end-of-turn
+        // drain logic.
+        let runtime = Arc::clone(self);
+        let sid = params.session_id;
+        tokio::spawn(async move {
+            runtime.spawn_next_turn_from_queue(sid).await;
+        });
 
         serde_json::to_value(SuccessResponse {
             id: request_id,
@@ -2228,6 +2238,101 @@ impl ServerRuntime {
             input_text,
         ))
         .await;
+    }
+
+    /// Pop the first queued input and start a new turn in a background task.
+    /// Used from the interrupt handler where the calling function must return
+    /// its response immediately.
+    async fn spawn_next_turn_from_queue(self: &Arc<Self>, session_id: SessionId) {
+        // Pop one queued input.
+        let (display_input, input_text) = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let steering_queue = {
+                let session = session_arc.lock().await;
+                Arc::clone(&session.steering_queue)
+            };
+            let mut guard = steering_queue
+                .lock()
+                .expect("steering queue mutex should not be poisoned");
+            match guard.pop_front() {
+                Some(devo_core::PendingInputItem {
+                    kind: devo_core::PendingInputKind::UserText { text },
+                    ..
+                }) => (text.clone(), text),
+                _ => return,
+            }
+        };
+        // Broadcast the updated queue state so the TUI removes this item
+        // from its pending cells list.
+        self.broadcast_updated_queue(session_id).await;
+
+        // Resolve turn config from session metadata.
+        let (turn_config, resolved_request) = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let session = session_arc.lock().await;
+            let model = session.summary.model.as_deref();
+            let thinking = session.summary.thinking.clone();
+            let tc = self.deps.resolve_turn_config(model, thinking);
+            let rr = tc
+                .model
+                .resolve_thinking_selection(tc.thinking_selection.as_deref());
+            (tc, rr)
+        };
+
+        let sequence = {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let session = session_arc.lock().await;
+            session.latest_turn.as_ref().map_or(1, |t| t.sequence + 1)
+        };
+
+        let now = Utc::now();
+        let turn = TurnMetadata {
+            turn_id: TurnId::new(),
+            session_id,
+            sequence,
+            status: TurnStatus::Running,
+            kind: devo_core::TurnKind::Regular,
+            model: turn_config.model.slug.clone(),
+            thinking: turn_config.thinking_selection.clone(),
+            request_model: resolved_request.request_model.clone(),
+            request_thinking: resolved_request.request_thinking.clone(),
+            started_at: now,
+            completed_at: None,
+            usage: None,
+        };
+        {
+            let session_arc = match self.sessions.lock().await.get(&session_id).cloned() {
+                Some(s) => s,
+                None => return,
+            };
+            let mut session = session_arc.lock().await;
+            session.summary.status = SessionRuntimeStatus::ActiveTurn;
+            session.summary.updated_at = now;
+            session.active_turn = Some(turn.clone());
+        }
+        self.broadcast_event(ServerEvent::TurnStarted(TurnEventPayload {
+            session_id,
+            turn: turn.clone(),
+        }))
+        .await;
+        // Spawn the turn in the background so the caller (interrupt handler)
+        // can return its response immediately. The spawned task will call
+        // drain_and_start_next_turn on completion, draining the entire queue.
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            runtime
+                .execute_turn(session_id, turn, turn_config, display_input, input_text)
+                .await;
+        });
     }
 
     /// Read the current steering queue and broadcast its state to connected clients.
