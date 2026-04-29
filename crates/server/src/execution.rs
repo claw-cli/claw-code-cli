@@ -232,6 +232,8 @@ pub(crate) struct RuntimeSession {
     pub(crate) active_task: Option<JoinHandle<()>>,
     /// Monotonic session-scoped item sequence counter.
     pub(crate) next_item_seq: u64,
+    /// First user input captured from the session's first turn, used for title generation.
+    pub(crate) first_user_input: Option<String>,
 }
 
 impl RuntimeSession {

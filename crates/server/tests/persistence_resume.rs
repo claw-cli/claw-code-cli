@@ -257,8 +257,8 @@ async fn runtime_generates_final_title_and_persists_explicit_rename() -> Result<
         .await
         .context("turn/start response")?;
 
-    wait_for_turn_completed(&mut notifications_rx).await?;
     wait_for_title_update(&mut notifications_rx, "Generated rollout title").await?;
+    wait_for_turn_completed(&mut notifications_rx).await?;
 
     let resume_after_completion = runtime
         .handle_incoming(

@@ -376,6 +376,7 @@ impl ServerRuntime {
                 steering_queue,
                 active_task: None,
                 next_item_seq: 1,
+                first_user_input: None,
             }
             .shared(),
         );
@@ -688,6 +689,7 @@ impl ServerRuntime {
                 steering_queue,
                 active_task: None,
                 next_item_seq: loaded_item_count + 1,
+                first_user_input: None,
             }
             .shared(),
         );
@@ -1299,6 +1301,32 @@ impl ServerRuntime {
         };
         self.maybe_assign_provisional_title(params.session_id, &display_input)
             .await;
+        // Capture first user input for title generation and trigger LLM title.
+        // On subsequent turns, retry if previous attempts failed.
+        {
+            let mut session = session_arc.lock().await;
+            if session.first_user_input.is_none() {
+                session.first_user_input = Some(display_input.clone());
+            }
+        }
+        let needs_title = {
+            let session = session_arc.lock().await;
+            let first_input = session.first_user_input.clone();
+            let needs = matches!(
+                session.summary.title_state,
+                SessionTitleState::Unset | SessionTitleState::Provisional
+            );
+            (needs, first_input)
+        };
+        if needs_title.0
+            && let Some(first_input) = needs_title.1
+        {
+            let runtime = Arc::clone(self);
+            let sid = params.session_id;
+            tokio::spawn(async move {
+                runtime.maybe_generate_final_title(sid, first_input).await;
+            });
+        }
         let (record, session_context, turn_context) = {
             let session = session_arc.lock().await;
             let core_session = session.core_session.lock().await;
@@ -1961,7 +1989,6 @@ impl ServerRuntime {
 
         let (
             result,
-            first_assistant_reply,
             session_total_input_tokens,
             session_total_output_tokens,
             session_prompt_token_estimate,
@@ -1987,23 +2014,8 @@ impl ServerRuntime {
                 Some(callback),
             )
             .await;
-            let first_assistant_reply = core_session.messages.iter().find_map(|message| {
-                if !matches!(message.role, devo_core::Role::Assistant) {
-                    return None;
-                }
-                let text = message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        devo_core::ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<String>();
-                (!text.trim().is_empty()).then_some(text)
-            });
             (
                 result,
-                first_assistant_reply,
                 core_session.total_input_tokens,
                 core_session.total_output_tokens,
                 core_session.prompt_token_estimate,
@@ -2050,22 +2062,6 @@ impl ServerRuntime {
         {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
         }
-        if final_turn.status == TurnStatus::Completed
-            && let Some(first_assistant_reply) = first_assistant_reply
-        {
-            let runtime = Arc::clone(&self);
-            let input_for_title = display_input.clone();
-            tokio::spawn(async move {
-                runtime
-                    .maybe_generate_final_title(
-                        session_id,
-                        &input_for_title,
-                        &first_assistant_reply,
-                    )
-                    .await;
-            });
-        }
-
         if let Err(error) = result {
             tracing::warn!(
                 session_id = %session_id,
@@ -2285,99 +2281,104 @@ impl ServerRuntime {
         .await;
     }
 
+    /// Attempts to generate a final session title by calling the LLM.
+    /// Retries up to MAX_TITLE_RETRIES times with exponential backoff.
+    /// Exhausting retries leaves the title at `Provisional`; the caller
+    /// should re-trigger on the next user message.
+    const MAX_TITLE_RETRIES: usize = 5;
+    const TITLE_RETRY_BASE_DELAY_SECS: u64 = 1;
+
     async fn maybe_generate_final_title(
         self: Arc<Self>,
         session_id: SessionId,
-        first_user_input: &str,
-        first_assistant_reply: &str,
+        first_user_input: String,
     ) {
-        let (model, title_state) = {
+        for attempt in 1..=Self::MAX_TITLE_RETRIES {
+            let (model, should_skip) = {
+                let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+                    return;
+                };
+                let session = session_arc.lock().await;
+                (
+                    session
+                        .summary
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| self.deps.default_model.clone()),
+                    matches!(session.summary.title_state, SessionTitleState::Final(_)),
+                )
+            };
+
+            if should_skip {
+                return;
+            }
+
+            let response = match self
+                .deps
+                .provider
+                .completion(build_title_generation_request(model, &first_user_input))
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(session_id = %session_id, attempt, error = %error, "title gen failed");
+                    if attempt < Self::MAX_TITLE_RETRIES {
+                        let delay = Self::TITLE_RETRY_BASE_DELAY_SECS * (1u64 << (attempt - 1));
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    }
+                    continue;
+                }
+            };
+
+            let Some(generated_title) = normalize_generated_title(&response.content) else {
+                tracing::warn!(session_id = %session_id, attempt, "title gen returned no valid title");
+                if attempt < Self::MAX_TITLE_RETRIES {
+                    let delay = Self::TITLE_RETRY_BASE_DELAY_SECS * (1u64 << (attempt - 1));
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                }
+                continue;
+            };
+
             let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
                 return;
             };
-            let session = session_arc.lock().await;
-            (
-                session
-                    .summary
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| self.deps.default_model.clone()),
-                session.summary.title_state.clone(),
-            )
-        };
+            let updated_summary = {
+                let mut session = session_arc.lock().await;
+                if matches!(session.summary.title_state, SessionTitleState::Final(_)) {
+                    return;
+                }
 
-        if matches!(
-            title_state,
-            SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate)
-                | SessionTitleState::Final(SessionTitleFinalSource::UserRename)
-                | SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated)
-        ) {
+                let previous_title = session.summary.title.clone();
+                let updated_at = Utc::now();
+                session.summary.title = Some(generated_title.clone());
+                session.summary.title_state =
+                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
+                session.summary.updated_at = updated_at;
+
+                if let Some(record) = session.record.as_mut() {
+                    record.title = Some(generated_title.clone());
+                    record.title_state =
+                        SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
+                    record.updated_at = updated_at;
+                    if let Err(error) = self.rollout_store.append_title_update(
+                        record,
+                        generated_title.clone(),
+                        record.title_state.clone(),
+                        previous_title,
+                    ) {
+                        tracing::warn!(session_id = %session_id, error = %error, "failed to persist title");
+                    }
+                }
+                session.summary.clone()
+            };
+
+            self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
+                session: updated_summary,
+            }))
+            .await;
             return;
         }
-
-        let response = match self
-            .deps
-            .provider
-            .completion(build_title_generation_request(
-                model,
-                first_user_input,
-                first_assistant_reply,
-            ))
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(session_id = %session_id, error = %error, "title generation request failed");
-                return;
-            }
-        };
-        let Some(generated_title) = normalize_generated_title(&response.content) else {
-            tracing::warn!(session_id = %session_id, "title generation returned no valid title");
-            return;
-        };
-
-        let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
-            return;
-        };
-        let updated_summary = {
-            let mut session = session_arc.lock().await;
-            if matches!(
-                session.summary.title_state,
-                SessionTitleState::Final(SessionTitleFinalSource::ExplicitCreate)
-                    | SessionTitleState::Final(SessionTitleFinalSource::UserRename)
-                    | SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated)
-            ) {
-                return;
-            }
-
-            let previous_title = session.summary.title.clone();
-            let updated_at = Utc::now();
-            session.summary.title = Some(generated_title.clone());
-            session.summary.title_state =
-                SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
-            session.summary.updated_at = updated_at;
-
-            if let Some(record) = session.record.as_mut() {
-                record.title = Some(generated_title.clone());
-                record.title_state =
-                    SessionTitleState::Final(SessionTitleFinalSource::ModelGenerated);
-                record.updated_at = updated_at;
-                if let Err(error) = self.rollout_store.append_title_update(
-                    record,
-                    generated_title.clone(),
-                    record.title_state.clone(),
-                    previous_title,
-                ) {
-                    tracing::warn!(session_id = %session_id, error = %error, "failed to persist generated title");
-                }
-            }
-            session.summary.clone()
-        };
-
-        self.broadcast_event(ServerEvent::SessionTitleUpdated(SessionEventPayload {
-            session: updated_summary,
-        }))
-        .await;
+        tracing::warn!(session_id = %session_id, "title generation exhausted all retries");
     }
 
     async fn emit_text_item(

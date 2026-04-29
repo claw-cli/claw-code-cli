@@ -31,11 +31,7 @@ pub(crate) fn derive_provisional_title(input: &str) -> Option<String> {
 }
 
 /// Builds a non-tool model request used to generate one final session title.
-pub(crate) fn build_title_generation_request(
-    model: String,
-    user_input: &str,
-    assistant_reply: &str,
-) -> ModelRequest {
+pub(crate) fn build_title_generation_request(model: String, user_input: &str) -> ModelRequest {
     ModelRequest {
         model,
         system: Some(
@@ -45,7 +41,7 @@ pub(crate) fn build_title_generation_request(
             role: "user".to_string(),
             content: vec![RequestContent::Text {
                 text: format!(
-                    "First user message:\n{user_input}\n\nFirst assistant reply:\n{assistant_reply}\n\nReturn only the best concise title."
+                    "First user message:\n{user_input}\n\nReturn only the best concise title."
                 ),
             }],
         }],

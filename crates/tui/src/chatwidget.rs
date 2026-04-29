@@ -58,12 +58,14 @@ use crate::history_cell::AI_REPLY_WRAP_WIDTH;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
+use crate::history_cell::UserHistoryCell;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::streaming::controller::StreamController;
 use crate::tui::frame_requester::FrameRequester;
 use devo_utils::ansi_escape::ansi_escape_line;
+use std::any::Any;
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -225,8 +227,7 @@ pub(crate) struct ChatWidget {
     total_input_tokens: usize,
     total_output_tokens: usize,
     prompt_token_estimate: usize,
-    pending_steers: Vec<String>,
-    rejected_steers: Vec<String>,
+    queued_count: usize,
     active_turn_id: Option<TurnId>,
     busy: bool,
 }
@@ -366,19 +367,6 @@ impl ChatWidget {
         )
     }
 
-    fn sync_pending_preview(&mut self) {
-        self.bottom_pane
-            .set_pending_steers(self.pending_steers.clone());
-        self.bottom_pane
-            .set_rejected_steers(self.rejected_steers.clone());
-        let queued_texts: Vec<String> = self
-            .queued_user_messages
-            .iter()
-            .map(|m| m.text.clone())
-            .collect();
-        self.bottom_pane.set_queued_messages(queued_texts);
-    }
-
     fn sync_bottom_pane_summary(&mut self) {
         self.bottom_pane
             .set_status_line(Some(Line::from(self.session_summary_text()).dim()));
@@ -428,18 +416,6 @@ impl ChatWidget {
         let loaded_any_history = !history_items.is_empty();
         for item in &history_items {
             self.add_transcript_item_without_redraw(item.clone());
-            if let Some(duration_ms) = item.duration_ms {
-                let model_name = self
-                    .session
-                    .model
-                    .as_ref()
-                    .map(|m| m.display_name.clone())
-                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
-                    .unwrap_or_default();
-                self.add_history_entry_without_redraw(Box::new(
-                    history_cell::TurnSummaryCell::new(model_name, Some(duration_ms / 1000)),
-                ));
-            }
         }
         if !loaded_any_history {
             self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
@@ -558,8 +534,7 @@ impl ChatWidget {
             total_input_tokens: 0,
             total_output_tokens: 0,
             prompt_token_estimate: 0,
-            pending_steers: Vec::new(),
-            rejected_steers: Vec::new(),
+            queued_count: 0,
             active_turn_id: None,
             busy: false,
         };
@@ -590,9 +565,18 @@ impl ChatWidget {
                 mention_bindings,
             } => {
                 if self.busy && !text.trim().is_empty() {
-                    // Turn is active — queue the input instead of submitting directly.
-                    self.pending_steers.push(text.clone());
-                    self.sync_pending_preview();
+                    // Turn is active — add a queued input cell to history
+                    // immediately, then send to server which will queue it.
+                    self.add_to_history(history_cell::new_queued_user_prompt(
+                        text.clone(),
+                        text_elements.clone(),
+                        local_images
+                            .iter()
+                            .map(|a| a.path.clone())
+                            .collect::<Vec<_>>(),
+                        Vec::new(),
+                    ));
+                    self.queued_count += 1;
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::user_turn(
                             vec![devo_protocol::InputItem::Text { text }],
@@ -718,6 +702,10 @@ impl ChatWidget {
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
                 self.bottom_pane.set_task_running(true);
+                // If there are queued cells, one has been consumed by this new turn.
+                if self.queued_count > 0 {
+                    self.unqueue_oldest_pending();
+                }
             }
             WorkerEvent::TextDelta(text) => {
                 self.push_assistant_stream_delta(&text);
@@ -1026,12 +1014,11 @@ impl ChatWidget {
             WorkerEvent::InputHistoryLoaded { direction: _, text } => {
                 self.bottom_pane.restore_input_from_history(text);
             }
-            WorkerEvent::InputQueueUpdated {
-                pending_count: _,
-                pending_texts,
-            } => {
-                self.pending_steers = pending_texts;
-                self.sync_pending_preview();
+            WorkerEvent::InputQueueUpdated { pending_count, .. } => {
+                // If the queue shrunk, unqueue the oldest queued cells.
+                while self.queued_count > pending_count {
+                    self.unqueue_oldest_pending();
+                }
                 self.frame_requester.schedule_frame();
             }
             WorkerEvent::SteerAccepted { .. } => {
@@ -1767,6 +1754,20 @@ impl ChatWidget {
     pub(crate) fn add_to_history(&mut self, cell: impl HistoryCell + 'static) {
         self.add_history_entry_without_redraw(Box::new(cell));
         self.frame_requester.schedule_frame();
+    }
+
+    /// Find the first queued UserHistoryCell in history and mark it as delivered.
+    fn unqueue_oldest_pending(&mut self) {
+        for cell in self.history.iter_mut().rev() {
+            let any_ref: &mut dyn Any = (*cell).as_mut();
+            if let Some(user_cell) = any_ref.downcast_mut::<UserHistoryCell>() {
+                if user_cell.queued {
+                    user_cell.queued = false;
+                    self.queued_count = self.queued_count.saturating_sub(1);
+                    return;
+                }
+            }
+        }
     }
 
     fn add_history_entry_without_redraw(&mut self, cell: Box<dyn HistoryCell>) {

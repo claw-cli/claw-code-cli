@@ -20,7 +20,6 @@ mod file_search_popup;
 mod footer;
 mod list_selection_view;
 mod paste_burst;
-mod pending_input_preview;
 mod pending_thread_approvals;
 mod popup_consts;
 mod prompt_args;
@@ -40,7 +39,6 @@ use crate::app_command::InputHistoryDirection;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
-use crate::bottom_pane::pending_input_preview::PendingInputPreview;
 use crate::bottom_pane::pending_thread_approvals::PendingThreadApprovals;
 use crate::bottom_pane::unified_exec_footer::UnifiedExecFooter;
 use crate::render::renderable::Renderable;
@@ -136,7 +134,6 @@ pub(crate) struct BottomPane {
     app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
     unified_exec_footer: UnifiedExecFooter,
-    pending_input_preview: PendingInputPreview,
     pending_thread_approvals: PendingThreadApprovals,
     placeholder_text: String,
     /// Status indicator shown above the composer while a task is running.
@@ -181,7 +178,6 @@ impl BottomPane {
             app_event_tx,
             frame_requester,
             unified_exec_footer: UnifiedExecFooter::new(),
-            pending_input_preview: PendingInputPreview::new(),
             pending_thread_approvals: PendingThreadApprovals::new(),
             placeholder_text,
             status: None,
@@ -394,21 +390,6 @@ impl BottomPane {
         }
     }
 
-    pub(crate) fn set_pending_steers(&mut self, steers: Vec<String>) {
-        self.pending_input_preview.pending_steers = steers;
-        self.request_redraw();
-    }
-
-    pub(crate) fn set_rejected_steers(&mut self, steers: Vec<String>) {
-        self.pending_input_preview.rejected_steers = steers;
-        self.request_redraw();
-    }
-
-    pub(crate) fn set_queued_messages(&mut self, messages: Vec<String>) {
-        self.pending_input_preview.queued_messages = messages;
-        self.request_redraw();
-    }
-
     pub(crate) fn ensure_status_indicator(&mut self) {
         if self.status.is_none() {
             self.status = Some(StatusIndicatorWidget::new(
@@ -617,11 +598,7 @@ impl Renderable for BottomPane {
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
             children.push(&self.unified_exec_footer);
         }
-        children.extend_from_slice(&[
-            &self.pending_thread_approvals,
-            &self.pending_input_preview,
-            &self.composer,
-        ]);
+        children.extend_from_slice(&[&self.pending_thread_approvals, &self.composer]);
         self.render_children(area, buf, &children);
     }
 
@@ -636,11 +613,7 @@ impl Renderable for BottomPane {
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
             children.push(&self.unified_exec_footer);
         }
-        children.extend_from_slice(&[
-            &self.pending_thread_approvals,
-            &self.pending_input_preview,
-            &self.composer,
-        ]);
+        children.extend_from_slice(&[&self.pending_thread_approvals, &self.composer]);
         self.desired_children_height(width, &children)
     }
 
@@ -655,11 +628,7 @@ impl Renderable for BottomPane {
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
             children.push(&self.unified_exec_footer);
         }
-        children.extend_from_slice(&[
-            &self.pending_thread_approvals,
-            &self.pending_input_preview,
-            &self.composer,
-        ]);
+        children.extend_from_slice(&[&self.pending_thread_approvals, &self.composer]);
         self.child_cursor_pos(area, &children)
     }
 }
