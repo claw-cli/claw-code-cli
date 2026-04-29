@@ -1402,10 +1402,18 @@ impl ChatComposer {
             } => {
                 if let Some(sel) = popup.selected_item() {
                     let CommandItem::Builtin(cmd) = sel;
-                    self.textarea.set_text_clearing_elements("");
-                    return (InputResult::Command(cmd), true);
+                    // If the command supports inline args and there's already
+                    // text after the command name, don't clear the textarea —
+                    // let the default submission handle it so the arguments
+                    // are preserved.
+                    let text = self.textarea.text();
+                    if !cmd.supports_inline_args() || text.trim().split_whitespace().count() < 2 {
+                        self.textarea.set_text_clearing_elements("");
+                        return (InputResult::Command(cmd), true);
+                    }
                 }
-                // Fallback to default newline handling if no command selected.
+                // Fallback to default newline handling if no command selected
+                // or the command has inline args that should be submitted.
                 self.handle_key_event_without_popup(key_event)
             }
             input => self.handle_input_basic(input),
