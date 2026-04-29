@@ -10,26 +10,20 @@ use crate::render::renderable::Renderable;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_lines;
 
-/// Widget that displays pending steers plus follow-up messages held while a turn is in progress.
+const PREVIEW_LINE_LIMIT: usize = 5;
+
+/// Renders queued / pending messages that haven't been sent to the model yet.
 ///
-/// The widget renders pending steers first, then rejected steers that will be
-/// resubmitted at end of turn, then ordinary queued user messages. Pending
-/// steers explain that they will be submitted after the next tool/result
-/// boundary unless the user presses Esc to interrupt and send them
-/// immediately. The edit hint at the bottom only appears when there are actual
-/// queued user messages to pop back into the composer. Because some terminals
-/// intercept certain modifier-key combinations, the displayed binding is
-/// configurable via [`set_edit_binding`](Self::set_edit_binding).
+/// Inspired by OpenCode's inline `QUEUED` badge. Three sections:
+/// - **pending** — submitted while turn was active, delivered after next tool call
+/// - **rejected** — blocked by hooks, resubmitted at turn end
+/// - **queued** — follow-up messages waiting for the next turn
 pub(crate) struct PendingInputPreview {
     pub pending_steers: Vec<String>,
     pub rejected_steers: Vec<String>,
     pub queued_messages: Vec<String>,
-    /// Key combination rendered in the hint line.  Defaults to Alt+Up but may
-    /// be overridden for terminals where that chord is unavailable.
     edit_binding: key_hint::KeyBinding,
 }
-
-const PREVIEW_LINE_LIMIT: usize = 3;
 
 impl PendingInputPreview {
     pub(crate) fn new() -> Self {
@@ -41,122 +35,117 @@ impl PendingInputPreview {
         }
     }
 
-    /// Replace the keybinding shown in the hint line at the bottom of the
-    /// queued-messages list.  The caller is responsible for also wiring the
-    /// corresponding key event handler.
     pub(crate) fn set_edit_binding(&mut self, binding: key_hint::KeyBinding) {
         self.edit_binding = binding;
     }
 
-    fn push_truncated_preview_lines(
-        lines: &mut Vec<Line<'static>>,
-        wrapped: Vec<Line<'static>>,
-        overflow_line: Line<'static>,
-    ) {
-        let wrapped_len = wrapped.len();
+    fn push_truncated(lines: &mut Vec<Line<'static>>, wrapped: Vec<Line<'static>>) {
+        let len = wrapped.len();
         lines.extend(wrapped.into_iter().take(PREVIEW_LINE_LIMIT));
-        if wrapped_len > PREVIEW_LINE_LIMIT {
-            lines.push(overflow_line);
+        if len > PREVIEW_LINE_LIMIT {
+            lines.push(Line::from("    …".dark_gray()));
         }
     }
 
-    fn push_section_header(lines: &mut Vec<Line<'static>>, width: u16, header: Line<'static>) {
-        let mut spans = vec!["• ".dim()];
-        spans.extend(header.spans);
-        lines.extend(adaptive_wrap_lines(
-            std::iter::once(Line::from(spans)),
-            RtOptions::new(width as usize).subsequent_indent(Line::from("  ".dim())),
+    fn build_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let has_any = !self.pending_steers.is_empty()
+            || !self.rejected_steers.is_empty()
+            || !self.queued_messages.is_empty();
+        if !has_any || width < 4 {
+            return vec![];
+        }
+
+        let mut lines: Vec<Line<'static>> = Vec::new();
+
+        lines.push(Line::from(
+            "  ─────────────────────────────────".dark_gray(),
         ));
-    }
 
-    fn as_renderable(&self, width: u16) -> Box<dyn Renderable> {
-        if (self.pending_steers.is_empty()
-            && self.rejected_steers.is_empty()
-            && self.queued_messages.is_empty())
-            || width < 4
-        {
-            return Box::new(());
-        }
-
-        let mut lines = vec![];
-
+        // ── Pending steers ──
         if !self.pending_steers.is_empty() {
-            Self::push_section_header(
-                &mut lines,
-                width,
-                Line::from(vec![
-                    "Messages to be submitted after next tool call".into(),
-                    " (press ".dim(),
-                    key_hint::plain(KeyCode::Esc).into(),
-                    " to interrupt and send immediately)".dim(),
-                ]),
-            );
-
+            lines.push(Line::from(vec![
+                "  ◆ ".into(),
+                "PENDING".yellow().bold(),
+                format!("  {}", self.pending_steers.len()).dark_gray(),
+            ]));
+            lines.push(Line::from(
+                "   Will be sent after the current tool call".dark_gray(),
+            ));
             for steer in &self.pending_steers {
                 let wrapped = adaptive_wrap_lines(
-                    steer.lines().map(|line| Line::from(line.dim())),
+                    steer.lines().map(|line| Line::from(line.yellow())),
                     RtOptions::new(width as usize)
-                        .initial_indent(Line::from("  ↳ ".dim()))
-                        .subsequent_indent(Line::from("    ")),
+                        .initial_indent(Line::from(String::from("    ↳ ")))
+                        .subsequent_indent(Line::from("      ")),
                 );
-                Self::push_truncated_preview_lines(&mut lines, wrapped, Line::from("    …".dim()));
+                Self::push_truncated(&mut lines, wrapped);
             }
+            lines.push(
+                Line::from(vec![
+                    "    ".into(),
+                    "[".dark_gray(),
+                    key_hint::plain(KeyCode::Esc).into(),
+                    " interrupt and send now]".dark_gray(),
+                ])
+                .dark_gray(),
+            );
         }
 
+        // ── Rejected steers ──
         if !self.rejected_steers.is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            Self::push_section_header(
-                &mut lines,
-                width,
-                "Messages to be submitted at end of turn".into(),
-            );
-
+            lines.push(Line::from(vec![
+                "  ◆ ".dark_gray(),
+                "BLOCKED".red().bold(),
+                format!("  {}", self.rejected_steers.len()).dark_gray(),
+            ]));
             for steer in &self.rejected_steers {
                 let wrapped = adaptive_wrap_lines(
-                    steer.lines().map(|line| Line::from(line.dim())),
+                    steer.lines().map(|line| Line::from(line.dark_gray())),
                     RtOptions::new(width as usize)
-                        .initial_indent(Line::from("  ↳ ".dim()))
-                        .subsequent_indent(Line::from("    ")),
+                        .initial_indent(Line::from("    ↳ ".dark_gray()))
+                        .subsequent_indent(Line::from("      ")),
                 );
-                Self::push_truncated_preview_lines(&mut lines, wrapped, Line::from("    …".dim()));
+                Self::push_truncated(&mut lines, wrapped);
             }
+            lines.push(Line::from(
+                "   Resubmitted when the current turn ends".dark_gray(),
+            ));
         }
 
+        // ── Queued messages ──
         if !self.queued_messages.is_empty() {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            Self::push_section_header(&mut lines, width, "Queued follow-up messages".into());
-
-            for message in &self.queued_messages {
+            lines.push(Line::from(vec![
+                "  ◆ ".dark_gray(),
+                "QUEUED".cyan().bold(),
+                format!("  {}", self.queued_messages.len()).dark_gray(),
+            ]));
+            for msg in &self.queued_messages {
                 let wrapped = adaptive_wrap_lines(
-                    message.lines().map(|line| Line::from(line.dim().italic())),
+                    msg.lines()
+                        .map(|line| Line::from(line.italic().dark_gray())),
                     RtOptions::new(width as usize)
-                        .initial_indent(Line::from("  ↳ ".dim()))
-                        .subsequent_indent(Line::from("    ")),
+                        .initial_indent(Line::from("    ↳ ".dark_gray().italic()))
+                        .subsequent_indent(Line::from("      ")),
                 );
-                Self::push_truncated_preview_lines(
-                    &mut lines,
-                    wrapped,
-                    Line::from("    …".dim().italic()),
-                );
+                Self::push_truncated(&mut lines, wrapped);
             }
-        }
-
-        if !self.queued_messages.is_empty() {
             lines.push(
                 Line::from(vec![
                     "    ".into(),
                     self.edit_binding.into(),
-                    " edit last queued message".into(),
+                    " edit last".dark_gray(),
                 ])
-                .dim(),
+                .dark_gray(),
             );
         }
 
-        Paragraph::new(lines).into()
+        lines
     }
 }
 
@@ -165,11 +154,19 @@ impl Renderable for PendingInputPreview {
         if area.is_empty() {
             return;
         }
+        let lines = self.build_lines(area.width);
+        if lines.is_empty() {
+            return;
+        }
 
-        self.as_renderable(area.width).render(area, buf);
+        Paragraph::new(lines).render(area, buf);
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.as_renderable(width).desired_height(width)
+        let lines = self.build_lines(width);
+        if lines.is_empty() {
+            return 0;
+        }
+        lines.len() as u16
     }
 }
