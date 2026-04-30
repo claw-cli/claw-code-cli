@@ -3,9 +3,14 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::builder::PossibleValuesParser;
 use clap::builder::TypedValueParser as _;
+use devo_core::AppConfig;
 use devo_core::AppConfigLoader;
+use devo_core::FileSystemAppConfigLoader;
 use devo_core::LoggingBootstrap;
 use devo_core::LoggingRuntime;
+use devo_core::UpdateCheckOutcome;
+use devo_core::UpdateChecker;
+use devo_core::format_update_notification;
 use devo_server::ServerProcessArgs;
 use devo_server::ServerTransportMode;
 use devo_server::run_server_process;
@@ -53,12 +58,14 @@ async fn run_cli() -> Result<()> {
 
     match &cli.command {
         Some(Command::Onboard) => {
+            maybe_print_startup_update(&cli).await;
             // Resolve logging config early, install the process-wide file subscriber,
             // and keep its non-blocking writer guard alive for the command lifetime.
             let _logging = install_logging(&cli)?;
             run_agent(/*force_onboarding*/ true, log_level.as_deref()).await
         }
         Some(Command::Prompt { input }) => {
+            maybe_print_startup_update(&cli).await;
             let _logging = install_logging(&cli)?;
             run_prompt(input, cli.model.as_deref(), log_level.as_deref()).await
         }
@@ -78,6 +85,7 @@ async fn run_cli() -> Result<()> {
             run_server_process(args).await
         }
         None => {
+            maybe_print_startup_update(&cli).await;
             let _logging = install_logging(&cli)?;
             run_agent(/*force_onboarding*/ false, log_level.as_deref()).await
         }
@@ -105,6 +113,30 @@ enum Command {
         #[arg(long, value_enum, hide = true, default_value_t = ServerTransportMode::Config)]
         transport: ServerTransportMode,
     },
+}
+
+async fn maybe_print_startup_update(cli: &Cli) {
+    let Ok(home_dir) = find_devo_home() else {
+        return;
+    };
+    let app_config = FileSystemAppConfigLoader::new(home_dir.clone())
+        .with_cli_overrides(cli_logging_overrides(cli))
+        .load(Some(
+            std::env::current_dir()
+                .ok()
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        ))
+        .unwrap_or_else(|_| AppConfig::default());
+    let Ok(checker) = UpdateChecker::new(home_dir, app_config.updates) else {
+        return;
+    };
+
+    if let UpdateCheckOutcome::UpdateAvailable(notification) =
+        checker.check_for_startup_update().await
+    {
+        eprintln!("{}", format_update_notification(&notification));
+    }
 }
 
 fn install_logging(cli: &Cli) -> Result<LoggingRuntime> {
@@ -165,6 +197,7 @@ mod tests {
     use tracing_subscriber::filter::LevelFilter;
 
     use super::Cli;
+    use super::Command;
     use super::cli_logging_overrides;
 
     #[test]
@@ -231,5 +264,68 @@ mod tests {
                 )]))
             );
         }
+    }
+
+    #[test]
+    fn startup_update_check_scope_covers_expected_user_facing_commands() {
+        for cli in [
+            Cli {
+                command: None,
+                model: None,
+                log_level: None,
+            },
+            Cli {
+                command: Some(Command::Onboard),
+                model: None,
+                log_level: None,
+            },
+            Cli {
+                command: Some(Command::Prompt {
+                    input: "hello".to_string(),
+                }),
+                model: None,
+                log_level: None,
+            },
+        ] {
+            assert_eq!(
+                matches!(
+                    cli.command,
+                    None | Some(Command::Onboard) | Some(Command::Prompt { .. })
+                ),
+                true
+            );
+        }
+    }
+
+    #[test]
+    fn startup_update_check_scope_skips_server_and_doctor() {
+        let doctor = Cli {
+            command: Some(Command::Doctor),
+            model: None,
+            log_level: None,
+        };
+        let server = Cli {
+            command: Some(Command::Server {
+                working_root: None,
+                transport: devo_server::ServerTransportMode::Config,
+            }),
+            model: None,
+            log_level: None,
+        };
+
+        assert_eq!(
+            matches!(
+                doctor.command,
+                None | Some(Command::Onboard) | Some(Command::Prompt { .. })
+            ),
+            false
+        );
+        assert_eq!(
+            matches!(
+                server.command,
+                None | Some(Command::Onboard) | Some(Command::Prompt { .. })
+            ),
+            false
+        );
     }
 }

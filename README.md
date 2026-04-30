@@ -46,8 +46,13 @@ curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
 ### Windows
 
 ```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1 | powershell -NoProfile -ExecutionPolicy Bypass -Command -
+irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
+
+> [!TIP]
+> `devo` can check for newer GitHub releases on startup and print the matching
+> upgrade command. You can disable or tune this with the `[updates]` section in
+> `DEVO_HOME/config.toml` or `<workspace>/.devo/config.toml`.
 
 ## 🚀 Quick Start
 

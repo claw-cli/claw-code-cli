@@ -5,7 +5,7 @@ use pretty_assertions::assert_eq;
 
 use super::{
     AppConfig, AppConfigLoader, ContextManageConfig, FileSystemAppConfigLoader, LogRotation,
-    LoggingConfig, SafetyPolicyModelSelection, SummaryModelSelection,
+    LoggingConfig, SafetyPolicyModelSelection, SummaryModelSelection, UpdatesConfig,
 };
 use crate::SkillsConfig;
 
@@ -58,6 +58,10 @@ max_files = 2
 [skills]
 enabled = false
 user_roots = ["custom-user-skills"]
+
+[updates]
+enabled = false
+check_interval_hours = 48
 "#
     .parse()
     .expect("parse cli overrides");
@@ -100,6 +104,11 @@ user_roots = ["custom-user-skills"]
                 workspace_roots: vec![PathBuf::from("project-skills")],
                 watch_for_changes: false,
             },
+            updates: UpdatesConfig {
+                enabled: false,
+                check_on_startup: true,
+                check_interval_hours: 48,
+            },
             project_root_markers: vec![".workspace".into()],
         }
     );
@@ -137,6 +146,40 @@ fn loader_rejects_duplicate_skill_roots() {
     std::fs::write(
         home.join("config.toml"),
         "[skills]\nuser_roots = ['skills', 'skills']\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let result = loader.load(None);
+
+    assert!(matches!(
+        result,
+        Err(super::AppConfigError::Validation { .. })
+    ));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_app_config_enables_startup_update_checks() {
+    assert_eq!(
+        AppConfig::default().updates,
+        UpdatesConfig {
+            enabled: true,
+            check_on_startup: true,
+            check_interval_hours: 24,
+        }
+    );
+}
+
+#[test]
+fn loader_rejects_invalid_update_check_interval() {
+    let root = unique_temp_dir("config-update-interval");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[updates]\ncheck_interval_hours = 0\n",
     )
     .expect("write user config");
 

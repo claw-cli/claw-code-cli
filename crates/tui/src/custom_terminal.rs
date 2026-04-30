@@ -454,6 +454,16 @@ where
         Ok(())
     }
 
+    /// Move the terminal cursor to the first column immediately below `area`.
+    ///
+    /// When `area` already reaches the last screen row, clamp to that last row so callers can
+    /// still leave the terminal in a stable state before restoring normal shell input.
+    pub fn set_cursor_below_rect(&mut self, area: Rect) -> io::Result<()> {
+        let screen_height = self.size()?.height;
+        let target_y = area.bottom().min(screen_height.saturating_sub(1));
+        self.set_cursor_position(Position { x: 0, y: target_y })
+    }
+
     /// Force the next draw pass to repaint the entire viewport by resetting the
     /// diff buffer. Call this after operations that move screen content outside of
     /// ratatui's knowledge (e.g., Zellij-mode scrolling via raw newlines), since

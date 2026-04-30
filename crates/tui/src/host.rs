@@ -119,6 +119,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         show_model_onboarding: config.show_model_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
     });
+    tui.set_exit_layout_snapshot_handle(chat_widget.exit_layout_snapshot_handle());
 
     // tui events, such as `[TuiEvent::Draw]`, `[TuiEvent::Key]`, `TuiEvent::Paste`
     let events = tui.event_stream();
@@ -204,12 +205,7 @@ fn resolve_initial_model(
 }
 
 fn clear_before_exit(tui: &mut Tui) -> Result<()> {
-    if tui.is_alt_screen_active() {
-        tui.leave_alt_screen()?;
-    }
-    tui.flush_pending_history_lines_for_exit()?;
-    tui.terminal.clear_inline_viewport()?;
-    Ok(())
+    Ok(tui.shutdown_inline_precise()?)
 }
 
 fn handle_tui_event(

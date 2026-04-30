@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -117,6 +119,21 @@ pub(crate) struct ActiveCellTranscriptKey {
     pub(crate) revision: u64,
     pub(crate) is_stream_continuation: bool,
     pub(crate) animation_tick: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ExitLayoutMode {
+    #[default]
+    SpecialSurface,
+    InlineChat,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ExitLayoutSnapshot {
+    pub(crate) mode: ExitLayoutMode,
+    pub(crate) frame_area: Rect,
+    pub(crate) history_area: Rect,
+    pub(crate) bottom_pane_area: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -231,6 +248,7 @@ pub(crate) struct ChatWidget {
     queued_count: usize,
     active_turn_id: Option<TurnId>,
     busy: bool,
+    exit_layout_snapshot: Arc<Mutex<ExitLayoutSnapshot>>,
 }
 
 impl ChatWidget {
@@ -604,6 +622,7 @@ impl ChatWidget {
             queued_count: 0,
             active_turn_id: None,
             busy: false,
+            exit_layout_snapshot: Arc::new(Mutex::new(ExitLayoutSnapshot::default())),
         };
 
         // Model onboarding can inject additional startup UI before the first frame is drawn.
@@ -2136,11 +2155,23 @@ impl ChatWidget {
     pub(crate) fn is_resume_browser_open(&self) -> bool {
         self.resume_browser_loading || self.resume_browser.is_some()
     }
+
+    pub(crate) fn exit_layout_snapshot_handle(&self) -> Arc<Mutex<ExitLayoutSnapshot>> {
+        Arc::clone(&self.exit_layout_snapshot)
+    }
 }
 
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if self.resume_browser_loading {
+            if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
+                *snapshot = ExitLayoutSnapshot {
+                    mode: ExitLayoutMode::SpecialSurface,
+                    frame_area: area,
+                    history_area: Rect::default(),
+                    bottom_pane_area: Rect::default(),
+                };
+            }
             let lines = vec![
                 Line::from("Resume Session".bold()),
                 Line::from("Loading saved sessions...".dim()),
@@ -2155,6 +2186,14 @@ impl Renderable for ChatWidget {
         }
 
         if let Some(browser) = &self.resume_browser {
+            if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
+                *snapshot = ExitLayoutSnapshot {
+                    mode: ExitLayoutMode::SpecialSurface,
+                    frame_area: area,
+                    history_area: Rect::default(),
+                    bottom_pane_area: Rect::default(),
+                };
+            }
             Block::default().style(Style::default()).render(area, buf);
             let title_width = browser
                 .sessions
@@ -2223,6 +2262,14 @@ impl Renderable for ChatWidget {
             .min(area.height.saturating_sub(1).max(3));
         let [history_area, bottom_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(area);
+        if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
+            *snapshot = ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: area,
+                history_area,
+                bottom_pane_area: bottom_area,
+            };
+        }
 
         let viewport_lines = self.active_viewport_lines(history_area.width);
         if !viewport_lines.is_empty() {

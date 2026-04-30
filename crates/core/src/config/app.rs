@@ -30,9 +30,22 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     /// Skill discovery roots and behavior.
     pub skills: SkillsConfig,
+    /// Startup update-check defaults.
+    pub updates: UpdatesConfig,
     /// TODO: Not sure what's purpose of `project_root_markers`?
     /// Marker names used when discovering a project root.
     pub project_root_markers: Vec<String>,
+}
+
+/// Controls how the CLI checks for new releases at startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdatesConfig {
+    /// Whether update checking is enabled at all.
+    pub enabled: bool,
+    /// Whether the CLI should check for updates during startup.
+    pub check_on_startup: bool,
+    /// Minimum number of hours between network checks.
+    pub check_interval_hours: u64,
 }
 
 /// Selects the model used for summary generation.
@@ -98,6 +111,11 @@ impl Default for AppConfig {
                 user_roots: vec![PathBuf::from("skills")],
                 workspace_roots: vec![PathBuf::from("skills")],
                 watch_for_changes: true,
+            },
+            updates: UpdatesConfig {
+                enabled: true,
+                check_on_startup: true,
+                check_interval_hours: 24,
             },
             project_root_markers: vec![".git".into()],
         }
@@ -244,6 +262,12 @@ fn validate_app_config(config: &AppConfig) -> Result<(), AppConfigError> {
     if config.logging.file.filename_prefix.trim().is_empty() {
         return Err(AppConfigError::Validation {
             message: "logging.file.filename_prefix must not be empty".into(),
+        });
+    }
+
+    if config.updates.check_interval_hours < 1 {
+        return Err(AppConfigError::Validation {
+            message: "updates.check_interval_hours must be at least 1".into(),
         });
     }
 

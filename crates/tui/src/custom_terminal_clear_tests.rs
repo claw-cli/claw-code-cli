@@ -107,3 +107,16 @@ fn clear_inline_viewport_preserves_inserted_history_rows() {
         "expected live viewport rows to be cleared, rows: {rows_after:?}"
     );
 }
+
+#[test]
+fn set_cursor_below_rect_places_cursor_after_bottom_row() {
+    let width: u16 = 24;
+    let height: u16 = 8;
+    let backend = VT100Backend::new(width, height);
+    let mut term = Terminal::with_options(backend).expect("terminal");
+
+    term.set_cursor_below_rect(Rect::new(0, 3, width, 2))
+        .expect("set cursor below rect");
+
+    assert_eq!(Position { x: 0, y: 5 }, term.last_known_cursor_pos);
+}

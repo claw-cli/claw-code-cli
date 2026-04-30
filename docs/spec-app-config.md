@@ -39,6 +39,7 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub logging: LoggingConfig,
     pub skills: SkillsConfig,
+    pub updates: UpdatesConfig,
     pub project_root_markers: Vec<String>,
 }
 ```
@@ -103,6 +104,12 @@ pub struct SkillsConfig {
     pub workspace_roots: Vec<PathBuf>,
     pub watch_for_changes: bool,
 }
+
+pub struct UpdatesConfig {
+    pub enabled: bool,
+    pub check_on_startup: bool,
+    pub check_interval_hours: u64,
+}
 ```
 
 ## Partial Layer Format
@@ -119,6 +126,7 @@ pub struct AppConfigOverrides {
     pub server: Option<ServerOverrides>,
     pub logging: Option<LoggingOverrides>,
     pub skills: Option<SkillsOverrides>,
+    pub updates: Option<UpdatesOverrides>,
     pub project_root_markers: Option<Vec<String>>,
 }
 ```
@@ -147,8 +155,23 @@ The loader must reject normalized configs that violate these invariants:
 - `server.listen` must not contain duplicate endpoints
 - `logging.file.max_files` must be at least 1
 - `logging.file.filename_prefix` must not be empty
+- `updates.check_interval_hours` must be at least 1
 - `skills.user_roots` must not contain duplicate paths
 - `skills.workspace_roots` must not contain duplicate paths
+
+## Update Checks
+
+The app config may optionally control startup update checks:
+
+```toml
+[updates]
+enabled = true
+check_on_startup = true
+check_interval_hours = 24
+```
+
+These settings control whether user-facing CLI commands check GitHub Releases
+for a newer `devo` version and how often a fresh network request is allowed.
 
 ## File Locations
 

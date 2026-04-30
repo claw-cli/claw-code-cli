@@ -11,6 +11,7 @@ mod response_item;
 mod session;
 mod skills;
 mod state;
+mod update_check;
 
 pub use config::*;
 pub use context::*;
@@ -27,3 +28,4 @@ pub use query::*;
 pub use response_item::*;
 pub use session::*;
 pub use skills::*;
+pub use update_check::*;

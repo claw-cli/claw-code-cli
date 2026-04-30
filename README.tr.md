@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.sh | sh
 ### Windows
 
 ```powershell
-curl.exe -fsSL https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1 | powershell -NoProfile -ExecutionPolicy Bypass -Command -
+irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 ```
 
 ## 🚀 Hızlı Başlangıç

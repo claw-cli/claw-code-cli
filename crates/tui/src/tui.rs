@@ -49,6 +49,7 @@ use std::io::stdout;
 use std::panic;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -75,6 +76,8 @@ use ratatui::layout::Size;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 
+use crate::chatwidget::ExitLayoutMode;
+use crate::chatwidget::ExitLayoutSnapshot;
 use crate::custom_terminal;
 use crate::custom_terminal::Terminal as CustomTerminal;
 use crate::history_cell::ScrollbackLine;
@@ -328,6 +331,7 @@ pub struct Tui {
     is_zellij: bool,
     // When false, enter_alt_screen() becomes a no-op (for Zellij scrollback support)
     alt_screen_enabled: bool,
+    last_exit_layout_snapshot: Arc<Mutex<ExitLayoutSnapshot>>,
 }
 
 impl Tui {
@@ -361,6 +365,7 @@ impl Tui {
             enhanced_keys_supported,
             is_zellij,
             alt_screen_enabled: true,
+            last_exit_layout_snapshot: Arc::new(Mutex::new(ExitLayoutSnapshot::default())),
         }
     }
 
@@ -383,6 +388,13 @@ impl Tui {
 
     pub fn is_terminal_focused(&self) -> bool {
         self.terminal_focused.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_exit_layout_snapshot_handle(
+        &mut self,
+        snapshot: Arc<Mutex<ExitLayoutSnapshot>>,
+    ) {
+        self.last_exit_layout_snapshot = snapshot;
     }
 
     // Drop crossterm EventStream to avoid stdin conflicts with other processes.
@@ -548,6 +560,20 @@ impl Tui {
         Ok(())
     }
 
+    pub fn shutdown_inline_precise(&mut self) -> Result<()> {
+        if self.is_alt_screen_active() {
+            self.leave_alt_screen()?;
+        }
+        self.flush_pending_history_lines_for_exit()?;
+
+        let snapshot = self
+            .last_exit_layout_snapshot
+            .lock()
+            .map(|guard| *guard)
+            .unwrap_or_default();
+        Self::apply_exit_layout_snapshot(&mut self.terminal, snapshot)
+    }
+
     /// Resize the inline viewport to `height` rows, scrolling content above it if
     /// the viewport would extend past the bottom of the screen. Returns `true` when
     /// the caller must invalidate the diff buffer (Zellij mode), because the scroll
@@ -642,6 +668,29 @@ impl Tui {
         Ok(is_zellij)
     }
 
+    fn apply_exit_layout_snapshot<B>(
+        terminal: &mut CustomTerminal<B>,
+        snapshot: ExitLayoutSnapshot,
+    ) -> Result<()>
+    where
+        B: Backend + std::io::Write,
+    {
+        if snapshot.mode == ExitLayoutMode::InlineChat && !snapshot.bottom_pane_area.is_empty() {
+            let current_viewport_top = terminal.viewport_area.top();
+            let snapshot_viewport_top = snapshot.frame_area.top();
+            let bottom_pane_area = snapshot.bottom_pane_area.offset(ratatui::layout::Offset {
+                x: 0,
+                y: i32::from(current_viewport_top) - i32::from(snapshot_viewport_top),
+            });
+            terminal.clear_screen_area(bottom_pane_area)?;
+            terminal.set_cursor_below_rect(bottom_pane_area)?;
+            return Ok(());
+        }
+
+        terminal.clear_inline_viewport()?;
+        Ok(())
+    }
+
     pub fn draw(
         &mut self,
         height: u16,
@@ -722,10 +771,13 @@ impl Drop for Tui {
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
+    use ratatui::layout::Position;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
 
     use super::Tui;
+    use crate::chatwidget::ExitLayoutMode;
+    use crate::chatwidget::ExitLayoutSnapshot;
     use crate::custom_terminal::Terminal as CustomTerminal;
     use crate::history_cell::ScrollbackLine;
     use crate::insert_history::insert_history_lines;
@@ -755,5 +807,129 @@ mod tests {
             rows_after.iter().all(|row| !row.contains("session 1")),
             "expected old session transcript to be cleared, rows: {rows_after:?}"
         );
+    }
+
+    #[test]
+    fn shutdown_inline_precise_clears_only_bottom_pane_and_repositions_cursor() {
+        let width: u16 = 24;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 3, width, 3));
+
+        terminal
+            .set_cursor_position(Position { x: 0, y: 2 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"history row").expect("write history");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"top live").expect("write top");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane").expect("write bottom");
+
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 3, width, 3),
+                history_area: Rect::new(0, 0, width, 1),
+                bottom_pane_area: Rect::new(0, 4, width, 2),
+            },
+        )
+        .expect("apply exit snapshot");
+
+        let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        let history_row = rows_after
+            .iter()
+            .position(|row| row.contains("history row"))
+            .expect("history row remains visible");
+        assert!(
+            history_row < 4,
+            "history should remain above bottom pane: {rows_after:?}"
+        );
+        assert_eq!("", rows_after[4].trim_end());
+        assert_eq!("", rows_after[5].trim_end());
+        assert_eq!(Position { x: 0, y: 6 }, terminal.last_known_cursor_pos);
+    }
+
+    #[test]
+    fn shutdown_inline_precise_reanchors_bottom_pane_to_current_viewport() {
+        let width: u16 = 24;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 5, width, 3));
+
+        terminal
+            .set_cursor_position(Position { x: 0, y: 5 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"live history").expect("write history");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 6 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"current bottom").expect("write bottom");
+
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 3, width, 3),
+                history_area: Rect::new(0, 3, width, 1),
+                bottom_pane_area: Rect::new(0, 4, width, 2),
+            },
+        )
+        .expect("apply exit snapshot");
+
+        let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        assert!(
+            rows_after[5].contains("live history"),
+            "expected stale rows to remain untouched: {rows_after:?}"
+        );
+        assert_eq!("", rows_after[6].trim_end());
+        assert_eq!("", rows_after[7].trim_end());
+        assert_eq!(Position { x: 0, y: 8 }, terminal.last_known_cursor_pos);
+    }
+
+    #[test]
+    fn shutdown_inline_precise_falls_back_for_special_surfaces() {
+        let width: u16 = 24;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 3, width, 2));
+
+        terminal
+            .set_cursor_position(Position { x: 0, y: 2 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"history row").expect("write history");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"live row").expect("write live");
+
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::SpecialSurface,
+                frame_area: Rect::new(0, 0, width, height),
+                history_area: Rect::default(),
+                bottom_pane_area: Rect::default(),
+            },
+        )
+        .expect("apply exit snapshot");
+
+        let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        let history_row = rows_after
+            .iter()
+            .position(|row| row.contains("history row"))
+            .expect("history row remains visible");
+        assert!(
+            history_row < 3,
+            "history should remain above viewport: {rows_after:?}"
+        );
+        assert_eq!("", rows_after[3].trim_end());
     }
 }

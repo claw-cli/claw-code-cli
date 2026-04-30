@@ -16,6 +16,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
+use crate::chatwidget::ExitLayoutMode;
 use crate::chatwidget::ThinkingListEntry;
 use crate::chatwidget::TuiSessionState;
 use crate::render::renderable::Renderable;
@@ -222,6 +223,34 @@ fn toggle_with_levels_treats_enabled_as_default_effort_in_picker() {
             },
         ]
     );
+}
+
+#[test]
+fn render_captures_inline_exit_layout_snapshot() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let area = ratatui::layout::Rect::new(0, 0, 80, 12);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+
+    widget.render(area, &mut buf);
+
+    let snapshot = *widget
+        .exit_layout_snapshot_handle()
+        .lock()
+        .expect("snapshot lock");
+    assert_eq!(ExitLayoutMode::InlineChat, snapshot.mode);
+    assert_eq!(area, snapshot.frame_area);
+    assert_eq!(snapshot.frame_area.width, snapshot.history_area.width);
+    assert_eq!(snapshot.frame_area.width, snapshot.bottom_pane_area.width);
+    assert_eq!(
+        snapshot.frame_area.bottom(),
+        snapshot.bottom_pane_area.bottom()
+    );
+    assert_eq!(snapshot.bottom_pane_area.y, snapshot.history_area.bottom());
 }
 
 #[test]
