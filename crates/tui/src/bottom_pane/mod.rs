@@ -19,6 +19,7 @@ mod command_popup;
 mod file_search_popup;
 mod footer;
 mod list_selection_view;
+mod onboarding_view;
 mod paste_burst;
 mod pending_thread_approvals;
 mod popup_consts;
@@ -33,6 +34,8 @@ mod unified_exec_footer;
 pub(crate) use chat_composer::ChatComposer;
 use chat_composer::ChatComposerConfig;
 use chat_composer::InputResult as ComposerInputResult;
+pub(crate) use onboarding_view::OnboardingResult;
+pub(crate) use onboarding_view::OnboardingView;
 
 use crate::app_command::AppCommand;
 use crate::app_command::InputHistoryDirection;
@@ -325,6 +328,45 @@ impl BottomPane {
 
     pub(crate) fn open_model_picker(&mut self, entries: Vec<ModelPickerEntry>) {
         self.push_view(Box::new(ModelPickerView::new(entries)));
+    }
+
+    pub(crate) fn open_onboarding(&mut self, models: &[devo_protocol::Model]) {
+        self.push_view(Box::new(OnboardingView::new(
+            models,
+            self.app_event_tx.clone(),
+            self.frame_requester.clone(),
+            self.animations_enabled,
+        )));
+    }
+
+    pub(crate) fn onboarding_on_validation_succeeded(&mut self, reply_preview: String) {
+        if let Some(view) = self.view_stack.last_mut() {
+            view.on_validation_succeeded(reply_preview);
+            if view.is_complete() {
+                self.view_stack.pop();
+                self.on_active_view_complete();
+                self.request_redraw();
+            }
+        }
+    }
+
+    pub(crate) fn onboarding_on_validation_failed(&mut self, error_message: String) {
+        if let Some(view) = self.view_stack.last_mut() {
+            view.on_validation_failed(error_message);
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn take_onboarding_result(&mut self) -> Option<OnboardingResult> {
+        self.view_stack
+            .last_mut()
+            .and_then(|view| view.take_onboarding_result())
+    }
+
+    pub(crate) fn is_onboarding_active(&self) -> bool {
+        self.view_stack
+            .last()
+            .is_some_and(|view| view.view_id() == Some("onboarding"))
     }
 
     pub(crate) fn restore_input_from_history(&mut self, text: Option<String>) {

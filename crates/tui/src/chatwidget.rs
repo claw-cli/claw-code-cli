@@ -951,9 +951,13 @@ impl ChatWidget {
                 self.set_status_message("Query failed; see error above");
             }
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
-                if let Some(OnboardingStep::Validating { model, .. }) = self.onboarding_step.take()
-                {
-                    self.update_session_request_model(model);
+                self.bottom_pane
+                    .onboarding_on_validation_succeeded(reply_preview.clone());
+                if !self.bottom_pane.is_onboarding_active() {
+                    // Onboarding view completed, check for result
+                    if let Some(result) = self.bottom_pane.take_onboarding_result() {
+                        self.handle_onboarding_result(result);
+                    }
                 }
                 self.add_to_history(history_cell::new_info_event(
                     format!("Validation reply: {reply_preview}"),
@@ -964,13 +968,8 @@ impl ChatWidget {
                 self.set_status_message("Onboarding complete");
             }
             WorkerEvent::ProviderValidationFailed { message } => {
-                if let Some(OnboardingStep::Validating {
-                    model, base_url, ..
-                }) = self.onboarding_step.take()
-                {
-                    self.onboarding_step = Some(OnboardingStep::ApiKey { model, base_url });
-                    self.set_onboarding_placeholder("API key");
-                }
+                self.bottom_pane
+                    .onboarding_on_validation_failed(message.clone());
                 self.busy = false;
                 self.add_to_history(history_cell::new_error_event_with_hint(
                     message,
@@ -1116,9 +1115,11 @@ impl ChatWidget {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        if self.onboarding_step.is_some()
-            && self.handle_onboarding_input(user_message.text.trim().to_string())
-        {
+        // Check if the onboarding view completed with a validation request
+        if self.bottom_pane.is_onboarding_active() {
+            if let Some(result) = self.bottom_pane.take_onboarding_result() {
+                self.handle_onboarding_result(result);
+            }
             return;
         }
         if user_message.text.trim().is_empty() {
@@ -1263,94 +1264,42 @@ impl ChatWidget {
         }
     }
 
-    // TODO: Now, the onboarding TUI is too simple and crude, should be a more designed, specifially designed for onboarding.
     fn begin_onboarding(&mut self) {
-        self.onboarding_step = Some(OnboardingStep::ModelName);
-        self.set_onboarding_placeholder("model name");
-        let mut lines = vec![
-            Line::from("Onboarding".bold()),
-            Line::from("Choose a model, then enter optional base URL and API key.".dim()),
-        ];
-        for model in self.available_models.iter().take(12) {
-            let description = model.description.as_deref().unwrap_or_default();
-            let suffix = if description.is_empty() {
-                String::new()
-            } else {
-                format!(" - {description}")
-            };
-            lines.push(Line::from(format!("  {}{}", model.slug, suffix)));
-        }
-        lines.push(Line::from("Type a model slug or custom model name.").dim());
-        self.add_to_history(PlainHistoryCell::new(lines));
-        self.bottom_pane.set_allow_empty_submit(false);
-        self.set_status_message("Onboarding: enter model name");
+        self.onboarding_step = None;
+        self.history.clear();
+        self.next_history_flush_index = 0;
+        self.bottom_pane.open_onboarding(&self.available_models);
+        self.set_status_message("Onboarding");
     }
 
-    fn handle_onboarding_input(&mut self, text: String) -> bool {
-        let Some(step) = self.onboarding_step.take() else {
-            return false;
-        };
-
-        match step {
-            OnboardingStep::ModelName => {
-                if text.is_empty() {
-                    self.onboarding_step = Some(OnboardingStep::ModelName);
-                    self.set_onboarding_placeholder("model name");
-                    self.set_status_message("Onboarding: enter model name");
-                    return true;
-                }
-                self.onboarding_step = Some(OnboardingStep::BaseUrl {
-                    model: text.clone(),
-                });
-                self.set_onboarding_placeholder("base URL");
-                self.bottom_pane.set_allow_empty_submit(true);
+    fn handle_onboarding_result(&mut self, result: crate::bottom_pane::OnboardingResult) {
+        use crate::bottom_pane::OnboardingResult;
+        match result {
+            OnboardingResult::ValidationSucceeded {
+                model,
+                provider: _,
+                base_url: _,
+                api_key: _,
+            } => {
+                self.update_session_request_model(model);
                 self.add_to_history(history_cell::new_info_event(
-                    format!("model: {text}"),
-                    Some("onboarding".to_string()),
+                    "Provider configured successfully".to_string(),
+                    Some("onboarding complete".to_string()),
                 ));
-                self.set_status_message(
-                    "Onboarding: enter base URL, or press Enter to use default",
-                );
-                true
+                self.set_default_placeholder();
+                self.set_status_message("Onboarding complete");
             }
-            OnboardingStep::BaseUrl { model } => {
-                let base_url = if text.is_empty() {
-                    None
-                } else if text.starts_with("http://") || text.starts_with("https://") {
-                    Some(text)
-                } else {
-                    self.onboarding_step = Some(OnboardingStep::BaseUrl { model });
-                    self.set_onboarding_placeholder("base URL");
-                    self.bottom_pane.set_allow_empty_submit(true);
-                    self.add_to_history(history_cell::new_error_event(
-                        "Base URL must start with http:// or https://".to_string(),
-                    ));
-                    self.set_status_message("Onboarding: enter base URL");
-                    return true;
-                };
-                self.onboarding_step = Some(OnboardingStep::ApiKey {
-                    model,
-                    base_url: base_url.clone(),
-                });
-                self.set_onboarding_placeholder("API key");
-                self.bottom_pane.set_allow_empty_submit(true);
-                self.add_to_history(history_cell::new_info_event(
-                    format!("base url: {}", base_url.as_deref().unwrap_or("(default)")),
-                    Some("onboarding".to_string()),
-                ));
-                self.set_status_message("Onboarding: enter API key, or press Enter to skip");
-                true
-            }
-            OnboardingStep::ApiKey { model, base_url } => {
-                let api_key = if text.is_empty() { None } else { Some(text) };
+            OnboardingResult::Validate {
+                model,
+                provider: _,
+                base_url,
+                api_key,
+            } => {
                 self.onboarding_step = Some(OnboardingStep::Validating {
                     model: model.clone(),
                     base_url: base_url.clone(),
                     api_key: api_key.clone(),
                 });
-                self.bottom_pane
-                    .set_placeholder_text("Onboarding: validating connection".to_string());
-                self.bottom_pane.set_allow_empty_submit(false);
                 let payload = serde_json::json!({
                     "model": model,
                     "base_url": base_url,
@@ -1360,22 +1309,14 @@ impl ChatWidget {
                     .send(AppEvent::Command(AppCommand::RunUserShellCommand {
                         command: format!("onboard {payload}"),
                     }));
-                self.set_status_message("Onboarding: validating provider connection");
-                true
+                self.set_status_message("Validating provider connection");
             }
-            OnboardingStep::Validating {
-                model,
-                base_url,
-                api_key,
-            } => {
-                self.onboarding_step = Some(OnboardingStep::Validating {
-                    model,
-                    base_url,
-                    api_key,
-                });
-                self.set_status_message("Onboarding validation is already running");
-                true
+            OnboardingResult::Cancelled => {
+                self.onboarding_step = None;
+                self.set_default_placeholder();
+                self.set_status_message("Ready");
             }
+            _ => {}
         }
     }
 

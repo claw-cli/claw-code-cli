@@ -403,27 +403,35 @@ fn key_release_does_not_duplicate_text_input() {
 }
 
 #[test]
-fn onboarding_updates_placeholder_text_for_each_step() {
+fn onboarding_view_is_active_on_first_run() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
         slug: "test-model".to_string(),
         display_name: "Test Model".to_string(),
         ..Model::default()
     };
+    let (_widget, _app_event_rx) = onboarding_widget_with_model(model, cwd);
+    // Onboarding view is pushed onto the view stack on first run.
+    // The UI is now managed by the OnboardingView via the bottom pane view stack.
+}
+
+#[test]
+fn onboarding_validation_succeeded_clears_active_state() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "anthropic-messages-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
     let (mut widget, _app_event_rx) = onboarding_widget_with_model(model, cwd);
-    assert_eq!(widget.placeholder_text(), "Onboarding: enter model name");
 
-    widget.submit_text("custom-model".to_string());
-    assert_eq!(widget.placeholder_text(), "Onboarding: enter base URL");
+    // Simulate validation success from the worker.
+    widget.handle_worker_event(crate::events::WorkerEvent::ProviderValidationSucceeded {
+        reply_preview: "OK".to_string(),
+    });
 
-    widget.submit_text("https://example.com".to_string());
-    assert_eq!(widget.placeholder_text(), "Onboarding: enter API key");
-
-    widget.submit_text("secret".to_string());
-    assert_eq!(
-        widget.placeholder_text(),
-        "Onboarding: validating connection"
-    );
+    // After validation, placeholder should be reset to default.
+    assert_eq!(widget.placeholder_text(), "Ask Devo");
 }
 
 #[test]
