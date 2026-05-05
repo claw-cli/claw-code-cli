@@ -502,6 +502,7 @@ impl ChatWidget {
         for item in &history_items {
             self.add_transcript_item_without_redraw(item.clone());
         }
+
         if !loaded_any_history {
             self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
                 format!(
@@ -642,6 +643,9 @@ impl ChatWidget {
         if self.resume_browser.is_some() {
             self.handle_resume_browser_key_event(key);
             return;
+        }
+        if let Some(result) = self.bottom_pane.poll_onboarding_result() {
+            self.handle_onboarding_result(result);
         }
         match self.bottom_pane.handle_key_event(key) {
             InputResult::Submitted {
@@ -792,14 +796,16 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                if self.stream_controller.is_none() {
+                if self.busy && self.stream_controller.is_none() {
                     self.active_assistant_text = text;
                 }
                 self.sync_active_assistant_cell();
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningCompleted(text) => {
-                self.active_reasoning_text = text;
+                if self.busy {
+                    self.active_reasoning_text = text;
+                }
                 self.sync_active_reasoning_cell();
                 self.set_status_message("Thinking");
             }
@@ -953,11 +959,8 @@ impl ChatWidget {
             WorkerEvent::ProviderValidationSucceeded { reply_preview } => {
                 self.bottom_pane
                     .onboarding_on_validation_succeeded(reply_preview.clone());
-                if !self.bottom_pane.is_onboarding_active() {
-                    // Onboarding view completed, check for result
-                    if let Some(result) = self.bottom_pane.take_onboarding_result() {
-                        self.handle_onboarding_result(result);
-                    }
+                if let Some(result) = self.bottom_pane.poll_onboarding_result() {
+                    self.handle_onboarding_result(result);
                 }
                 self.add_to_history(history_cell::new_info_event(
                     format!("Validation reply: {reply_preview}"),
@@ -1025,6 +1028,7 @@ impl ChatWidget {
                 prompt_token_estimate,
                 history_items,
                 loaded_item_count,
+                pending_texts,
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
@@ -1049,6 +1053,13 @@ impl ChatWidget {
                     &session_id,
                     title.as_deref(),
                 );
+                // Restore pending queue state from the resumed session
+                self.queued_count = pending_texts.len();
+                self.bottom_pane.clear_pending_cells();
+                for text in &pending_texts {
+                    self.bottom_pane.push_pending_cell(text.clone());
+                }
+                self.busy = false;
                 self.set_status_message("Session switched");
             }
             WorkerEvent::SessionRenamed { session_id, title } => {
@@ -1115,12 +1126,8 @@ impl ChatWidget {
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        // Check if the onboarding view completed with a validation request
-        if self.bottom_pane.is_onboarding_active() {
-            if let Some(result) = self.bottom_pane.take_onboarding_result() {
-                self.handle_onboarding_result(result);
-            }
-            return;
+        if let Some(result) = self.bottom_pane.poll_onboarding_result() {
+            self.handle_onboarding_result(result);
         }
         if user_message.text.trim().is_empty() {
             return;
@@ -1234,6 +1241,12 @@ impl ChatWidget {
             }
             SlashCommand::Btw => {
                 if let Some(turn_id) = self.active_turn_id {
+                    self.add_to_history(history_cell::new_user_prompt(
+                        format!("/btw {argument}"),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ));
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::SteerTurn {
                             input: vec![devo_protocol::InputItem::Text { text: argument }],
@@ -1268,7 +1281,7 @@ impl ChatWidget {
         self.onboarding_step = None;
         self.history.clear();
         self.next_history_flush_index = 0;
-        self.bottom_pane.open_onboarding(&self.available_models);
+        self.bottom_pane.start_onboarding(&self.available_models);
         self.set_status_message("Onboarding");
     }
 
@@ -1522,6 +1535,12 @@ impl ChatWidget {
                     item.title,
                     Some(item.body),
                 )));
+            }
+            TranscriptItemKind::TurnSummary => {
+                // item.title contains model name, item.duration_ms contains seconds
+                self.add_history_entry_without_redraw(Box::new(
+                    history_cell::TurnSummaryCell::new(item.title.clone(), item.duration_ms),
+                ));
             }
         }
     }
@@ -1818,8 +1837,8 @@ impl ChatWidget {
                 Vec::new(),
                 Vec::new(),
             ));
-            self.queued_count = self.queued_count.saturating_sub(1);
         }
+        self.queued_count = self.queued_count.saturating_sub(1);
     }
 
     fn add_history_entry_without_redraw(&mut self, cell: Box<dyn HistoryCell>) {

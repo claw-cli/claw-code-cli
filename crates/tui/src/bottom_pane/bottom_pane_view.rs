@@ -2,7 +2,6 @@ use crate::render::renderable::Renderable;
 use crossterm::event::KeyEvent;
 
 use super::CancellationEvent;
-use super::onboarding_view::OnboardingResult;
 
 /// Trait implemented by every view that can be shown in the bottom pane.
 pub(crate) trait BottomPaneView: Renderable {
@@ -31,14 +30,6 @@ pub(crate) trait BottomPaneView: Renderable {
     fn take_model_selection(&mut self) -> Option<String> {
         None
     }
-
-    fn take_onboarding_result(&mut self) -> Option<OnboardingResult> {
-        None
-    }
-
-    fn on_validation_succeeded(&mut self, _reply_preview: String) {}
-
-    fn on_validation_failed(&mut self, _error_message: String) {}
 
     /// Handle Ctrl-C while this view is active.
     fn on_ctrl_c(&mut self) -> CancellationEvent {

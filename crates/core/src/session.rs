@@ -57,17 +57,17 @@ pub struct SessionState {
     /// Input tokens reported by the model for the most recent turn.
     /// Used by `TokenBudget::should_compact()` to decide when to compact.
     pub last_input_tokens: usize,
-    /// Thread-safe inbox for pending inputs pushed from server handlers
-    /// while the query loop is running.
-    pub pending_user_prompts: Arc<Mutex<VecDeque<PendingInputItem>>>,
-    /// Thread-safe inbox for /btw steer inputs pushed while the query loop
-    /// is running. These are drained into the CURRENT turn's pending_input
-    /// at each loop iteration and are NOT carried over to the next turn.
-    pub steer_input_queue: Arc<Mutex<VecDeque<PendingInputItem>>>,
+    /// Thread-safe queue for pending turn inputs.
+    /// - Source: user sends `turn/start` while a turn is active.
+    /// - Lifecycle: preserved across turns; unconsumed items are pushed back
+    ///   when the current turn ends and consumed when the next turn starts.
+    pub pending_turn_queue: Arc<Mutex<VecDeque<PendingInputItem>>>,
+    /// Thread-safe queue for /btw steer inputs.
+    /// - Source: user sends `turn/steer` while a turn is active.
+    /// - Lifecycle: scoped to current turn only; cleared when the turn ends.
+    pub btw_input_queue: Arc<Mutex<VecDeque<PendingInputItem>>>,
     /// Turn-scoped state (Some while a turn is active).
     pub(crate) turn_state: Option<TurnState>,
-    /// Items queued for next turn when current turn ends with unconsumed input.
-    pub idle_pending_input: VecDeque<PendingInputItem>,
 }
 
 impl SessionState {
@@ -87,10 +87,9 @@ impl SessionState {
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
             last_input_tokens: 0,
-            pending_user_prompts: Arc::new(Mutex::new(VecDeque::new())),
-            steer_input_queue: Arc::new(Mutex::new(VecDeque::new())),
+            pending_turn_queue: Arc::new(Mutex::new(VecDeque::new())),
+            btw_input_queue: Arc::new(Mutex::new(VecDeque::new())),
             turn_state: None,
-            idle_pending_input: VecDeque::new(),
         }
     }
 
@@ -129,71 +128,68 @@ impl SessionState {
         }
     }
 
+    /// Pushes a pending input to the turn queue (for execution in a future turn).
     pub fn enqueue_pending_input(&self, item: PendingInputItem) {
-        self.pending_user_prompts
+        self.pending_turn_queue
             .lock()
-            .expect("pending user prompts mutex should not be poisoned")
+            .expect("pending turn queue mutex should not be poisoned")
             .push_back(item);
     }
 
-    pub fn drain_pending_user_prompts(&self) -> Vec<PendingInputItem> {
+    /// Drains all pending inputs from the turn queue.
+    pub fn drain_pending_turn_queue(&self) -> Vec<PendingInputItem> {
         let mut pending = self
-            .pending_user_prompts
+            .pending_turn_queue
             .lock()
-            .expect("pending user prompts mutex should not be poisoned");
+            .expect("pending turn queue mutex should not be poisoned");
         pending.drain(..).collect()
     }
 
+    /// Drains all pending inputs from the /btw queue.
+    pub fn drain_btw_input_queue(&self) -> Vec<PendingInputItem> {
+        let mut guard = self
+            .btw_input_queue
+            .lock()
+            .expect("btw input queue mutex should not be poisoned");
+        guard.drain(..).collect()
+    }
+
     pub fn start_turn(&mut self, kind: TurnKind) {
-        // Move idle-pending items into the new turn's pending_input.
-        let idle = std::mem::take(&mut self.idle_pending_input);
         let mut turn = TurnState::new(kind);
-        turn.pending_input = idle.into();
+        // Drain pending turn queue into the new turn's pending input.
+        let pending = self.drain_pending_turn_queue();
+        turn.pending_input = pending;
         self.turn_state = Some(turn);
     }
 
     pub fn end_turn(&mut self) {
         if let Some(turn) = self.turn_state.take() {
-            // Unconsumed pending input goes back to idle queue.
-            self.idle_pending_input.extend(turn.pending_input);
+            // Unconsumed pending input goes back to the turn queue (prepend to preserve order).
+            let mut queue = self
+                .pending_turn_queue
+                .lock()
+                .expect("pending turn queue mutex should not be poisoned");
+            for item in turn.pending_input.into_iter().rev() {
+                queue.push_front(item);
+            }
         }
         // /btw steer inputs are scoped to the current turn only; discard any
         // that arrived too late to be consumed.
-        self.steer_input_queue
+        self.btw_input_queue
             .lock()
-            .expect("steer input queue mutex should not be poisoned")
+            .expect("btw input queue mutex should not be poisoned")
             .clear();
     }
 
-    pub fn drain_steer_input_queue(&self) -> Vec<PendingInputItem> {
-        let mut guard = self
-            .steer_input_queue
-            .lock()
-            .expect("steer input queue mutex should not be poisoned");
-        guard.drain(..).collect()
-    }
-
     /// Merge turn-scoped pending input with both cross-thread inboxes.
-    /// Order: steer inbox → turn-state pending → next-turn queue
+    /// Order: btw inbox → turn-state pending → turn queue
     pub fn take_turn_pending_input(&mut self) -> Vec<PendingInputItem> {
-        let mut result = self.drain_steer_input_queue();
+        let mut result = self.drain_btw_input_queue();
         if let Some(turn) = self.turn_state.as_mut() {
             result.extend(turn.take_pending_input());
         }
-        result.extend(self.drain_pending_user_prompts());
+        result.extend(self.drain_pending_turn_queue());
         result
-    }
-
-    pub fn queue_for_next_turn(&mut self, items: Vec<PendingInputItem>) {
-        self.idle_pending_input.extend(items);
-    }
-
-    pub fn take_queued_for_next_turn(&mut self) -> Vec<PendingInputItem> {
-        self.idle_pending_input.drain(..).collect()
-    }
-
-    pub fn has_queued_for_next_turn(&self) -> bool {
-        !self.idle_pending_input.is_empty()
     }
 }
 
@@ -251,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn session_state_drains_pending_user_prompts() {
+    fn session_state_drains_pending_turn_queue() {
         use chrono::Utc;
         let state = SessionState::new(SessionConfig::default(), PathBuf::from("/tmp"));
         state.enqueue_pending_input(PendingInputItem {
@@ -269,9 +265,9 @@ mod tests {
             created_at: Utc::now(),
         });
 
-        let drained = state.drain_pending_user_prompts();
+        let drained = state.drain_pending_turn_queue();
         assert_eq!(drained.len(), 2);
-        assert!(state.drain_pending_user_prompts().is_empty());
+        assert!(state.drain_pending_turn_queue().is_empty());
     }
 
     #[test]
@@ -284,12 +280,12 @@ mod tests {
     }
 
     #[test]
-    fn session_state_start_turn_drains_idle_queue() {
+    fn session_state_start_turn_drains_pending_queue() {
         use chrono::Utc;
         let mut state = SessionState::new(SessionConfig::default(), PathBuf::from("/tmp"));
-        state.idle_pending_input.push_back(PendingInputItem {
+        state.enqueue_pending_input(PendingInputItem {
             kind: devo_protocol::PendingInputKind::UserText {
-                text: "idle".to_string(),
+                text: "queued".to_string(),
             },
             metadata: None,
             created_at: Utc::now(),
@@ -297,11 +293,11 @@ mod tests {
         state.start_turn(TurnKind::Regular);
         let pending = state.take_turn_pending_input();
         assert_eq!(pending.len(), 1);
-        assert!(state.idle_pending_input.is_empty());
+        assert!(state.pending_turn_queue.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn session_state_end_turn_moves_unconsumed_to_idle() {
+    fn session_state_end_turn_moves_unconsumed_back_to_queue() {
         use chrono::Utc;
         let mut state = SessionState::new(SessionConfig::default(), PathBuf::from("/tmp"));
         state.start_turn(TurnKind::Regular);
@@ -317,7 +313,7 @@ mod tests {
         }
         state.end_turn();
         assert!(state.turn_state.is_none());
-        assert_eq!(state.idle_pending_input.len(), 1);
+        assert_eq!(state.pending_turn_queue.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -345,24 +341,6 @@ mod tests {
         });
         let merged = state.take_turn_pending_input();
         assert_eq!(merged.len(), 2);
-    }
-
-    #[test]
-    fn session_state_queue_and_take_for_next_turn() {
-        use chrono::Utc;
-        let mut state = SessionState::new(SessionConfig::default(), PathBuf::from("/tmp"));
-        assert!(!state.has_queued_for_next_turn());
-        state.queue_for_next_turn(vec![PendingInputItem {
-            kind: devo_protocol::PendingInputKind::UserText {
-                text: "queued".to_string(),
-            },
-            metadata: None,
-            created_at: Utc::now(),
-        }]);
-        assert!(state.has_queued_for_next_turn());
-        let taken = state.take_queued_for_next_turn();
-        assert_eq!(taken.len(), 1);
-        assert!(!state.has_queued_for_next_turn());
     }
 
     #[test]

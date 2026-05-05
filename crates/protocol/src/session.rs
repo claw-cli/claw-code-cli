@@ -62,6 +62,8 @@ pub struct SessionResumeResult {
     pub latest_turn: Option<TurnMetadata>,
     pub loaded_item_count: u64,
     pub history_items: Vec<SessionHistoryItem>,
+    /// Pending turn input texts queued for the next turn.
+    pub pending_texts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +75,7 @@ pub enum SessionHistoryItemKind {
     ToolCall,
     ToolResult,
     Error,
+    TurnSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

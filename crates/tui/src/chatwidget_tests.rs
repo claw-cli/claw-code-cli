@@ -614,6 +614,7 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
             ),
         ],
         loaded_item_count: 2,
+        pending_texts: vec![],
     });
 
     let committed_lines = widget.drain_scrollback_lines(80);
@@ -858,6 +859,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
             "thinking text",
         )],
         loaded_item_count: 1,
+        pending_texts: vec![],
     });
 
     let scrollback = widget.drain_scrollback_lines(80);
@@ -1002,6 +1004,7 @@ fn session_switch_updates_session_identity_projection() {
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
+        pending_texts: vec![],
     });
 
     assert_eq!(widget.current_cwd(), resumed_cwd.as_path());
@@ -1037,6 +1040,7 @@ fn new_session_prepared_resets_session_identity_projection() {
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
+        pending_texts: vec![],
     });
     widget.handle_worker_event(crate::events::WorkerEvent::NewSessionPrepared {
         cwd: initial_cwd.clone(),

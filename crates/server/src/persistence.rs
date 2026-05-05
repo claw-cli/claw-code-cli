@@ -343,6 +343,35 @@ impl ReplayState {
                 self.session = Some(line.session);
             }
             RolloutLine::Turn(line) => {
+                // Insert turn summary for the previous turn before processing the new turn
+                if let Some(ref prev_turn) = self.latest_turn_metadata
+                    && prev_turn.status == devo_core::TurnStatus::Completed
+                {
+                    let ts = prev_turn.completed_at.unwrap_or(prev_turn.started_at);
+                    let duration_secs = prev_turn.completed_at.and_then(|completed| {
+                        let dur = completed - prev_turn.started_at;
+                        let secs = dur.num_seconds();
+                        if secs > 0 { Some(secs as u64) } else { None }
+                    });
+                    let body = duration_secs.map(|s| s.to_string()).unwrap_or_default();
+                    self.pending_items.push(ReplayHistoryItem {
+                        item_id: devo_core::ItemId::new(),
+                        seq: self.loaded_item_count,
+                        timestamp: ts,
+                        record_timestamp: ts,
+                        line_timestamp: ts,
+                        bucket_priority: 0,
+                        intra_record_order: u32::MAX as usize,
+                        turn_item: devo_core::TurnItem::TurnSummary(devo_core::TextItem {
+                            text: if duration_secs.is_some() {
+                                format!("{}:{}", prev_turn.model, body)
+                            } else {
+                                prev_turn.model.clone()
+                            },
+                        }),
+                    });
+                }
+
                 self.turns_seen = self.turns_seen.max(line.turn.sequence);
                 if let Some(usage) = &line.turn.usage {
                     self.total_input_tokens += usage.input_tokens as usize;
@@ -407,7 +436,36 @@ impl ReplayState {
         Ok(())
     }
 
-    fn into_runtime_session(self, deps: &ServerRuntimeDependencies) -> Result<RuntimeSession> {
+    fn into_runtime_session(mut self, deps: &ServerRuntimeDependencies) -> Result<RuntimeSession> {
+        // Insert turn summary for the last turn before converting
+        if let Some(ref last_turn) = self.latest_turn_metadata
+            && last_turn.status == devo_core::TurnStatus::Completed
+        {
+            let ts = last_turn.completed_at.unwrap_or(last_turn.started_at);
+            let duration_secs = last_turn.completed_at.and_then(|completed| {
+                let dur = completed - last_turn.started_at;
+                let secs = dur.num_seconds();
+                if secs > 0 { Some(secs as u64) } else { None }
+            });
+            let body = duration_secs.map(|s| s.to_string()).unwrap_or_default();
+            self.pending_items.push(ReplayHistoryItem {
+                item_id: devo_core::ItemId::new(),
+                seq: self.loaded_item_count,
+                timestamp: ts,
+                record_timestamp: ts,
+                line_timestamp: ts,
+                bucket_priority: 0,
+                intra_record_order: u32::MAX as usize,
+                turn_item: devo_core::TurnItem::TurnSummary(devo_core::TextItem {
+                    text: if duration_secs.is_some() {
+                        format!("{}:{}", last_turn.model, body)
+                    } else {
+                        last_turn.model.clone()
+                    },
+                }),
+            });
+        }
+
         let record = self.session.context("missing SessionMetaLine in rollout")?;
         let mut core_session = deps.new_session_state(record.id, record.cwd.clone());
         let mut ordered_items = self.pending_items;
@@ -500,13 +558,15 @@ impl ReplayState {
             history_items: replayed_history_items,
             persisted_turn_items: replayed_persisted_turn_items,
             latest_compaction_snapshot: self.latest_compaction_snapshot,
-            steering_queue: std::sync::Arc::new(std::sync::Mutex::new(
+            pending_turn_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
-            steer_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
+            btw_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
             active_task: None,
+            deferred_assistant: None,
+            deferred_reasoning: None,
             next_item_seq: self.next_item_seq.max(1),
             first_user_input: None,
         })
@@ -751,7 +811,8 @@ fn apply_turn_item(
         },
         TurnItem::ToolProgress(_)
         | TurnItem::ApprovalRequest(_)
-        | TurnItem::ApprovalDecision(_) => {}
+        | TurnItem::ApprovalDecision(_)
+        | TurnItem::TurnSummary(_) => {}
     }
 }
 
@@ -871,7 +932,8 @@ fn apply_prompt_turn_item(
         },
         TurnItem::ToolProgress(_)
         | TurnItem::ApprovalRequest(_)
-        | TurnItem::ApprovalDecision(_) => {}
+        | TurnItem::ApprovalDecision(_)
+        | TurnItem::TurnSummary(_) => {}
     }
 }
 

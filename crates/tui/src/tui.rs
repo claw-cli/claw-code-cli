@@ -678,11 +678,21 @@ impl Tui {
         if snapshot.mode == ExitLayoutMode::InlineChat && !snapshot.bottom_pane_area.is_empty() {
             let current_viewport_top = terminal.viewport_area.top();
             let snapshot_viewport_top = snapshot.frame_area.top();
-            let bottom_pane_area = snapshot.bottom_pane_area.offset(ratatui::layout::Offset {
+            let delta_y = i32::from(current_viewport_top) - i32::from(snapshot_viewport_top);
+            // Offset the snapshot coordinates to account for viewport drift since
+            // the last render (e.g. from flush_pending_history_lines_for_exit).
+            let offset = ratatui::layout::Offset { x: 0, y: delta_y };
+            let bottom_pane_area = snapshot.bottom_pane_area.offset(offset);
+            // Also clear the history area so that session header and live text
+            // do not remain on screen after exit.
+            let history_area = snapshot.history_area.offset(offset);
+            let clear_area = ratatui::layout::Rect {
                 x: 0,
-                y: i32::from(current_viewport_top) - i32::from(snapshot_viewport_top),
-            });
-            terminal.clear_screen_area(bottom_pane_area)?;
+                y: history_area.top(),
+                width: terminal.size()?.width,
+                height: bottom_pane_area.bottom().saturating_sub(history_area.top()),
+            };
+            terminal.clear_screen_area(clear_area)?;
             terminal.set_cursor_below_rect(bottom_pane_area)?;
             return Ok(());
         }
@@ -810,17 +820,19 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_inline_precise_clears_only_bottom_pane_and_repositions_cursor() {
+    fn shutdown_inline_precise_clears_viewport_and_repositions_cursor() {
         let width: u16 = 24;
         let height: u16 = 8;
         let backend = VT100Backend::new(width, height);
         let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
         terminal.set_viewport_area(Rect::new(0, 3, width, 3));
 
+        // Write scrollback ABOVE viewport (y < 3)
         terminal
             .set_cursor_position(Position { x: 0, y: 2 })
             .expect("cursor position");
         std::io::Write::write_all(terminal.backend_mut(), b"history row").expect("write history");
+        // Write live content WITHIN viewport (y >= 3)
         terminal
             .set_cursor_position(Position { x: 0, y: 3 })
             .expect("cursor position");
@@ -835,7 +847,7 @@ mod tests {
             ExitLayoutSnapshot {
                 mode: ExitLayoutMode::InlineChat,
                 frame_area: Rect::new(0, 3, width, 3),
-                history_area: Rect::new(0, 0, width, 1),
+                history_area: Rect::new(0, 3, width, 1),
                 bottom_pane_area: Rect::new(0, 4, width, 2),
             },
         )
@@ -847,9 +859,11 @@ mod tests {
             .position(|row| row.contains("history row"))
             .expect("history row remains visible");
         assert!(
-            history_row < 4,
-            "history should remain above bottom pane: {rows_after:?}"
+            history_row < 3,
+            "history should remain above viewport: {rows_after:?}"
         );
+        // All viewport rows cleared
+        assert_eq!("", rows_after[3].trim_end());
         assert_eq!("", rows_after[4].trim_end());
         assert_eq!("", rows_after[5].trim_end());
         assert_eq!(Position { x: 0, y: 6 }, terminal.last_known_cursor_pos);
@@ -872,6 +886,9 @@ mod tests {
             .expect("cursor position");
         std::io::Write::write_all(terminal.backend_mut(), b"current bottom").expect("write bottom");
 
+        // Snapshot is stale: frame_area.y=3, but viewport is now at y=5
+        // delta_y = 5 - 3 = 2
+        // Area should be shifted down by 2 rows
         Tui::apply_exit_layout_snapshot(
             &mut terminal,
             ExitLayoutSnapshot {
@@ -884,10 +901,12 @@ mod tests {
         .expect("apply exit snapshot");
 
         let rows_after: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        // Scrollback above viewport y=5 is preserved
         assert!(
-            rows_after[5].contains("live history"),
-            "expected stale rows to remain untouched: {rows_after:?}"
+            rows_after[4].is_empty() || !rows_after[4].contains("live"),
+            "row above viewport untouched: {rows_after:?}"
         );
+        // Viewport content shifted + cleared
         assert_eq!("", rows_after[6].trim_end());
         assert_eq!("", rows_after[7].trim_end());
         assert_eq!(Position { x: 0, y: 8 }, terminal.last_known_cursor_pos);
@@ -931,5 +950,268 @@ mod tests {
             "history should remain above viewport: {rows_after:?}"
         );
         assert_eq!("", rows_after[3].trim_end());
+    }
+
+    #[test]
+    fn shutdown_full_flow_preserves_scrollback_and_positions_cursor() {
+        let width: u16 = 24;
+        let height: u16 = 12;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 4, width, 4));
+
+        // Write scrollback content above the viewport
+        terminal
+            .set_cursor_position(Position { x: 0, y: 2 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row 1").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row 2").expect("write");
+
+        // Write live content within the viewport
+        terminal
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"live history row").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 5 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"live assistant row").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 6 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane row 1").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 7 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"bottom pane row 2").expect("write");
+
+        // Simulate pending history lines pushed before exit.
+        // flush_pending_history_lines_for_exit() inserts these above the viewport,
+        // shifting viewport.y downward.
+        let mut pending_lines = vec![ScrollbackLine::from(Line::from("pending history line"))];
+        insert_history_lines(&mut terminal, pending_lines.clone()).expect("insert");
+        pending_lines.clear();
+        // viewport.y is now 5 (shifted down by 1)
+
+        // Apply the exit snapshot captured at the LAST render (viewport was at y=4).
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 4, width, 4),
+                history_area: Rect::new(0, 4, width, 2),
+                bottom_pane_area: Rect::new(0, 6, width, 2),
+            },
+        )
+        .expect("apply");
+
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+
+        // Scrollback rows above viewport must be preserved
+        let scrollback_idx = rows
+            .iter()
+            .position(|r| r.contains("scrollback row 1"))
+            .expect("scrollback should be preserved");
+        assert!(scrollback_idx < 4, "scrollback above viewport: {rows:?}");
+
+        // The pending history line pushed at exit should also be in scrollback
+        let pending_idx = rows
+            .iter()
+            .position(|r| r.contains("pending history line"))
+            .expect("pending history line should be in scrollback");
+        assert!(pending_idx < 6, "pending line in scrollback: {rows:?}");
+
+        // All viewport rows (from history_area to bottom of bottom_pane) cleared
+        assert_eq!("", rows[6].trim_end(), "viewport row cleared: {rows:?}");
+        assert_eq!("", rows[7].trim_end(), "viewport row cleared: {rows:?}");
+        assert_eq!("", rows[8].trim_end(), "viewport row cleared: {rows:?}");
+
+        // Cursor placed right below the cleared bottom pane
+        assert_eq!(
+            Position { x: 0, y: 9 },
+            terminal.last_known_cursor_pos,
+            "cursor below bottom pane: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn shutdown_clears_history_area_content() {
+        let width: u16 = 24;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 2, width, 5));
+
+        // Write content in all areas
+        terminal
+            .set_cursor_position(Position { x: 0, y: 2 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"session header row").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"live text row").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"composer row 1").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 5 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"composer row 2").expect("write");
+
+        // Snapshot captures the full viewport at y=2
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 2, width, 5),
+                history_area: Rect::new(0, 2, width, 2),
+                bottom_pane_area: Rect::new(0, 4, width, 2),
+            },
+        )
+        .expect("apply");
+
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+
+        // History area rows (y=2,3) should be cleared — session header should NOT remain
+        let header_row = rows.iter().position(|r| r.contains("session header row"));
+        assert!(
+            header_row.is_none(),
+            "session header should be cleared, but found at row {:?}: {rows:?}",
+            header_row
+        );
+
+        // Live text row should also be cleared
+        let live_row = rows.iter().position(|r| r.contains("live text row"));
+        assert!(
+            live_row.is_none(),
+            "live text should be cleared, but found at row {:?}: {rows:?}",
+            live_row
+        );
+
+        // Bottom pane cleared
+        assert_eq!("", rows[4].trim_end());
+        assert_eq!("", rows[5].trim_end());
+
+        // Cursor below bottom pane
+        assert_eq!(Position { x: 0, y: 6 }, terminal.last_known_cursor_pos);
+    }
+
+    #[test]
+    fn shutdown_with_no_pending_lines_positions_cursor_correctly() {
+        let width: u16 = 24;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 3, width, 4));
+
+        // Write composer content
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"status line").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"composer").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 5 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"footer").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 6 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"spacer").expect("write");
+
+        // Snapshot — no pending history lines, delta_y = 0
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 3, width, 4),
+                history_area: Rect::new(0, 3, width, 1),
+                bottom_pane_area: Rect::new(0, 4, width, 3),
+            },
+        )
+        .expect("apply");
+
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+
+        // All viewport rows cleared
+        assert_eq!("", rows[3].trim_end());
+        assert_eq!("", rows[4].trim_end());
+        assert_eq!("", rows[5].trim_end());
+        assert_eq!("", rows[6].trim_end());
+
+        // Cursor right below the cleared area
+        assert_eq!(Position { x: 0, y: 7 }, terminal.last_known_cursor_pos);
+    }
+
+    #[test]
+    fn shutdown_with_onboarding_view_clears_correct_area() {
+        let width: u16 = 24;
+        let height: u16 = 10;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = CustomTerminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 2, width, 7));
+
+        // Write onboarding content (12-row onboarding view takes most of viewport)
+        terminal
+            .set_cursor_position(Position { x: 0, y: 2 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  Welcome to Devo").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  Choose a model").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 4 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  > model-name").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 5 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  model desc").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 6 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  > other-model").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 7 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  other desc").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 8 })
+            .expect("cursor");
+        std::io::Write::write_all(terminal.backend_mut(), b"  > Custom Model").expect("write");
+
+        // Snapshot — large bottom_pane_area like onboarding view
+        Tui::apply_exit_layout_snapshot(
+            &mut terminal,
+            ExitLayoutSnapshot {
+                mode: ExitLayoutMode::InlineChat,
+                frame_area: Rect::new(0, 2, width, 7),
+                history_area: Rect::new(0, 2, width, 1),
+                bottom_pane_area: Rect::new(0, 3, width, 6),
+            },
+        )
+        .expect("apply");
+
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+
+        // All onboarding content cleared
+        for y in 2..9 {
+            assert!(
+                rows[y].trim().is_empty() || rows[y].trim().starts_with("│"),
+                "row {y} should be cleared: {rows:?}"
+            );
+        }
+
+        // Cursor below the cleared bottom pane
+        assert_eq!(Position { x: 0, y: 9 }, terminal.last_known_cursor_pos);
     }
 }

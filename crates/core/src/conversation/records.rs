@@ -200,6 +200,9 @@ pub enum TurnItem {
     ImageGeneration(TextItem),
     /// A context-compaction summary item.
     ContextCompaction(TextItem),
+    /// A turn boundary summary with model name and duration.
+    /// title = model name, body = duration_secs:u64 as string
+    TurnSummary(TextItem),
 }
 
 /// Stores optional high-level progress notes for an item append.

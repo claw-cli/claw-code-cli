@@ -13,8 +13,8 @@ use devo_tools::handlers;
 use devo_utils::FileSystemConfigPathResolver;
 
 use crate::{
-    ListenTarget, ServerRuntime, execution::ServerRuntimeDependencies, load_server_provider,
-    resolve_listen_targets, run_listeners,
+    ListenTarget, ServerRuntime, db::Database, execution::ServerRuntimeDependencies,
+    load_server_provider, resolve_listen_targets, run_listeners,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -107,6 +107,12 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
         workspace_roots: workspace_skill_roots,
         watch_for_changes: config.skills.watch_for_changes,
     }));
+
+    // Initialize SQLite database
+    let db_path = resolver.user_config_dir().join("devo.db");
+    tracing::info!(db_path = %db_path.display(), "opening database");
+    let db = Arc::new(Database::open(db_path)?);
+
     let runtime = ServerRuntime::new(
         resolver.user_config_dir(),
         ServerRuntimeDependencies::new(
@@ -117,6 +123,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             skill_workspace_root,
             skill_catalog,
             config.agents_md_config(),
+            db,
         ),
     );
     tracing::info!("starting persisted session restore");
@@ -124,7 +131,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     tracing::info!("persisted session restore completed");
     tracing::info!("server bootstrap completed; starting listeners");
     tokio::select! {
-        result = run_listeners(runtime, &effective_listen) => {
+        result = run_listeners(runtime.clone(), &effective_listen) => {
             result?;
         }
         result = tokio::signal::ctrl_c() => {
@@ -132,6 +139,8 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             tracing::info!("server shutdown requested");
         }
     }
+    tracing::info!("completing deferred items for active turns");
+    runtime.shutdown().await;
     Ok(())
 }
 
