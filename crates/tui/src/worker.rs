@@ -606,6 +606,7 @@ async fn run_worker_inner(
                                 session_id = Some(next_session_id);
                                 session_cwd = result.session.cwd.clone();
                                 input_history_cursor = None;
+
                                 let _ = event_tx.send(WorkerEvent::SessionSwitched {
                                     session_id: next_session_id.to_string(),
                                     cwd: result.session.cwd,
@@ -618,6 +619,7 @@ async fn run_worker_inner(
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
+                                    pending_texts: result.pending_texts,
                                 });
                                 model = result
                                     .session
@@ -1188,6 +1190,7 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
             SessionHistoryItemKind::ToolCall => TranscriptItemKind::ToolCall,
             SessionHistoryItemKind::ToolResult => TranscriptItemKind::ToolResult,
             SessionHistoryItemKind::Error => TranscriptItemKind::Error,
+            SessionHistoryItemKind::TurnSummary => TranscriptItemKind::TurnSummary,
         };
         let mut transcript_item = match item.kind {
             SessionHistoryItemKind::ToolCall => TranscriptItem::tool_call(item.title.clone()),
@@ -1196,6 +1199,10 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
             }
             SessionHistoryItemKind::Error => {
                 TranscriptItem::tool_error(item.title.clone(), item.body.clone())
+            }
+            SessionHistoryItemKind::TurnSummary => {
+                // TurnSummary uses title for model name, duration_ms for duration in seconds
+                TranscriptItem::new(kind, item.title.clone(), String::new())
             }
             SessionHistoryItemKind::User
             | SessionHistoryItemKind::Assistant

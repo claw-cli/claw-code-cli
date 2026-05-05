@@ -2,6 +2,7 @@ mod approval;
 mod bootstrap;
 mod client;
 mod connection;
+pub mod db;
 mod event;
 mod execution;
 mod persistence;

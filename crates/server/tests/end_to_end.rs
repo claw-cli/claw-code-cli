@@ -198,6 +198,8 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
         port
     };
     let bind_address = format!("127.0.0.1:{port}");
+    let db_path = std::env::temp_dir().join("test_end_to_end.db");
+    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
     let runtime = ServerRuntime::new(
         std::env::temp_dir(),
         ServerRuntimeDependencies::new(
@@ -208,6 +210,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
+            db,
         ),
     );
     let listen = vec![format!("ws://{bind_address}")];

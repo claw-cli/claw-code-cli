@@ -931,6 +931,8 @@ fn build_runtime_with_provider(
     data_root: &std::path::Path,
     provider: Arc<dyn ModelProviderSDK>,
 ) -> Result<Arc<ServerRuntime>> {
+    let db_path = data_root.join("test_persistence.db");
+    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
     Ok(ServerRuntime::new(
         data_root.to_path_buf(),
         ServerRuntimeDependencies::new(
@@ -941,6 +943,7 @@ fn build_runtime_with_provider(
             None,
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
+            db,
         ),
     ))
 }

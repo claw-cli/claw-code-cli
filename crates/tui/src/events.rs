@@ -178,6 +178,8 @@ pub(crate) enum WorkerEvent {
         history_items: Vec<TranscriptItem>,
         /// Number of persisted items loaded for the resumed session.
         loaded_item_count: u64,
+        /// Pending turn input texts queued for the next turn.
+        pending_texts: Vec<String>,
     },
     /// The current session title changed.
     SessionRenamed {
@@ -300,4 +302,6 @@ pub(crate) enum TranscriptItemKind {
     Error,
     /// Local UI/system note that is not model-authored content.
     System,
+    /// Turn summary with model name and duration.
+    TurnSummary,
 }

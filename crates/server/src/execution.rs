@@ -27,6 +27,7 @@ use devo_tools::ToolRegistry;
 
 use crate::InputItem;
 use crate::SkillRecord;
+use crate::db::Database;
 use crate::session::SessionHistoryItem;
 use crate::session::SessionMetadata;
 use crate::turn::TurnMetadata;
@@ -53,10 +54,13 @@ pub struct ServerRuntimeDependencies {
     pub(crate) skill_catalog: StdMutex<Box<dyn SkillCatalog + Send>>,
     /// AGENTS.md discovery configuration applied to new sessions.
     pub(crate) agents_md: AgentsMdConfig,
+    /// SQLite database for session metadata, token stats, and pending queues.
+    pub(crate) db: Arc<Database>,
 }
 
 impl ServerRuntimeDependencies {
     /// Creates a new bundle of runtime dependencies for the transport server.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Arc<dyn ModelProviderSDK>,
         registry: Arc<ToolRegistry>,
@@ -65,6 +69,7 @@ impl ServerRuntimeDependencies {
         skill_workspace_root: Option<PathBuf>,
         skill_catalog: Box<dyn SkillCatalog + Send>,
         agents_md: AgentsMdConfig,
+        db: Arc<Database>,
     ) -> Self {
         Self {
             provider,
@@ -74,6 +79,7 @@ impl ServerRuntimeDependencies {
             skill_workspace_root,
             skill_catalog: StdMutex::new(skill_catalog),
             agents_md,
+            db,
         }
     }
 
@@ -226,13 +232,19 @@ pub(crate) struct RuntimeSession {
     pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
     /// Latest compaction snapshot used to rebuild the model-facing prompt view.
     pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
-    /// Pending same-turn steering inputs (from busy turn/start).
-    pub(crate) steering_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
-    /// /btw steer inputs scoped to the current turn. These are drained by the
-    /// query loop at each iteration and never carried to the next turn.
-    pub(crate) steer_input_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
+    /// Pending turn inputs (from turn/start while a turn is active).
+    /// Preserved across turns; unconsumed items are pushed back when the turn ends.
+    pub(crate) pending_turn_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
+    /// /btw steer inputs scoped to the current turn.
+    /// Drained by the query loop at each iteration and never carried to the next turn.
+    pub(crate) btw_input_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
     /// Live query task for the active turn.
     pub(crate) active_task: Option<JoinHandle<()>>,
+    /// Deferred completion info for in-progress assistant text item.
+    /// Cleared when the item is completed; used for crash/interrupt recovery.
+    pub(crate) deferred_assistant: Option<(devo_core::ItemId, u64, String)>,
+    /// Deferred completion info for in-progress reasoning text item.
+    pub(crate) deferred_reasoning: Option<(devo_core::ItemId, u64, String)>,
     /// Monotonic session-scoped item sequence counter.
     pub(crate) next_item_seq: u64,
     /// First user input captured from the session's first turn, used for title generation.

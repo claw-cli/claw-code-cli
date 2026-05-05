@@ -139,6 +139,8 @@ fn build_runtime_with_registry(
         .iter()
         .map(|root| root.join(".devo").join("skills"))
         .collect::<Vec<_>>();
+    let db_path = data_root.join("test_skills.db");
+    let db = Arc::new(devo_server::db::Database::open(db_path).expect("open test database"));
     ServerRuntime::new(
         data_root.to_path_buf(),
         ServerRuntimeDependencies::new(
@@ -154,6 +156,7 @@ fn build_runtime_with_registry(
                 watch_for_changes: false,
             })),
             devo_core::AgentsMdConfig::default(),
+            db,
         ),
     )
 }
