@@ -155,6 +155,20 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
         TurnItem::ToolProgress(_)
         | TurnItem::ApprovalRequest(_)
         | TurnItem::ApprovalDecision(_) => None,
+        TurnItem::TurnSummary(TextItem { text }) => {
+            // Format: "model_name:duration_secs" or just "model_name"
+            let (model_name, duration_secs) = match text.split_once(':') {
+                Some((model, dur)) => (model.to_string(), dur.parse::<u64>().ok()),
+                None => (text.clone(), None),
+            };
+            Some(SessionHistoryItem {
+                tool_call_id: None,
+                kind: SessionHistoryItemKind::TurnSummary,
+                title: model_name,
+                body: String::new(),
+                duration_ms: duration_secs,
+            })
+        }
     }
 }
 

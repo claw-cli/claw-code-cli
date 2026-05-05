@@ -131,7 +131,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     tracing::info!("persisted session restore completed");
     tracing::info!("server bootstrap completed; starting listeners");
     tokio::select! {
-        result = run_listeners(runtime, &effective_listen) => {
+        result = run_listeners(runtime.clone(), &effective_listen) => {
             result?;
         }
         result = tokio::signal::ctrl_c() => {
@@ -139,6 +139,8 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             tracing::info!("server shutdown requested");
         }
     }
+    tracing::info!("completing deferred items for active turns");
+    runtime.shutdown().await;
     Ok(())
 }
 

@@ -502,6 +502,7 @@ impl ChatWidget {
         for item in &history_items {
             self.add_transcript_item_without_redraw(item.clone());
         }
+
         if !loaded_any_history {
             self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
                 format!(
@@ -1026,6 +1027,7 @@ impl ChatWidget {
                 prompt_token_estimate,
                 history_items,
                 loaded_item_count,
+                pending_texts,
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
@@ -1050,6 +1052,8 @@ impl ChatWidget {
                     &session_id,
                     title.as_deref(),
                 );
+                // Restore pending queue state from the resumed session
+                self.queued_count = pending_texts.len();
                 self.set_status_message("Session switched");
             }
             WorkerEvent::SessionRenamed { session_id, title } => {
@@ -1581,6 +1585,12 @@ impl ChatWidget {
                     item.title,
                     Some(item.body),
                 )));
+            }
+            TranscriptItemKind::TurnSummary => {
+                // item.title contains model name, item.duration_ms contains seconds
+                self.add_history_entry_without_redraw(Box::new(
+                    history_cell::TurnSummaryCell::new(item.title.clone(), item.duration_ms),
+                ));
             }
         }
     }

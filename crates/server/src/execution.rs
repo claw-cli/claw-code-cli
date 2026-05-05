@@ -240,6 +240,11 @@ pub(crate) struct RuntimeSession {
     pub(crate) btw_input_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
     /// Live query task for the active turn.
     pub(crate) active_task: Option<JoinHandle<()>>,
+    /// Deferred completion info for in-progress assistant text item.
+    /// Cleared when the item is completed; used for crash/interrupt recovery.
+    pub(crate) deferred_assistant: Option<(devo_core::ItemId, u64, String)>,
+    /// Deferred completion info for in-progress reasoning text item.
+    pub(crate) deferred_reasoning: Option<(devo_core::ItemId, u64, String)>,
     /// Monotonic session-scoped item sequence counter.
     pub(crate) next_item_seq: u64,
     /// First user input captured from the session's first turn, used for title generation.

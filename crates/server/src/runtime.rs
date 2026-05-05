@@ -259,6 +259,116 @@ impl ServerRuntime {
         Ok(())
     }
 
+    /// Completes deferred (in-progress) items for all active turns and
+    /// persists interrupted turn records. Called on graceful shutdown.
+    pub async fn shutdown(self: &Arc<Self>) {
+        let session_ids: Vec<SessionId> = {
+            let sessions = self.sessions.lock().await;
+            sessions.keys().cloned().collect()
+        };
+
+        for session_id in session_ids {
+            let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() else {
+                continue;
+            };
+
+            let (deferred_assistant, deferred_reasoning, turn_id, record) = {
+                let mut session = session_arc.lock().await;
+                let turn_id = session.active_turn.as_ref().map(|t| t.turn_id);
+                (
+                    session.deferred_assistant.take(),
+                    session.deferred_reasoning.take(),
+                    turn_id,
+                    session.record.clone(),
+                )
+            };
+
+            let Some(turn_id) = turn_id else {
+                continue;
+            };
+
+            // Complete deferred items before shutting down
+            if let Some((item_id, item_seq, text)) = deferred_assistant {
+                self.complete_item(
+                    session_id,
+                    turn_id,
+                    item_id,
+                    item_seq,
+                    ItemKind::AgentMessage,
+                    TurnItem::AgentMessage(TextItem {
+                        text: text.clone(),
+                    }),
+                    serde_json::json!({ "title": "Assistant", "text": text }),
+                )
+                .await;
+            }
+            if let Some((item_id, item_seq, text)) = deferred_reasoning {
+                self.complete_item(
+                    session_id,
+                    turn_id,
+                    item_id,
+                    item_seq,
+                    ItemKind::Reasoning,
+                    TurnItem::Reasoning(TextItem {
+                        text: text.clone(),
+                    }),
+                    serde_json::json!({ "title": "Reasoning", "text": text }),
+                )
+                .await;
+            }
+
+            // Mark turn as interrupted
+            let interrupted_turn = {
+                let mut session = session_arc.lock().await;
+                let Some(mut turn) = session.active_turn.take() else {
+                    continue;
+                };
+                if turn.turn_id != turn_id {
+                    session.active_turn = Some(turn);
+                    continue;
+                }
+                turn.status = TurnStatus::Interrupted;
+                turn.completed_at = Some(Utc::now());
+                session.latest_turn = Some(turn.clone());
+                session.summary.status = SessionRuntimeStatus::Idle;
+                session.summary.updated_at = Utc::now();
+                let token_totals = session.core_session.try_lock().ok().map(
+                    |core| (core.total_input_tokens, core.total_output_tokens),
+                );
+                if let Some((input, output)) = token_totals {
+                    session.summary.total_input_tokens = input;
+                    session.summary.total_output_tokens = output;
+                }
+                turn
+            };
+
+            // Persist interrupted turn record
+            if let Some(record) = record {
+                let (session_context, turn_context) = {
+                    let session = session_arc.lock().await;
+                    let core = session.core_session.lock().await;
+                    (core.session_context.clone(), core.latest_turn_context.clone())
+                };
+                if let Err(error) = self.rollout_store.append_turn(
+                    &record,
+                    build_turn_record(&interrupted_turn, session_context, turn_context),
+                ) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "failed to persist interrupted turn on shutdown"
+                    );
+                }
+            }
+
+            tracing::info!(
+                session_id = %session_id,
+                turn_id = %interrupted_turn.turn_id,
+                "completed deferred items and interrupted turn on shutdown"
+            );
+        }
+    }
+
     pub async fn register_connection(
         self: &Arc<Self>,
         transport: ClientTransportKind,
@@ -499,6 +609,8 @@ impl ServerRuntime {
                 pending_turn_queue,
                 btw_input_queue,
                 active_task: None,
+                deferred_assistant: None,
+                deferred_reasoning: None,
                 next_item_seq: 1,
                 first_user_input: None,
             }
@@ -745,6 +857,16 @@ impl ServerRuntime {
         let latest_turn = session.latest_turn.clone();
         let loaded_item_count = session.loaded_item_count;
         let history_items = session.history_items.clone();
+        let pending_texts: Vec<String> = session
+            .pending_turn_queue
+            .lock()
+            .expect("pending turn queue mutex poisoned")
+            .iter()
+            .filter_map(|item| match &item.kind {
+                devo_core::PendingInputKind::UserText { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
         drop(session);
         self.subscribe_connection_to_session(connection_id, params.session_id, None)
             .await;
@@ -753,6 +875,7 @@ impl ServerRuntime {
             session_id = %params.session_id,
             loaded_item_count,
             has_latest_turn = latest_turn.is_some(),
+            pending_count = pending_texts.len(),
             "resumed session"
         );
         serde_json::to_value(SuccessResponse {
@@ -762,6 +885,7 @@ impl ServerRuntime {
                 latest_turn,
                 loaded_item_count,
                 history_items,
+                pending_texts,
             },
         })
         .expect("serialize session/resume response")
@@ -851,6 +975,8 @@ impl ServerRuntime {
                 pending_turn_queue,
                 btw_input_queue,
                 active_task: None,
+                deferred_assistant: None,
+                deferred_reasoning: None,
                 next_item_seq: loaded_item_count + 1,
                 first_user_input: None,
             }
@@ -1230,7 +1356,8 @@ impl ServerRuntime {
                     },
                     TurnItem::ToolProgress(_)
                     | TurnItem::ApprovalRequest(_)
-                    | TurnItem::ApprovalDecision(_) => return None,
+                    | TurnItem::ApprovalDecision(_)
+                    | TurnItem::TurnSummary(_) => return None,
                 };
                 (!response_item.is_reason()).then_some((item.item_id, response_item))
             })
@@ -1604,6 +1731,40 @@ impl ServerRuntime {
                 "session does not exist",
             );
         };
+
+        // Complete any deferred (in-progress) items before aborting the turn task
+        {
+            let mut session = session_arc.lock().await;
+            if let Some((item_id, item_seq, text)) = session.deferred_assistant.take() {
+                self.complete_item(
+                    params.session_id,
+                    params.turn_id,
+                    item_id,
+                    item_seq,
+                    ItemKind::AgentMessage,
+                    TurnItem::AgentMessage(TextItem {
+                        text: text.clone(),
+                    }),
+                    serde_json::json!({ "title": "Assistant", "text": text }),
+                )
+                .await;
+            }
+            if let Some((item_id, item_seq, text)) = session.deferred_reasoning.take() {
+                self.complete_item(
+                    params.session_id,
+                    params.turn_id,
+                    item_id,
+                    item_seq,
+                    ItemKind::Reasoning,
+                    TurnItem::Reasoning(TextItem {
+                        text: text.clone(),
+                    }),
+                    serde_json::json!({ "title": "Reasoning", "text": text }),
+                )
+                .await;
+            }
+        }
+
         if let Some(task) = self.active_tasks.lock().await.remove(&params.session_id) {
             task.abort();
         }
@@ -1975,6 +2136,12 @@ impl ServerRuntime {
                             })
                             .await;
                         let _ = item_seq;
+
+                        // Store deferred completion info for interrupt recovery
+                        if let Ok(mut session) = event_session_arc.try_lock() {
+                            session.deferred_assistant =
+                                Some((item_id, item_seq, assistant_text.clone()));
+                        }
                     }
                     QueryEvent::ReasoningDelta(text) => {
                         let (item_id, item_seq) = match (reasoning_item_id, reasoning_item_seq) {
@@ -2012,6 +2179,12 @@ impl ServerRuntime {
                             })
                             .await;
                         let _ = item_seq;
+
+                        // Store deferred completion info for interrupt recovery
+                        if let Ok(mut session) = event_session_arc.try_lock() {
+                            session.deferred_reasoning =
+                                Some((item_id, item_seq, reasoning_text.clone()));
+                        }
                     }
                     QueryEvent::ToolUseStart { id, name, input } => {
                         tool_names_by_id.insert(id.clone(), name.clone());
