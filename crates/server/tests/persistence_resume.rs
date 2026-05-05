@@ -944,6 +944,7 @@ fn build_runtime_with_provider(
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
             db,
+            data_root.join("config.toml"),
         ),
     ))
 }

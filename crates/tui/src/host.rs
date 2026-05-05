@@ -92,6 +92,12 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         .cloned()
         .collect::<Vec<_>>();
 
+    let saved_model_slugs: Vec<String> = config
+        .saved_models
+        .iter()
+        .map(|entry| entry.model.clone())
+        .collect();
+
     let model = resolve_initial_model(&initial_session, &config.model_catalog);
     let cwd = initial_session.cwd.clone();
     let initial_provider = model.provider_wire_api();
@@ -116,6 +122,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         enhanced_keys_supported: tui.enhanced_keys_supported(),
         is_first_run: config.saved_models.is_empty(),
         available_models,
+        saved_model_slugs,
         show_model_onboarding: config.show_model_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
     });

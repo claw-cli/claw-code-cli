@@ -1,4 +1,4 @@
-# ClawCodeRust Detailed Specification: Safety
+# devo Detailed Specification: Safety
 
 ## Background and Goals
 

@@ -11,6 +11,7 @@ use devo_tui::InitialTuiSession;
 use devo_tui::InteractiveTuiConfig;
 use devo_tui::SavedModelEntry;
 use devo_tui::run_interactive_tui;
+use devo_utils::find_devo_home;
 
 /// Runs the interactive coding-agent entrypoint.
 ///
@@ -20,7 +21,8 @@ use devo_tui::run_interactive_tui;
 /// for this session without mutating the stored provider config.
 pub(crate) async fn run_agent(force_onboarding: bool, log_level: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
-    let model_catalog = PresetModelCatalog::load()?;
+    let config_home = find_devo_home().context("could not determine devo home directory")?;
+    let model_catalog = PresetModelCatalog::load_from_config(&config_home, Some(&cwd))?;
     let stored_config = load_config().unwrap_or_default();
     let (onboarding_mode, resolved) =
         resolve_initial_provider_settings(force_onboarding, &stored_config, &model_catalog)?;

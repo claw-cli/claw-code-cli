@@ -97,6 +97,7 @@ use crate::titles::build_title_generation_request;
 use crate::titles::derive_provisional_title;
 use crate::titles::normalize_generated_title;
 
+mod model_api;
 mod skills;
 
 pub struct ServerRuntime {
@@ -130,6 +131,8 @@ impl ServerRuntime {
                     turn_interrupt: true,
                     approval_requests: true,
                     event_streaming: true,
+                    model_catalog: true,
+                    model_saved: true,
                 },
             },
             deps,
@@ -462,6 +465,8 @@ impl ServerRuntime {
             "session/compact" => Some(self.handle_session_compact(id?, params).await),
             "skills/list" => Some(self.handle_skills_list(id?, params).await),
             "skills/changed" => Some(self.handle_skills_changed(id?, params).await),
+            "model/catalog" => Some(self.handle_model_catalog(id?, params).await),
+            "model/saved" => Some(self.handle_model_saved(id?, params).await),
             "turn/start" => Some(self.handle_turn_start(id?, params).await),
             "turn/interrupt" => Some(self.handle_turn_interrupt(id?, params).await),
             "turn/steer" => Some(self.handle_turn_steer(connection_id, id?, params).await),

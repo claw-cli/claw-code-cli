@@ -213,6 +213,8 @@ pub struct Model {
     pub input_modalities: Vec<InputModality>,
     /// Whether the model supports original-resolution image detail.
     pub supports_image_detail_original: bool,
+    /// Grouping label used to organize models by vendor or family.
+    pub channel: Option<String>,
     /// Default temperature to use when the model does not override it.
     pub temperature: Option<f64>,
     /// Default nucleus sampling value to use when the model does not override it.
@@ -239,6 +241,7 @@ impl Default for Model {
             truncation_policy: TruncationPolicyConfig::default(),
             input_modalities: vec![InputModality::default()],
             supports_image_detail_original: false,
+            channel: None,
             temperature: None,
             top_p: None,
             top_k: None,
@@ -503,6 +506,67 @@ pub enum ModelError {
     NoVisibleModels,
 }
 
+// ── model/catalog API ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelCatalogParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogResult {
+    pub models: Vec<ModelCatalogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogEntry {
+    pub slug: String,
+    pub display_name: String,
+    pub channel: Option<String>,
+    pub description: Option<String>,
+    pub provider: ProviderWireApi,
+    pub context_window: u32,
+    pub thinking_capability: ThinkingCapability,
+    pub input_modalities: Vec<InputModality>,
+    pub max_tokens: Option<u32>,
+}
+
+impl From<&Model> for ModelCatalogEntry {
+    fn from(m: &Model) -> Self {
+        Self {
+            slug: m.slug.clone(),
+            display_name: m.display_name.clone(),
+            channel: m.channel.clone(),
+            description: m.description.clone(),
+            provider: m.provider,
+            context_window: m.context_window,
+            thinking_capability: m.thinking_capability.clone(),
+            input_modalities: m.input_modalities.clone(),
+            max_tokens: m.max_tokens,
+        }
+    }
+}
+
+// ── model/saved API ─────────────────────────────────────────────────
+
+/// Lists models that have been configured with credentials in `config.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelSavedParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSavedResult {
+    pub models: Vec<ModelSavedEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSavedEntry {
+    pub slug: String,
+    pub display_name: String,
+    pub channel: Option<String>,
+    pub description: Option<String>,
+    pub provider_id: String,
+    pub wire_api: ProviderWireApi,
+    pub context_window: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use crate::RequestRole;
@@ -538,6 +602,7 @@ mod tests {
             },
             input_modalities: vec![InputModality::Text],
             supports_image_detail_original: false,
+            channel: None,
             temperature: None,
             top_p: None,
             top_k: None,

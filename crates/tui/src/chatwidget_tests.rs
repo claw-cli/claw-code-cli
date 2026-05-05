@@ -44,6 +44,7 @@ fn widget_with_model_and_thinking(
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: Vec::new(),
+        saved_model_slugs: Vec::new(),
         show_model_onboarding: false,
         startup_tooltip_override: None,
     });
@@ -64,6 +65,7 @@ fn onboarding_widget_with_model(
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: Vec::new(),
+        saved_model_slugs: Vec::new(),
         show_model_onboarding: true,
         startup_tooltip_override: None,
     });
@@ -961,6 +963,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: vec![model, alt_model],
+        saved_model_slugs: vec!["test-model".into(), "second-model".into()],
         show_model_onboarding: false,
         startup_tooltip_override: None,
     });
@@ -1079,6 +1082,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: vec![model, alt_model.clone()],
+        saved_model_slugs: vec!["test-model".into(), "second-model".into()],
         show_model_onboarding: false,
         startup_tooltip_override: None,
     });

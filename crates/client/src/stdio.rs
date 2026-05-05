@@ -13,6 +13,10 @@ use devo_protocol::ClientTransportKind;
 use devo_protocol::ErrorResponse;
 use devo_protocol::InitializeParams;
 use devo_protocol::InitializeResult;
+use devo_protocol::ModelCatalogParams;
+use devo_protocol::ModelCatalogResult;
+use devo_protocol::ModelSavedParams;
+use devo_protocol::ModelSavedResult;
 use devo_protocol::NotificationEnvelope;
 use devo_protocol::ProtocolErrorCode;
 use devo_protocol::ServerEvent;
@@ -198,6 +202,17 @@ impl StdioServerClient {
         params: SkillChangedParams,
     ) -> Result<SkillChangedResult> {
         self.request("skills/changed", params).await
+    }
+
+    pub async fn model_catalog(
+        &mut self,
+        params: ModelCatalogParams,
+    ) -> Result<ModelCatalogResult> {
+        self.request("model/catalog", params).await
+    }
+
+    pub async fn model_saved(&mut self, params: ModelSavedParams) -> Result<ModelSavedResult> {
+        self.request("model/saved", params).await
     }
 
     pub async fn turn_start(&mut self, params: TurnStartParams) -> Result<TurnStartResult> {

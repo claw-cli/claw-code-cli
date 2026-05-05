@@ -53,7 +53,7 @@ pub(crate) async fn run_prompt(
         std::sync::Arc::new(reg)
     };
     let runtime = ToolRuntime::new_without_permissions(std::sync::Arc::clone(&registry));
-    let model_catalog = PresetModelCatalog::load()?;
+    let model_catalog = PresetModelCatalog::load_from_config(&home_dir, Some(&cwd))?;
 
     let turn_config = devo_core::TurnConfig {
         model: model_catalog

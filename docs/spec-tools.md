@@ -1,4 +1,4 @@
-# ClawCodeRust Detailed Specification: Tools
+# devo Detailed Specification: Tools
 
 ## Background and Goals
 
@@ -159,20 +159,14 @@ pub enum ToolContent {
 
 ```rust
 #[async_trait]
-pub trait Tool: Send + Sync {
-    fn definition(&self) -> ToolDefinition;
+pub trait ToolHandler: Send + Sync {
+    fn tool_kind(&self) -> ToolHandlerKind;
 
-    async fn validate(
+    async fn handle(
         &self,
-        input: &serde_json::Value,
-    ) -> Result<(), ToolInputError>;
-
-    async fn execute(
-        &self,
-        input: serde_json::Value,
-        ctx: ToolExecutionContext,
-        reporter: Arc<dyn ToolProgressReporter>,
-    ) -> Result<ToolExecutionOutcome, ToolExecuteError>;
+        invocation: ToolInvocation,
+        progress: Option<ToolProgressSender>,
+    ) -> Result<Box<dyn ToolOutput>, ToolExecutionError>;
 }
 ```
 
@@ -212,21 +206,22 @@ Rules:
 
 ## Built-in Tool Set
 
-The first milestone should define these built-in tools:
+The current built-in tools in `devo-tools` include:
 
-- `shell_command`
-- `file_search`
-- `apply_patch`
-- `read_file`
-- `write_file` only if explicitly separated from `apply_patch`
-
-The design below makes `shell_command` and `file_search` mandatory because they are core to coding-agent behavior and have strong Codex reference material.
-
-Boundary rules:
-
-- built-in tools are owned and implemented directly in `devo-tools`
-- MCP-contributed capabilities are specified in [spec-mcp.md](./spec-mcp.md) and only enter this layer after normalization
-- skills are not tools and must not be modeled as tool definitions in `devo-tools`
+- `bash` / `shell_command` — shell command execution
+- `apply_patch` — file editing via patch application
+- `read` — file reading
+- `write` / `file_write` — file writing
+- `glob` — filename pattern matching
+- `grep` — content search with regex
+- `webfetch` — HTTP content fetching
+- `websearch` — web search
+- `task` — sub-agent task dispatch
+- `question` — interactive user questions
+- `todo_write` — structured task list management
+- `skill` — skill loading
+- `plan` — plan mode support
+- `lsp` — language server protocol integration
 
 ## Shell Command Tool
 

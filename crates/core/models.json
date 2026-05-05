@@ -2,6 +2,7 @@
     {
         "slug": "qwen3-coder-next",
         "display_name": "qwen3-coder-next",
+        "channel": "Qwen",
         "provider_family": "openai",
         "description": "3B activated parameters (80B total parameters) released at 02/2026 by Qwen",
         "thinking_capability": "unsupported",
@@ -25,6 +26,7 @@
     {
         "slug": "kimi-k2.5",
         "display_name": "kimi-k2.5",
+        "channel": "Kimi",
         "provider_family": "openai",
         "description": "An open-weight, native multimodal agentic model, 3B activated parameters (80B total parameters) released at 2026 by moonshot",
         "thinking_capability": "toggle",
@@ -73,6 +75,7 @@
     {
         "slug": "minimax-m2.7",
         "display_name": "minimax-m2.7",
+        "channel": "MiniMax",
         "provider_family": "openai",
         "description": "229B open-weight model released at 04/2026 by minimax",
         "thinking_capability": "unsupported",
@@ -96,6 +99,7 @@
     {
         "slug": "glm-5.1",
         "display_name": "glm-5.1",
+        "channel": "GLM",
         "provider_family": "openai",
         "description": "754B flagship open-weight model released at 04/2026 by z.ai",
         "thinking_capability": "toggle",
@@ -143,6 +147,7 @@
     {
         "slug": "deepseek-v4-flash",
         "display_name": "deepseek-v4-flash",
+        "channel": "DeepSeek",
         "provider_family": "openai",
         "description": "deepseek v4 flash model released by deepseek at 2026.",
         "thinking_capability": "toggle",
@@ -163,6 +168,7 @@
     {
         "slug": "deepseek-v4-pro",
         "display_name": "deepseek-v4-pro",
+        "channel": "DeepSeek",
         "provider_family": "openai",
         "description": "deepseek v4 pro model released by deepseek at 2026.",
         "thinking_capability": "toggle",

@@ -1,4 +1,4 @@
-# ClawCodeRust Detailed Specification: Interactive TUI v2
+# devo Detailed Specification: Interactive TUI v2
 
 ## Background and Goals
 
@@ -27,17 +27,17 @@ Out of scope:
 
 - desktop-only or GUI-only experiences
 - provider-specific API payload details
-- full approval-modal design for features not currently present in Claw
-- plugin, marketplace, or external product surfaces that are not part of Claw's runtime contract
+- full approval-modal design for features not currently present in devo
+- plugin, marketplace, or external product surfaces that are not part of devo's runtime contract
 
 ## Design Goals
 
 The interactive TUI must:
 
-- feel like a first-class Claw interface rather than a partial port
+- feel like a first-class devo interface rather than a partial port
 - keep terminal interaction responsive during streaming and long-running work
 - preserve clear ownership boundaries between UI, worker, and protocol/runtime code
-- expose only Claw-supported actions to the user
+- expose only devo-supported actions to the user
 - represent tool and shell activity in a human-readable form without depending on renderer-only heuristics
 
 ## Module Responsibilities and Boundaries
@@ -54,7 +54,7 @@ The interactive TUI must:
 - frame scheduling and redraw orchestration
 - transcript rendering
 - composer, popups, and onboarding interaction
-- Claw-local UI command and event types
+- devo-local UI command and event types
 - mapping runtime events into user-visible history cells and status indicators
 
 `devo-tui::worker` owns:
@@ -145,7 +145,8 @@ Requirements:
 - the composer must support paste input
 - the composer must submit user input through a normalized UI command path rather than invoking runtime calls directly
 - the composer must support slash command discovery and execution
-- the composer must support model selection from within the TUI
+- the `/model` slash command opens a picker showing only configured models
+  (those with credentials in `config.toml`), not the full model catalog
 - the composer must support browsing input history
 - the composer must expose status or helper text when onboarding or popup flows need to steer the user
 
@@ -153,7 +154,7 @@ Rules:
 
 - composer state changes that affect visible UI must trigger frame requests
 - popup behavior must be dismissible from the keyboard
-- the bottom pane must remain focused on Claw-supported workflows and must not expose orphaned UI surfaces from imported code that Claw does not support
+- the bottom pane must remain focused on devo-supported workflows and must not expose orphaned UI surfaces from imported code that devo does not support
 
 ## Onboarding Requirements
 
@@ -161,7 +162,10 @@ The TUI must support provider onboarding for first-run or forced-onboarding flow
 
 Requirements:
 
-- onboarding must allow the user to choose or enter a model
+- onboarding must allow the user to choose a channel (vendor group) first,
+  then a model within that channel
+- onboarding must present channels derived from the `channel` field in
+  the model catalog
 - onboarding must allow collection of optional base URL and API key values when required
 - onboarding must validate provider settings before they replace the active runtime configuration
 - successful onboarding must persist the resulting provider selection through the existing config path
@@ -169,7 +173,7 @@ Requirements:
 
 ## UI Command and Event Contract
 
-The interactive TUI must define a Claw-local command and event model.
+The interactive TUI must define a devo-local command and event model.
 
 Requirements for UI-to-host commands:
 
@@ -184,7 +188,7 @@ Requirements for internal app events:
 
 Rules:
 
-- the command/event surface must be Claw-owned and must not import large foreign product enums wholesale
+- the command/event surface must be devo-owned and must not import large foreign product enums wholesale
 - app commands must describe user intent, not renderer actions
 - app events must describe UI coordination, not transport protocol payloads
 
@@ -233,7 +237,7 @@ Rules:
 
 ## Supported UX Surface
 
-The first-class Claw interactive UI must support:
+The first-class devo interactive UI must support:
 
 - text chat turns
 - transcript rendering with streaming updates
@@ -242,13 +246,13 @@ The first-class Claw interactive UI must support:
 - thinking selection
 - slash-command initiated actions
 - shell command display and summary
-- session-level actions that Claw currently supports
+- session-level actions that devo currently supports
 
-The Claw interactive UI must not require support for:
+The devo interactive UI must not require support for:
 
 - plugin marketplace flows
-- external product approval overlays that Claw has not implemented
-- non-Claw request-user-input surfaces imported from other products
+- external product approval overlays that devo has not implemented
+- non-devo request-user-input surfaces imported from other products
 - unrelated experimental or promotional popups
 
 ## Testing Requirements
@@ -269,12 +273,12 @@ Rules:
 
 This specification is satisfied when:
 
-- `devo` launches into a Claw-owned interactive TUI flow backed by typed UI commands and events
+- `devo` launches into a devo-owned interactive TUI flow backed by typed UI commands and events
 - the TUI can onboard, submit turns, stream results, interrupt work, and shut down cleanly
 - terminal behavior remains responsive and restores correctly on exit
 - the worker cleanly bridges the UI to the runtime without leaking transport details into widgets
 - shell activity can be summarized through shared parsed-command types instead of renderer-only string heuristics
-- the user-visible interactive surface is limited to Claw-supported behaviors rather than partially exposing foreign product features
+- the user-visible interactive surface is limited to devo-supported behaviors rather than partially exposing foreign product features
 
 ## Open Questions and Follow-Up Work
 

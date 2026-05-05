@@ -75,6 +75,8 @@ pub struct ModelPreset {
     pub input_modalities: Vec<InputModality>,
     /// Whether the model supports original-resolution image detail.
     pub supports_image_detail_original: bool,
+    /// Grouping label used to organize models by vendor or family.
+    pub channel: Option<String>,
     /// Whether the user configured API access for this model.
     #[serde(rename = "supported_in_api")]
     pub api_configured: bool,
@@ -107,6 +109,7 @@ impl Default for ModelPreset {
             truncation_policy: TruncationPolicyConfig::default(),
             input_modalities: vec![InputModality::default()],
             supports_image_detail_original: false,
+            channel: None,
             api_configured: false,
             temperature: None,
             top_p: None,
@@ -148,6 +151,7 @@ impl From<ModelPreset> for Model {
             truncation_policy: value.truncation_policy,
             input_modalities: value.input_modalities,
             supports_image_detail_original: value.supports_image_detail_original,
+            channel: value.channel,
             temperature: value.temperature,
             top_p: value.top_p,
             top_k: value.top_k,

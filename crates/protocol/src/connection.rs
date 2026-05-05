@@ -45,4 +45,6 @@ pub struct ServerCapabilities {
     pub turn_interrupt: bool,
     pub approval_requests: bool,
     pub event_streaming: bool,
+    pub model_catalog: bool,
+    pub model_saved: bool,
 }

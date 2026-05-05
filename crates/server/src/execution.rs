@@ -56,6 +56,8 @@ pub struct ServerRuntimeDependencies {
     pub(crate) agents_md: AgentsMdConfig,
     /// SQLite database for session metadata, token stats, and pending queues.
     pub(crate) db: Arc<Database>,
+    /// Path to user config.toml used for listing configured models.
+    pub(crate) config_file: PathBuf,
 }
 
 impl ServerRuntimeDependencies {
@@ -70,6 +72,7 @@ impl ServerRuntimeDependencies {
         skill_catalog: Box<dyn SkillCatalog + Send>,
         agents_md: AgentsMdConfig,
         db: Arc<Database>,
+        config_file: PathBuf,
     ) -> Self {
         Self {
             provider,
@@ -80,6 +83,7 @@ impl ServerRuntimeDependencies {
             skill_catalog: StdMutex::new(skill_catalog),
             agents_md,
             db,
+            config_file,
         }
     }
 

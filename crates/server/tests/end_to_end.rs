@@ -211,6 +211,7 @@ async fn websocket_listener_supports_handshake_subscription_and_turn_lifecycle()
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
             db,
+            std::env::temp_dir().join("config.toml"),
         ),
     );
     let listen = vec![format!("ws://{bind_address}")];

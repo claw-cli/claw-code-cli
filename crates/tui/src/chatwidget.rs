@@ -77,6 +77,8 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
     pub(crate) available_models: Vec<Model>,
+    /// Configured model slugs from config.toml used by the /model picker.
+    pub(crate) saved_model_slugs: Vec<String>,
     pub(crate) show_model_onboarding: bool,
     pub(crate) startup_tooltip_override: Option<String>,
 }
@@ -237,6 +239,7 @@ pub(crate) struct ChatWidget {
     active_reasoning_cell: Option<history_cell::AgentMessageCell>,
     stream_controller: Option<StreamController>,
     available_models: Vec<Model>,
+    saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
     resume_browser: Option<ResumeBrowserState>,
     resume_browser_loading: bool,
@@ -552,6 +555,7 @@ impl ChatWidget {
             enhanced_keys_supported,
             is_first_run,
             available_models,
+            saved_model_slugs,
             show_model_onboarding,
             startup_tooltip_override,
         } = common;
@@ -612,6 +616,7 @@ impl ChatWidget {
             active_reasoning_cell: None,
             stream_controller: None,
             available_models,
+            saved_model_slugs,
             onboarding_step: None,
             resume_browser: None,
             resume_browser_loading: false,
@@ -1969,12 +1974,17 @@ impl ChatWidget {
         self.picker_mode = Some(PickerMode::Model);
         let current_slug = self.session.model.as_ref().map(|model| model.slug.as_str());
         let entries = self
-            .available_models
+            .saved_model_slugs
             .iter()
+            .filter_map(|slug| {
+                self.available_models
+                    .iter()
+                    .find(|model| model.slug == *slug)
+            })
             .map(|model| ModelPickerEntry {
                 slug: model.slug.clone(),
                 display_name: model.display_name.clone(),
-                description: model.description.clone(),
+                description: model.channel.clone(),
                 is_current: current_slug == Some(model.slug.as_str()),
             })
             .collect();
