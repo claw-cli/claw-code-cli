@@ -796,14 +796,16 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                if self.stream_controller.is_none() {
+                if self.busy && self.stream_controller.is_none() {
                     self.active_assistant_text = text;
                 }
                 self.sync_active_assistant_cell();
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningCompleted(text) => {
-                self.active_reasoning_text = text;
+                if self.busy {
+                    self.active_reasoning_text = text;
+                }
                 self.sync_active_reasoning_cell();
                 self.set_status_message("Thinking");
             }
