@@ -1053,6 +1053,11 @@ impl ChatWidget {
                 );
                 // Restore pending queue state from the resumed session
                 self.queued_count = pending_texts.len();
+                self.bottom_pane.clear_pending_cells();
+                for text in &pending_texts {
+                    self.bottom_pane.push_pending_cell(text.clone());
+                }
+                self.busy = false;
                 self.set_status_message("Session switched");
             }
             WorkerEvent::SessionRenamed { session_id, title } => {
@@ -1238,6 +1243,12 @@ impl ChatWidget {
             }
             SlashCommand::Btw => {
                 if let Some(turn_id) = self.active_turn_id {
+                    self.add_to_history(history_cell::new_user_prompt(
+                        format!("/btw {argument}"),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    ));
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::SteerTurn {
                             input: vec![devo_protocol::InputItem::Text { text: argument }],
@@ -1828,8 +1839,8 @@ impl ChatWidget {
                 Vec::new(),
                 Vec::new(),
             ));
-            self.queued_count = self.queued_count.saturating_sub(1);
         }
+        self.queued_count = self.queued_count.saturating_sub(1);
     }
 
     fn add_history_entry_without_redraw(&mut self, cell: Box<dyn HistoryCell>) {

@@ -1573,25 +1573,6 @@ impl ServerRuntime {
             session.summary.status = SessionRuntimeStatus::ActiveTurn;
             session.summary.updated_at = now;
             session.active_turn = Some(turn.clone());
-
-            // Clear pending queue (both in-memory and SQLite)
-            session
-                .pending_turn_queue
-                .lock()
-                .expect("pending turn queue mutex should not be poisoned")
-                .clear();
-            if !session.summary.ephemeral
-                && let Err(err) = self
-                    .deps
-                    .db
-                    .clear_pending(&params.session_id, QueueType::Turn)
-            {
-                tracing::warn!(
-                    session_id = %params.session_id,
-                    error = %err,
-                    "failed to clear pending turn messages from database"
-                );
-            }
             let clear_session_id = params.session_id;
             let runtime_for_broadcast = Arc::clone(self);
             tokio::spawn(async move {
