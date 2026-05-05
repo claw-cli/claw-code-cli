@@ -1354,10 +1354,22 @@ impl BottomPaneView for OnboardingView {
 }
 
 impl Renderable for OnboardingView {
-    fn desired_height(&self, width: u16) -> u16 {
-        let _ = width;
-        // Return a reasonable height that will be clamped by the layout
-        20
+    fn desired_height(&self, _width: u16) -> u16 {
+        match &self.state {
+            OnboardingState::ModelSelection {
+                filtered_indices, ..
+            } => {
+                // title + subtitle + blank + search + blank + items + blank + footer
+                let items = MAX_POPUP_ROWS.min(filtered_indices.len().max(1)) as u16;
+                items * 2 + 7
+            }
+            OnboardingState::CustomModelName { .. } => 8,
+            OnboardingState::ProviderSelection { .. } => 14,
+            OnboardingState::BaseUrl { .. } => 11,
+            OnboardingState::ApiKey { .. } => 12,
+            OnboardingState::Validating { .. } => 10,
+            OnboardingState::ValidationFailed { .. } => 12,
+        }
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
