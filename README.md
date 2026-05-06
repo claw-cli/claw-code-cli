@@ -98,7 +98,7 @@ model_thinking_selection = "high"
 
 [model_providers."api.deepseek.com"]
 name = "api.deepseek.com"
-api_key = "sk-0b7b2422983141e5973d1fc3eccf0822"
+api_key = "sk-..."
 base_url = "https://api.deepseek.com"
 wire_api = "openai_chat_completions"
 
@@ -113,8 +113,8 @@ model = "deepseek-v4-flash"
 
 ```toml
 # ── Model Provider (required) ───────────────────────────────────
-model_provider = "openai"          # active provider id
-model = "gpt-4o"                   # active model slug
+model_provider = "api.deepseek.com"          # active provider id
+model = "deepseek-v4-flash"                   # active model slug
 model_thinking_selection = "high"   # optional: thinking/reasoning effort
 model_auto_compact_token_limit = 970000   # optional
 model_context_window = 128000      # optional
@@ -122,58 +122,58 @@ disable_response_storage = false   # optional
 preferred_auth_method = "apikey"   # optional: "apikey"
 
 # ── Provider Profiles ───────────────────────────────────────────
-[model_providers.openai]
-name = "OpenAI"
-base_url = "https://api.openai.com/v1"
+[model_providers."api.deepseek.com"]
+name = "api.deepseek.com"
+base_url = "https://api.deepseek.com"
 wire_api = "openai_chat_completions"   # openai_chat_completions | openai_responses | anthropic_messages
 api_key = "sk-..."
-default_model = "gpt-4o"
+default_model = "deepseek-v4-flash"  # optional
 
 [[model_providers.openai.models]]
-model = "gpt-4o"
+model = "deepseek-v4-pro"
 
 [[model_providers.openai.models]]
-model = "gpt-4o-mini"
+model = "deepseek-v4-flash"
 
 # ── App Settings (optional) ─────────────────────────────────────
-enable_auxiliary_model = false     # use a second model for safety/summaries
-summary_model = "UseTurnModel"     # "UseTurnModel" or "UseAxiliaryModel"
-safety_policy_model = "UseAxiliaryModel"
-project_root_markers = [".git"]
+enable_auxiliary_model = false     # optional, use a second model for safety/summaries
+summary_model = "UseTurnModel"     # optional, "UseTurnModel" or "UseAxiliaryModel"
+safety_policy_model = "UseAxiliaryModel" # optional
+project_root_markers = [".git"] # optional
 
 [context]
-preserve_recent_turns = 3          # keep last N turns un-compacted
-auto_compact_percent = 90          # trigger compaction at N% of context window
-manual_compaction_enabled = true
+preserve_recent_turns = 3          # optional, keep last N turns un-compacted
+auto_compact_percent = 97          # optional, trigger compaction at N% of context window
+manual_compaction_enabled = true   # optional
 
 [server]
-listen = []                        # e.g. ["stdio://", "ws://127.0.0.1:3000"]
-max_connections = 32
-event_buffer_size = 1024
-idle_session_timeout_secs = 1800
-persist_ephemeral_sessions = false
+listen = []                        # optional, e.g. ["stdio://", "ws://127.0.0.1:3000"]
+max_connections = 32               # optional
+event_buffer_size = 1024           # optional
+idle_session_timeout_secs = 1800   # optional
+persist_ephemeral_sessions = false # optional
 
 [logging]
-level = "info"                     # trace, debug, info, warn, error
-json = false                       # emit JSON-formatted logs
-redact_secrets_in_logs = true
+level = "info"                     # optional, trace, debug, info, warn, error
+json = false                       # optional, emit JSON-formatted logs
+redact_secrets_in_logs = true      # optional
 
 [logging.file]
-directory = "logs"                 # relative to DEVO_HOME
-filename_prefix = "devo"
-rotation = "Daily"                 # Never | Minutely | Hourly | Daily
-max_files = 14
+directory = "logs"                 # optional, relative to DEVO_HOME
+filename_prefix = "devo"           # optional
+rotation = "Daily"                 # optional, Never | Minutely | Hourly | Daily
+max_files = 14                     # optional
 
 [skills]
-enabled = true
-user_roots = ["skills"]            # dirs to scan for user skills
-workspace_roots = ["skills"]       # dirs to scan for workspace skills
-watch_for_changes = true
+enabled = true                     # optional
+user_roots = ["skills"]            # optional, dirs to scan for user skills
+workspace_roots = ["skills"]       # optional, dirs to scan for workspace skills
+watch_for_changes = true           # optional
 
 [updates]
-enabled = true
-check_on_startup = true
-check_interval_hours = 24
+enabled = true                     # optional
+check_on_startup = true            # optional
+check_interval_hours = 24          # optional
 ```
 
 ### Model Catalog (`~/.devo/models.json`)
