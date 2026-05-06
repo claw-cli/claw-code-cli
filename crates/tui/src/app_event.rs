@@ -103,6 +103,12 @@ pub(crate) enum AppEvent {
     /// Dismiss the terminal-title setup UI without changing config.
     TerminalTitleSetupCancelled,
 
+    #[allow(dead_code)]
+    /// Open the theme picker.
+    OpenThemePicker,
+    #[allow(dead_code)]
+    /// Apply a selected theme.
+    ThemeSelected { name: String },
     /// Result of computing a `/diff` command (ANSI-colored diff text).
     DiffResult(String),
 }

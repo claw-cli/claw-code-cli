@@ -1377,6 +1377,7 @@ mod tests {
             },
             input_modalities: vec![],
             supports_image_detail_original: false,
+            channel: None,
             temperature: None,
             top_p: None,
             top_k: None,

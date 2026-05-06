@@ -1,4 +1,4 @@
-# ClawCodeRust Detailed Specification: Conversation
+# devo Detailed Specification: Conversation
 
 ## Background and Goals
 

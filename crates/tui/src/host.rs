@@ -92,6 +92,12 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         .cloned()
         .collect::<Vec<_>>();
 
+    let saved_model_slugs: Vec<String> = config
+        .saved_models
+        .iter()
+        .map(|entry| entry.model.clone())
+        .collect();
+
     let model = resolve_initial_model(&initial_session, &config.model_catalog);
     let cwd = initial_session.cwd.clone();
     let initial_provider = model.provider_wire_api();
@@ -100,6 +106,8 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         .effective_reasoning_effort;
 
     let mut loop_state = InteractiveLoopState::default();
+
+    let initial_theme_name = crate::onboarding::load_theme_selection();
 
     // Create the root chat widget that owns visible TUI state and input handling.
     let mut chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
@@ -116,8 +124,10 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         enhanced_keys_supported: tui.enhanced_keys_supported(),
         is_first_run: config.saved_models.is_empty(),
         available_models,
+        saved_model_slugs,
         show_model_onboarding: config.show_model_onboarding,
         startup_tooltip_override: Some(format!("Ready in {}", cwd.display())),
+        initial_theme_name,
     });
     tui.set_exit_layout_snapshot_handle(chat_widget.exit_layout_snapshot_handle());
 
@@ -277,8 +287,20 @@ fn handle_tui_event(
                 return Ok(LoopAction::Continue);
             }
 
+            if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if tui.is_alt_screen_active() {
+                    tui.leave_alt_screen()?;
+                } else {
+                    tui.enter_alt_screen()?;
+                }
+                return Ok(LoopAction::Continue);
+            }
+
             loop_state.last_ctrl_c_at = None;
             chat_widget.handle_key_event(key);
+        }
+        TuiEvent::Mouse(mouse_event) => {
+            chat_widget.handle_mouse_event(mouse_event);
         }
         TuiEvent::Paste(pasted) => {
             // Many terminals convert newlines to \r when pasting (e.g., iTerm2),

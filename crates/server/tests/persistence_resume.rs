@@ -1,17 +1,20 @@
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::task;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::stream;
+use futures::stream::{self, Stream};
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
 use devo_core::{FileSystemSkillCatalog, PresetModelCatalog, SkillsConfig};
 use devo_protocol::{
-    ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, StopReason, StreamEvent, Usage,
+    ModelRequest, ModelResponse, ResponseContent, ResponseMetadata, SessionHistoryItemKind,
+    StopReason, StreamEvent, TurnStatus, Usage,
 };
 use devo_provider::ModelProviderSDK;
 use devo_server::{ClientTransportKind, ServerRuntime, ServerRuntimeDependencies};
@@ -99,6 +102,110 @@ impl ModelProviderSDK for CapturingProvider {
 
     fn name(&self) -> &str {
         "capturing-provider"
+    }
+}
+
+/// A stream that yields one TextDelta, then blocks on a oneshot until unblocked or
+/// cancelled, then yields MessageDone.  Used by tests that need to interrupt a turn
+/// mid-stream to exercise the deferred-item completion race.
+struct GatedStream {
+    block_rx: oneshot::Receiver<()>,
+    state: u8,
+}
+
+impl GatedStream {
+    fn new(block_rx: oneshot::Receiver<()>) -> Self {
+        Self { block_rx, state: 0 }
+    }
+}
+
+impl Stream for GatedStream {
+    type Item = Result<StreamEvent>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+    ) -> task::Poll<Option<Self::Item>> {
+        match self.state {
+            0 => {
+                self.state = 1;
+                task::Poll::Ready(Some(Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    text: "mid-interrupt content".into(),
+                })))
+            }
+            1 => match Pin::new(&mut self.block_rx).poll(cx) {
+                task::Poll::Ready(Ok(())) => {
+                    self.state = 2;
+                    task::Poll::Ready(Some(Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-gated".into(),
+                            content: vec![ResponseContent::Text("mid-interrupt content".into())],
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Usage::default(),
+                            metadata: ResponseMetadata::default(),
+                        },
+                    })))
+                }
+                task::Poll::Ready(Err(_)) => task::Poll::Ready(None),
+                task::Poll::Pending => task::Poll::Pending,
+            },
+            2 => {
+                self.state = 3;
+                task::Poll::Ready(None)
+            }
+            _ => task::Poll::Ready(None),
+        }
+    }
+}
+
+/// Provider whose stream blocks mid-way, letting the test send an interrupt while
+/// the assistant item is still in-progress.
+struct GatedProvider {
+    /// Kept alive so the oneshot receiver in GatedStream blocks forever
+    /// (or until the task is aborted, dropping the receiver).
+    _block_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Receiver taken by the first completion_stream call.
+    block_rx: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl GatedProvider {
+    fn new() -> Self {
+        let (tx, rx) = oneshot::channel();
+        Self {
+            _block_tx: Mutex::new(Some(tx)),
+            block_rx: Mutex::new(Some(rx)),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProviderSDK for GatedProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        Ok(ModelResponse {
+            id: "title-gated".into(),
+            content: vec![ResponseContent::Text("Gated title".to_string())],
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Usage::default(),
+            metadata: ResponseMetadata::default(),
+        })
+    }
+
+    async fn completion_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let rx = self
+            .block_rx
+            .lock()
+            .expect("lock block_rx")
+            .take()
+            .expect("completion_stream called more than once");
+        Ok(Box::pin(GatedStream::new(rx)))
+    }
+
+    fn name(&self) -> &str {
+        "gated-provider"
     }
 }
 
@@ -944,6 +1051,7 @@ fn build_runtime_with_provider(
             Box::new(FileSystemSkillCatalog::new(SkillsConfig::default())),
             devo_core::AgentsMdConfig::default(),
             db,
+            data_root.join("config.toml"),
         ),
     ))
 }
@@ -1056,5 +1164,159 @@ async fn wait_for_notification_method(
     })
     .await
     .with_context(|| format!("timed out waiting for {method}"))??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupt_mid_stream_does_not_duplicate_last_item_on_resume() -> Result<()> {
+    let data_root = TempDir::new()?;
+    let gated = Arc::new(GatedProvider::new());
+    let runtime = build_runtime_with_provider(data_root.path(), Arc::clone(&gated) as _)?;
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+
+    let start_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 1,
+                "method": "session/start",
+                "params": {
+                    "cwd": data_root.path(),
+                    "ephemeral": false,
+                    "title": null,
+                    "model": "test-model"
+                }
+            }),
+        )
+        .await
+        .context("session/start")?;
+    let session_id = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionStartResult>,
+    >(start_response)?
+    .result
+    .session
+    .session_id;
+
+    let turn_start_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 2,
+                "method": "turn/start",
+                "params": {
+                    "session_id": session_id,
+                    "input": [{ "type": "text", "text": "interrupt me" }],
+                    "model": null,
+                    "sandbox": null,
+                    "approval_policy": null,
+                    "cwd": null
+                }
+            }),
+        )
+        .await
+        .context("turn/start")?;
+    let turn_id = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::TurnStartResult>,
+    >(turn_start_response)?
+    .result
+    .turn_id;
+
+    // Wait until the assistant item has started streaming.  The provider yields
+    // one TextDelta, then blocks, so once we see the delta notification we know
+    // deferred_assistant has been stored in the session.
+    wait_for_notification_method(&mut notifications_rx, "item/agentMessage/delta").await?;
+
+    // Now interrupt the turn while it is still in-progress.
+    let interrupt_response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 3,
+                "method": "turn/interrupt",
+                "params": {
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                    "reason": "test duplicate bug"
+                }
+            }),
+        )
+        .await
+        .context("turn/interrupt")?;
+    let interrupt_result: devo_server::SuccessResponse<devo_server::TurnInterruptResult> =
+        serde_json::from_value(interrupt_response)?;
+    assert_eq!(interrupt_result.result.status, TurnStatus::Interrupted);
+
+    // The server broadcasts both turn/interrupted and turn/completed.
+    wait_for_notification_method(&mut notifications_rx, "turn/interrupted").await?;
+    wait_for_notification_method(&mut notifications_rx, "turn/completed").await?;
+
+    // Rebuild runtime (simulates restart) and resume the session.
+    let gated2 = Arc::new(GatedProvider::new());
+    let rebuilt = build_runtime_with_provider(data_root.path(), Arc::clone(&gated2) as _)?;
+    rebuilt.load_persisted_sessions().await?;
+    let (rebuilt_cid, _) = initialize_connection(&rebuilt).await?;
+
+    let resume_response = rebuilt
+        .handle_incoming(
+            rebuilt_cid,
+            serde_json::json!({
+                "id": 4,
+                "method": "session/resume",
+                "params": {
+                    "session_id": session_id
+                }
+            }),
+        )
+        .await
+        .context("session/resume")?;
+    let resume_result = serde_json::from_value::<
+        devo_server::SuccessResponse<devo_server::SessionResumeResult>,
+    >(resume_response)?
+    .result;
+
+    // The crucial assertion: no two consecutive items should have the same
+    // kind if they are Assistant or Reasoning — those are the types that
+    // were being duplicated by the event_task post-loop cleanup race.
+    let kinds: Vec<_> = resume_result
+        .history_items
+        .iter()
+        .map(|i| &i.kind)
+        .collect();
+    for window in kinds.windows(2) {
+        if window[0] == window[1] {
+            match window[0] {
+                SessionHistoryItemKind::Assistant | SessionHistoryItemKind::Reasoning => {
+                    anyhow::bail!(
+                        "duplicate consecutive {:?} items detected: indices {:?}",
+                        window[0],
+                        kinds
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(idx, k)| {
+                                if *k == window[0] { Some(idx) } else { None }
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Sanity: there should be exactly one User and one Assistant item.
+    let user_count = kinds
+        .iter()
+        .filter(|k| matches!(k, SessionHistoryItemKind::User))
+        .count();
+    let assistant_count = kinds
+        .iter()
+        .filter(|k| matches!(k, SessionHistoryItemKind::Assistant))
+        .count();
+    assert_eq!(user_count, 1, "expected exactly one User item");
+    assert_eq!(
+        assistant_count, 1,
+        "expected exactly one Assistant item, got history: {kinds:?}"
+    );
+
     Ok(())
 }

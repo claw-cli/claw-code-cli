@@ -130,6 +130,8 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Margin;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -349,6 +351,7 @@ pub(crate) struct ChatComposer {
     status_line_enabled: bool,
     // Agent label injected into the footer's contextual row when multi-agent mode is active.
     active_agent_label: Option<String>,
+    accent_color: Color,
 }
 
 #[derive(Clone, Debug)]
@@ -475,10 +478,15 @@ impl ChatComposer {
             status_line_value: None,
             status_line_enabled: false,
             active_agent_label: None,
+            accent_color: Color::Cyan,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
         this
+    }
+
+    pub(crate) fn set_accent_color(&mut self, color: Color) {
+        self.accent_color = color;
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -3203,16 +3211,19 @@ impl ChatComposer {
                     let personality_command_enabled = self.personality_command_enabled;
                     let realtime_conversation_enabled = self.realtime_conversation_enabled;
                     let audio_device_selection_enabled = self.audio_device_selection_enabled;
-                    let mut command_popup = CommandPopup::new(CommandPopupFlags {
-                        collaboration_modes_enabled,
-                        connectors_enabled,
-                        plugins_command_enabled,
-                        fast_command_enabled,
-                        personality_command_enabled,
-                        realtime_conversation_enabled,
-                        audio_device_selection_enabled,
-                        windows_degraded_sandbox_active: self.windows_degraded_sandbox_active,
-                    });
+                    let mut command_popup = CommandPopup::new(
+                        CommandPopupFlags {
+                            collaboration_modes_enabled,
+                            connectors_enabled,
+                            plugins_command_enabled,
+                            fast_command_enabled,
+                            personality_command_enabled,
+                            realtime_conversation_enabled,
+                            audio_device_selection_enabled,
+                            windows_degraded_sandbox_active: self.windows_degraded_sandbox_active,
+                        },
+                        self.accent_color,
+                    );
                     command_popup.on_composer_text_change(first_line.to_string());
                     self.active_popup = ActivePopup::Command(command_popup);
                 }
@@ -3245,7 +3256,7 @@ impl ChatComposer {
                 }
             }
             _ => {
-                let mut popup = FileSearchPopup::new();
+                let mut popup = FileSearchPopup::new(self.accent_color);
                 if query.is_empty() {
                     popup.set_empty_prompt();
                 } else {
@@ -3275,7 +3286,7 @@ impl ChatComposer {
         }
 
         {
-            let mut popup = SkillPopup::new(mentions);
+            let mut popup = SkillPopup::new(mentions, self.accent_color);
             popup.set_query(&query);
             self.active_popup = ActivePopup::Skill(popup);
         }
@@ -3763,9 +3774,9 @@ impl ChatComposer {
         if !textarea_rect.is_empty() {
             let prompt = if self.input_enabled {
                 if is_zellij {
-                    Span::styled("┃", style.fg(ratatui::style::Color::Cyan))
+                    Span::styled("┃", style.fg(self.accent_color))
                 } else {
-                    "┃".cyan()
+                    Span::styled("┃", Style::default().fg(self.accent_color))
                 }
             } else if is_zellij {
                 Span::styled("┃", style.fg(ratatui::style::Color::DarkGray))

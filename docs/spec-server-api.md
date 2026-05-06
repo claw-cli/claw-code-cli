@@ -1,4 +1,4 @@
-# ClawCodeRust Detailed Specification: Server API
+# devo Detailed Specification: Server API
 
 ## Background and Goals
 
@@ -197,7 +197,9 @@ Rules:
 - returns the currently discovered user and workspace skills
 - skill records include `id`, `name`, `description`, `path`, `enabled`, and `source`
 
-### `skills/changed`
+## Model Methods
+
+### `model/catalog`
 
 Request fields:
 
@@ -205,12 +207,28 @@ Request fields:
 
 Response fields:
 
-- `skills`
+- `models`
 
 Rules:
 
-- re-runs skill discovery and returns the latest skill snapshot
-- this method is poll-style for now; it does not require filesystem watch support
+- returns the merged model catalog (builtin + user `models.json` + project `models.json`)
+- each entry includes `slug`, `display_name`, `channel`, `description`, `provider`, `context_window`, `thinking_capability`, `input_modalities`, `max_tokens`
+
+### `model/saved`
+
+Request fields:
+
+- none
+
+Response fields:
+
+- `models`
+
+Rules:
+
+- returns only models that have been configured with credentials in `config.toml`
+- each entry includes `slug`, `display_name`, `channel`, `description`, `provider_id`, `wire_api`, `context_window`
+- cross-references the model catalog for display metadata
 
 ## Turn Methods
 

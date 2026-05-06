@@ -6,6 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -233,6 +234,8 @@ pub(crate) struct ListSelectionView {
 
     /// Called when the picker is dismissed via Esc/Ctrl+C without selecting.
     on_cancel: OnCancelCallback,
+
+    accent_color: Color,
 }
 
 impl ListSelectionView {
@@ -244,7 +247,11 @@ impl ListSelectionView {
     /// When search is enabled, rows without `search_value` will disappear as
     /// soon as the query is non-empty, which can look like dropped data unless
     /// callers intentionally populate that field.
-    pub fn new(params: SelectionViewParams, app_event_tx: AppEventSender) -> Self {
+    pub fn new(
+        params: SelectionViewParams,
+        app_event_tx: AppEventSender,
+        accent_color: Color,
+    ) -> Self {
         let mut header = params.header;
         if params.title.is_some() || params.subtitle.is_some() {
             let title = params.title.map(|title| Line::from(title.bold()));
@@ -282,6 +289,7 @@ impl ListSelectionView {
             preserve_side_content_bg: params.preserve_side_content_bg,
             on_selection_changed: params.on_selection_changed,
             on_cancel: params.on_cancel,
+            accent_color,
         };
         s.apply_filter();
         s
@@ -893,6 +901,7 @@ impl Renderable for ListSelectionView {
                     &self.state,
                     render_area.height as usize,
                     "no matches",
+                    self.accent_color,
                 ),
                 ColumnWidthMode::AutoAllRows => render_rows_stable_col_widths(
                     render_area,
@@ -901,6 +910,7 @@ impl Renderable for ListSelectionView {
                     &self.state,
                     render_area.height as usize,
                     "no matches",
+                    self.accent_color,
                 ),
                 ColumnWidthMode::Fixed => render_rows_with_col_width_mode(
                     render_area,
@@ -910,6 +920,7 @@ impl Renderable for ListSelectionView {
                     render_area.height as usize,
                     "no matches",
                     ColumnWidthMode::Fixed,
+                    self.accent_color,
                 ),
             };
         }

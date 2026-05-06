@@ -1,4 +1,5 @@
 use crate::events::TranscriptItem;
+use crate::theme::Theme;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
@@ -14,14 +15,16 @@ pub(crate) struct TuiState {
     pub(crate) pending_assistant_index: Option<usize>,
     pub(crate) pending_reasoning_index: Option<usize>,
     pub(crate) pending_tool_items: HashMap<String, usize>,
+    pub(crate) active_theme: Theme,
 }
 
 impl TuiState {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new_with_theme(theme: Theme) -> Self {
         Self {
             title: "claw v2".to_string(),
             status_message: "Ready".to_string(),
             follow_output: true,
+            active_theme: theme,
             ..Default::default()
         }
     }

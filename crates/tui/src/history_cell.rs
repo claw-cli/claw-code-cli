@@ -26,6 +26,7 @@ use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 use crate::text_formatting::truncate_text;
+use crate::theme::ThemeSet;
 use crate::ui_consts::LIVE_PREFIX_COLS;
 use crate::version::CLI_VERSION;
 use crate::wrapping::RtOptions;
@@ -202,6 +203,7 @@ pub(crate) struct UserHistoryCell {
     #[allow(dead_code)]
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
+    pub accent_color: Color,
 }
 
 /// Build logical lines for a user message with styled text elements.
@@ -288,9 +290,10 @@ impl HistoryCell for UserHistoryCell {
             )
             .max(1);
 
+        let accent = self.accent_color;
         let style = user_message_style();
-        let element_style = style.fg(Color::Cyan);
-        let prefix_style = Style::default().fg(Color::Cyan);
+        let element_style = style.fg(accent);
+        let prefix_style = Style::default().fg(accent);
         let blank_prefixed_line = || {
             Line::from(vec![
                 Span::styled("┃ ", prefix_style),
@@ -970,6 +973,19 @@ impl HistoryCell for SessionInfoCell {
     }
 }
 
+#[allow(dead_code)]
+fn random_tip() -> String {
+    let tips = ThemeSet::tips();
+    if tips.is_empty() {
+        return String::new();
+    }
+    use rand::seq::IndexedRandom as _;
+    tips.choose(&mut rand::rng())
+        .copied()
+        .unwrap_or("")
+        .to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_session_info(
     cwd: &Path,
@@ -981,6 +997,7 @@ pub(crate) fn new_session_info(
     is_first_event: bool,
     tooltip_override: Option<String>,
     show_fast_status: bool,
+    accent_color: Color,
 ) -> SessionInfoCell {
     // Header box rendered as history (so it appears at the very top)
     let header = HeaderHistoryCell::new(
@@ -991,6 +1008,7 @@ pub(crate) fn new_session_info(
         show_fast_status,
         cwd.to_path_buf(),
         CLI_VERSION,
+        accent_color,
     );
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
@@ -1062,12 +1080,14 @@ pub(crate) fn new_user_prompt(
     text_elements: Vec<TextElement>,
     local_image_paths: Vec<PathBuf>,
     remote_image_urls: Vec<String>,
+    accent_color: Color,
 ) -> UserHistoryCell {
     UserHistoryCell {
         message,
         text_elements,
         local_image_paths,
         remote_image_urls,
+        accent_color,
     }
 }
 
@@ -1081,9 +1101,11 @@ pub(crate) struct HeaderHistoryCell {
     thinking_implementation: Option<ThinkingImplementation>,
     show_fast_status: bool,
     directory: PathBuf,
+    accent_color: Color,
 }
 
 impl HeaderHistoryCell {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         model: String,
         thinking_capability: ThinkingCapability,
@@ -1092,6 +1114,7 @@ impl HeaderHistoryCell {
         show_fast_status: bool,
         directory: PathBuf,
         version: &'static str,
+        accent_color: Color,
     ) -> Self {
         Self::new_with_style(
             model,
@@ -1102,6 +1125,7 @@ impl HeaderHistoryCell {
             show_fast_status,
             directory,
             version,
+            accent_color,
         )
     }
 
@@ -1115,6 +1139,7 @@ impl HeaderHistoryCell {
         show_fast_status: bool,
         directory: PathBuf,
         version: &'static str,
+        accent_color: Color,
     ) -> Self {
         Self {
             version,
@@ -1125,6 +1150,7 @@ impl HeaderHistoryCell {
             thinking_implementation,
             show_fast_status,
             directory,
+            accent_color,
         }
     }
 
@@ -1237,7 +1263,10 @@ impl HistoryCell for HeaderHistoryCell {
                 spans.push(Span::styled("fast", self.model_style.magenta()));
             }
             spans.push("   ".dim());
-            spans.push(CHANGE_MODEL_HINT_COMMAND.cyan());
+            spans.push(Span::styled(
+                CHANGE_MODEL_HINT_COMMAND,
+                Style::default().fg(self.accent_color),
+            ));
             spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
             spans
         };
@@ -1561,11 +1590,12 @@ impl HistoryCell for FinalMessageSeparator {
 /// End-of-turn summary showing ▣ symbol, model name, and duration.
 ///
 /// Inspired by opencode's assistant message footer:
-/// `▣ model-name · 12.3s`
+/// `▣ model-name · 15s` or `▣ model-name · interrupted`
 #[derive(Debug)]
 pub struct TurnSummaryCell {
     pub model_name: String,
     pub duration: Option<u64>,
+    pub interrupted: bool,
 }
 
 impl TurnSummaryCell {
@@ -1573,7 +1603,31 @@ impl TurnSummaryCell {
         Self {
             model_name,
             duration,
+            interrupted: false,
         }
+    }
+
+    pub(crate) fn new_interrupted(model_name: String) -> Self {
+        Self {
+            model_name,
+            duration: None,
+            interrupted: true,
+        }
+    }
+}
+
+fn format_duration_largest_unit(duration_secs: u64) -> String {
+    if duration_secs >= 604_800 {
+        let weeks = duration_secs / 604_800;
+        format!("{weeks}w")
+    } else if duration_secs >= 86_400 {
+        let days = duration_secs / 86_400;
+        format!("{days}d")
+    } else if duration_secs >= 3_600 {
+        let hours = duration_secs / 3_600;
+        format!("{hours}h")
+    } else {
+        format!("{duration_secs}s")
     }
 }
 
@@ -1582,18 +1636,15 @@ impl HistoryCell for TurnSummaryCell {
         let _ = width;
         let mut spans: Vec<Span<'static>> = vec![
             Span::raw(" ".repeat(LIVE_PREFIX_COLS as usize)),
-            Span::styled("▣", Style::default().fg(Color::Cyan)),
+            Span::styled("▣", Style::default().fg(Color::Rgb(0x8B, 0x94, 0x9E))),
             Span::styled(" ", Style::default()),
             Span::styled(self.model_name.clone(), Style::default().dim()),
         ];
-        if let Some(duration) = self.duration {
-            let formatted = if duration < 60 {
-                format!("{duration}s")
-            } else {
-                let minutes = duration / 60;
-                let seconds = duration % 60;
-                format!("{minutes}m {seconds:02}s")
-            };
+        if self.interrupted {
+            spans.push(Span::styled(" · ", Style::default().dim()));
+            spans.push(Span::styled("interrupted", Style::default().dim()));
+        } else if let Some(duration) = self.duration {
+            let formatted = format_duration_largest_unit(duration);
             spans.push(Span::styled(" · ", Style::default().dim()));
             spans.push(Span::styled(formatted, Style::default().dim()));
         }

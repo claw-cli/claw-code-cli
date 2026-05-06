@@ -6,6 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Block;
@@ -75,10 +76,11 @@ pub(crate) struct AppLinkView {
     screen: AppLinkScreen,
     selected_action: usize,
     complete: bool,
+    accent_color: Color,
 }
 
 impl AppLinkView {
-    pub(crate) fn new(params: AppLinkViewParams, app_event_tx: AppEventSender) -> Self {
+    pub(crate) fn new(params: AppLinkViewParams, app_event_tx: AppEventSender, accent_color: Color) -> Self {
         let AppLinkViewParams {
             app_id,
             title,
@@ -106,6 +108,7 @@ impl AppLinkView {
             screen: AppLinkScreen::Link,
             selected_action: 0,
             complete: false,
+            accent_color,
         }
     }
 
@@ -469,6 +472,7 @@ impl crate::render::renderable::Renderable for AppLinkView {
                 &action_state,
                 action_rows.len().max(1),
                 "No actions",
+                self.accent_color,
             );
         }
 

@@ -70,7 +70,10 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
 
     let registry = handlers::build_registry_from_plan(&ToolPlanConfig::default());
     let provider = load_server_provider(&resolver.user_config_file(), None)?;
-    let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load()?);
+    let model_catalog: Arc<dyn ModelCatalog> = Arc::new(PresetModelCatalog::load_from_config(
+        &resolver.user_config_dir(),
+        args.working_root.as_deref(),
+    )?);
     let skill_workspace_root = args.working_root.clone();
     let project_skill_base = skill_workspace_root
         .as_deref()
@@ -124,6 +127,7 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             skill_catalog,
             config.agents_md_config(),
             db,
+            resolver.user_config_file(),
         ),
     );
     tracing::info!("starting persisted session restore");

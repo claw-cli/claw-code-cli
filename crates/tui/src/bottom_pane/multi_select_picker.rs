@@ -33,6 +33,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -157,6 +158,8 @@ pub(crate) struct MultiSelectPicker {
 
     /// Callback invoked when the user cancels the picker.
     on_cancel: Option<CancelCallback>,
+
+    accent_color: Color,
 }
 
 impl MultiSelectPicker {
@@ -574,6 +577,7 @@ impl Renderable for MultiSelectPicker {
                 &self.state,
                 render_area.height as usize,
                 "no matches",
+                self.accent_color,
             );
         }
 
@@ -628,6 +632,7 @@ pub(crate) struct MultiSelectPickerBuilder {
     on_change: Option<ChangeCallBack>,
     on_confirm: Option<ConfirmCallback>,
     on_cancel: Option<CancelCallback>,
+    accent_color: Color,
 }
 
 impl MultiSelectPickerBuilder {
@@ -644,7 +649,15 @@ impl MultiSelectPickerBuilder {
             on_change: None,
             on_confirm: None,
             on_cancel: None,
+            accent_color: Color::Cyan,
         }
+    }
+
+    /// Sets the accent color for highlighted selection rows.
+    #[allow(dead_code)]
+    pub fn accent_color(mut self, color: Color) -> Self {
+        self.accent_color = color;
+        self
     }
 
     /// Sets the list of selectable items.
@@ -755,6 +768,7 @@ impl MultiSelectPickerBuilder {
             on_change: self.on_change,
             on_confirm: self.on_confirm,
             on_cancel: self.on_cancel,
+            accent_color: self.accent_color,
         };
         view.apply_filter();
         view.update_preview_line();

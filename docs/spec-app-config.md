@@ -115,24 +115,45 @@ pub struct UpdatesConfig {
 ## Partial Layer Format
 
 The filesystem loader reads a partial config layer from TOML and merges it into
-the normalized runtime config.
+the normalized runtime config. Merging is done via `toml::Value` table
+recursion, so any subset of config fields can be present in a partial layer file.
+
+## Provider Config (same file)
+
+The same `config.toml` file also holds provider and model configuration under
+`[model_providers.<id>]` sections:
 
 ```rust
-pub struct AppConfigOverrides {
-    pub enable_auxiliary_model: Option<bool>,
-    pub summary_model: Option<SummaryModelSelection>,
-    pub safety_policy_model: Option<SafetyPolicyModelSelection>,
-    pub context: Option<ContextManageOverrides>,
-    pub server: Option<ServerOverrides>,
-    pub logging: Option<LoggingOverrides>,
-    pub skills: Option<SkillsOverrides>,
-    pub updates: Option<UpdatesOverrides>,
-    pub project_root_markers: Option<Vec<String>>,
+pub struct ProviderConfigFile {
+    pub model_provider: Option<String>,
+    pub model: Option<String>,
+    pub model_thinking_selection: Option<String>,
+    pub model_auto_compact_token_limit: Option<u32>,
+    pub model_context_window: Option<u32>,
+    pub disable_response_storage: Option<bool>,
+    pub preferred_auth_method: Option<PreferredAuthMethod>,
+    pub model_providers: BTreeMap<String, ModelProviderConfig>,
+}
+
+pub struct ModelProviderConfig {
+    pub name: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub wire_api: Option<ProviderWireApi>,
+    pub last_model: Option<String>,
+    pub default_model: Option<String>,
+    pub models: Vec<ConfiguredModel>,
+}
+
+pub struct ConfiguredModel {
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
 }
 ```
 
-Nested override structs follow the same field structure as the normalized
-runtime structs, but every field is optional so file layers can merge cleanly.
+Provider settings are resolved via `resolve_provider_settings()` which selects
+the active provider and model from the config file.
 
 ## Loader Interface
 
@@ -177,8 +198,15 @@ for a newer `devo` version and how often a fresh network request is allowed.
 
 - user config: `DEVO_HOME/config.toml`
 - project config: `<workspace>/.devo/config.toml`
+- user model catalog: `DEVO_HOME/models.json` (JSON, seeded from builtin on first run)
+- project model catalog: `<workspace>/.devo/models.json` (JSON, optional override)
 
-Both files are optional. Missing files are not errors.
+Both TOML files are optional. Missing files are not errors.
+
+The `models.json` file uses the same merge semantics as `config.toml`:
+built-in defaults < user `models.json` < project `models.json`, merged by
+model `slug`. Users can override existing model entries (e.g. change
+`base_instructions` or `context_window`) or add custom models.
 
 ## Out Of Scope
 

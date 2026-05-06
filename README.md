@@ -74,6 +74,146 @@ cargo build --release
 > [!TIP]
 > Make sure you have Rust installed, 1.75+ recommended (via https://rustup.rs/).
 
+## ⚙️ Configuration
+
+Devo reads configuration from a TOML file, merged with higher-priority sources
+overriding lower-priority ones:
+
+1. Built-in defaults (compiled into the binary)
+2. `DEVO_HOME/config.toml` — user-level config (defaults to `~/.devo/config.toml`)
+3. `<workspace>/.devo/config.toml` — project-level config
+4. CLI flags — command-line overrides
+
+Both config files are optional. A minimal config file only needs a provider
+section so devo knows which model to use. Run `devo onboard` for an interactive
+setup that writes this for you.
+
+### Minimal Config Example
+
+```toml
+# ~/.devo/config.toml
+model = "deepseek-v4-flash"
+model_provider = "api.deepseek.com"
+model_thinking_selection = "high"
+
+[model_providers."api.deepseek.com"]
+name = "api.deepseek.com"
+api_key = "sk-..."
+base_url = "https://api.deepseek.com"
+wire_api = "openai_chat_completions"
+
+[[model_providers."api.deepseek.com".models]]
+model = "deepseek-v4-pro"
+
+[[model_providers."api.deepseek.com".models]]
+model = "deepseek-v4-flash"
+```
+
+### Full Config Reference
+
+```toml
+# ── Model Provider (required) ───────────────────────────────────
+model_provider = "api.deepseek.com"          # active provider id
+model = "deepseek-v4-flash"                   # active model slug
+model_thinking_selection = "high"   # optional: thinking/reasoning effort
+model_auto_compact_token_limit = 970000   # optional
+model_context_window = 128000      # optional
+disable_response_storage = false   # optional
+preferred_auth_method = "apikey"   # optional: "apikey"
+
+# ── Provider Profiles ───────────────────────────────────────────
+[model_providers."api.deepseek.com"]
+name = "api.deepseek.com"
+base_url = "https://api.deepseek.com"
+wire_api = "openai_chat_completions"   # openai_chat_completions | openai_responses | anthropic_messages
+api_key = "sk-..."
+default_model = "deepseek-v4-flash"  # optional
+
+[[model_providers.openai.models]]
+model = "deepseek-v4-pro"
+
+[[model_providers.openai.models]]
+model = "deepseek-v4-flash"
+
+# ── App Settings (optional) ─────────────────────────────────────
+enable_auxiliary_model = false     # optional, use a second model for safety/summaries
+summary_model = "UseTurnModel"     # optional, "UseTurnModel" or "UseAxiliaryModel"
+safety_policy_model = "UseAxiliaryModel" # optional
+project_root_markers = [".git"] # optional
+
+[context]
+preserve_recent_turns = 3          # optional, keep last N turns un-compacted
+auto_compact_percent = 97          # optional, trigger compaction at N% of context window
+manual_compaction_enabled = true   # optional
+
+[server]
+listen = []                        # optional, e.g. ["stdio://", "ws://127.0.0.1:3000"]
+max_connections = 32               # optional
+event_buffer_size = 1024           # optional
+idle_session_timeout_secs = 1800   # optional
+persist_ephemeral_sessions = false # optional
+
+[logging]
+level = "info"                     # optional, trace, debug, info, warn, error
+json = false                       # optional, emit JSON-formatted logs
+redact_secrets_in_logs = true      # optional
+
+[logging.file]
+directory = "logs"                 # optional, relative to DEVO_HOME
+filename_prefix = "devo"           # optional
+rotation = "Daily"                 # optional, Never | Minutely | Hourly | Daily
+max_files = 14                     # optional
+
+[skills]
+enabled = true                     # optional
+user_roots = ["skills"]            # optional, dirs to scan for user skills
+workspace_roots = ["skills"]       # optional, dirs to scan for workspace skills
+watch_for_changes = true           # optional
+
+[updates]
+enabled = true                     # optional
+check_on_startup = true            # optional
+check_interval_hours = 24          # optional
+```
+
+### Model Catalog (`~/.devo/models.json`)
+
+A separate JSON file defines available models and their capabilities. On first
+run, the built-in catalog is automatically copied to `~/.devo/models.json` so
+you can customize it. Models are organized by `channel` (brand/vendor).
+
+```json
+[
+  {
+    "slug": "deepseek-v4-pro",
+    "display_name": "deepseek-v4-pro",
+    "channel": "DeepSeek",
+    "provider_family": "openai",
+    "description": "DeepSeek v4 pro model",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "thinking_capability": "toggle",
+    "supported_reasoning_levels": ["high", "max"],
+    "base_instructions": "You are Devo, a coding agent based on DeepSeek...",
+    "input_modalities": ["text"],
+    "priority": 10
+  }
+]
+```
+
+Merge order: builtin defaults < `~/.devo/models.json` < `<workspace>/.devo/models.json`,
+merged by model `slug`. You can override existing entries (e.g. change prompts or
+context window) or add custom models.
+
+The `/model` slash command in the TUI shows only models you have configured
+with credentials in `config.toml`, not the full catalog.
+
+### Environment Variables
+
+| Variable      | Purpose                                       |
+|---------------|-----------------------------------------------|
+| `DEVO_HOME`   | Override the config directory (default: `~/.devo`) |
+
 ## FAQ
 
 ### How is this different from Claude Code?

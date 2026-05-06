@@ -31,6 +31,10 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
+    fn take_theme_selection(&mut self) -> Option<String> {
+        None
+    }
+
     /// Handle Ctrl-C while this view is active.
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         CancellationEvent::NotHandled

@@ -7,6 +7,8 @@ use crossterm::event::KeyEventKind;
 use devo_protocol::user_input::TextElement;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -29,6 +31,7 @@ mod selection_popup_common;
 mod skill_popup;
 pub(crate) mod slash_commands;
 pub(crate) mod textarea;
+mod theme_picker;
 mod unified_exec_footer;
 
 pub(crate) use chat_composer::ChatComposer;
@@ -109,6 +112,9 @@ pub(crate) enum InputResult {
     },
     ModelSelected {
         model: String,
+    },
+    ThemeSelected {
+        name: String,
     },
     None,
 }
@@ -232,6 +238,7 @@ pub(crate) struct BottomPane {
     allow_empty_submit: bool,
     external_history_active: bool,
     external_history_draft: Option<String>,
+    accent_color: Color,
 }
 
 impl BottomPane {
@@ -277,7 +284,14 @@ impl BottomPane {
             allow_empty_submit: false,
             external_history_active: false,
             external_history_draft: None,
+            accent_color: Color::Cyan,
         }
+    }
+
+    pub(crate) fn set_accent_color(&mut self, color: Color) {
+        self.accent_color = color;
+        self.composer.set_accent_color(color);
+        self.request_redraw();
     }
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
@@ -451,7 +465,18 @@ impl BottomPane {
     }
 
     pub(crate) fn open_model_picker(&mut self, entries: Vec<ModelPickerEntry>) {
-        self.push_view(Box::new(ModelPickerView::new(entries)));
+        self.push_view(Box::new(ModelPickerView::new(entries, self.accent_color)));
+    }
+
+    pub(crate) fn open_theme_picker(
+        &mut self,
+        themes: &[crate::theme::Theme],
+        current_name: String,
+    ) {
+        self.push_view(Box::new(theme_picker::ThemePickerView::new(
+            themes,
+            current_name,
+        )));
     }
 
     pub(crate) fn restore_input_from_history(&mut self, text: Option<String>) {
@@ -609,10 +634,15 @@ impl BottomPane {
         if view_complete {
             let mut view = self.view_stack.pop().expect("active view exists");
             let selected_model = view.take_model_selection();
+            let selected_theme = view.take_theme_selection();
             self.request_redraw();
-            return selected_model
-                .map(|model| InputResult::ModelSelected { model })
-                .unwrap_or(InputResult::None);
+            if let Some(model) = selected_model {
+                return InputResult::ModelSelected { model };
+            }
+            if let Some(name) = selected_theme {
+                return InputResult::ThemeSelected { name };
+            }
+            return InputResult::None;
         }
 
         if view_in_paste_burst {
@@ -873,10 +903,11 @@ struct ModelPickerView {
     selection: usize,
     complete: bool,
     selected_model: Option<String>,
+    accent_color: Color,
 }
 
 impl ModelPickerView {
-    fn new(entries: Vec<ModelPickerEntry>) -> Self {
+    fn new(entries: Vec<ModelPickerEntry>, accent_color: Color) -> Self {
         let selection = entries
             .iter()
             .position(|entry| entry.is_current)
@@ -886,6 +917,7 @@ impl ModelPickerView {
             selection,
             complete: false,
             selected_model: None,
+            accent_color,
         }
     }
 
@@ -907,10 +939,11 @@ impl ModelPickerView {
     }
 
     fn render_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = vec![Line::from("Select model").bold()];
+        let mut lines: Vec<Line<'static>> = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
             let mut title = if index == self.selection {
-                Line::from(format!("  {}", entry.display_name)).bold()
+                Line::from(format!("  {}", entry.display_name))
+                    .style(Style::default().fg(self.accent_color).bold())
             } else {
                 Line::from(format!("  {}", entry.display_name)).dim()
             };

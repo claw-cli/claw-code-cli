@@ -3,6 +3,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
@@ -34,14 +35,16 @@ pub(crate) struct SkillPopup {
     query: String,
     mentions: Vec<MentionItem>,
     state: ScrollState,
+    accent_color: Color,
 }
 
 impl SkillPopup {
-    pub(crate) fn new(mentions: Vec<MentionItem>) -> Self {
+    pub(crate) fn new(mentions: Vec<MentionItem>, accent_color: Color) -> Self {
         Self {
             query: String::new(),
             mentions,
             state: ScrollState::new(),
+            accent_color,
         }
     }
 
@@ -204,6 +207,7 @@ impl WidgetRef for SkillPopup {
             &self.state,
             MAX_POPUP_ROWS,
             "no matches",
+            self.accent_color,
         );
         if let Some(hint_area) = hint_area {
             let hint_area = Rect {

@@ -97,6 +97,7 @@ use crate::titles::build_title_generation_request;
 use crate::titles::derive_provisional_title;
 use crate::titles::normalize_generated_title;
 
+mod model_api;
 mod skills;
 
 pub struct ServerRuntime {
@@ -130,6 +131,8 @@ impl ServerRuntime {
                     turn_interrupt: true,
                     approval_requests: true,
                     event_streaming: true,
+                    model_catalog: true,
+                    model_saved: true,
                 },
             },
             deps,
@@ -462,6 +465,8 @@ impl ServerRuntime {
             "session/compact" => Some(self.handle_session_compact(id?, params).await),
             "skills/list" => Some(self.handle_skills_list(id?, params).await),
             "skills/changed" => Some(self.handle_skills_changed(id?, params).await),
+            "model/catalog" => Some(self.handle_model_catalog(id?, params).await),
+            "model/saved" => Some(self.handle_model_saved(id?, params).await),
             "turn/start" => Some(self.handle_turn_start(id?, params).await),
             "turn/interrupt" => Some(self.handle_turn_interrupt(id?, params).await),
             "turn/steer" => Some(self.handle_turn_steer(connection_id, id?, params).await),
@@ -2375,7 +2380,13 @@ impl ServerRuntime {
                     QueryEvent::TurnComplete { .. } => {}
                 }
             }
-            if let (Some(item_id), Some(item_seq)) = (assistant_item_id, assistant_item_seq) {
+            // Complete any deferred items that the interrupt handler didn't already take.
+            // handle_interrupt takes deferred_assistant/deferred_reasoning from the session
+            // and completes them; if they're already None we must skip to avoid persisting duplicates.
+            if let Some((item_id, item_seq, text)) = {
+                let mut session = event_session_arc.lock().await;
+                session.deferred_assistant.take()
+            } {
                 runtime
                     .complete_item(
                         session_id,
@@ -2383,14 +2394,15 @@ impl ServerRuntime {
                         item_id,
                         item_seq,
                         ItemKind::AgentMessage,
-                        TurnItem::AgentMessage(TextItem {
-                            text: assistant_text.clone(),
-                        }),
-                        serde_json::json!({ "title": "Assistant", "text": assistant_text }),
+                        TurnItem::AgentMessage(TextItem { text: text.clone() }),
+                        serde_json::json!({ "title": "Assistant", "text": text }),
                     )
                     .await;
             }
-            if let (Some(item_id), Some(item_seq)) = (reasoning_item_id, reasoning_item_seq) {
+            if let Some((item_id, item_seq, text)) = {
+                let mut session = event_session_arc.lock().await;
+                session.deferred_reasoning.take()
+            } {
                 runtime
                     .complete_item(
                         session_id,
@@ -2398,10 +2410,8 @@ impl ServerRuntime {
                         item_id,
                         item_seq,
                         ItemKind::Reasoning,
-                        TurnItem::Reasoning(TextItem {
-                            text: reasoning_text.clone(),
-                        }),
-                        serde_json::json!({ "title": "Reasoning", "text": reasoning_text }),
+                        TurnItem::Reasoning(TextItem { text: text.clone() }),
+                        serde_json::json!({ "title": "Reasoning", "text": text }),
                     )
                     .await;
             }

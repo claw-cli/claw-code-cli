@@ -1,6 +1,7 @@
 /// Commands that can be invoked by starting a message with a leading slash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SlashCommand {
+    Theme,
     Model,
     Compact,
     Thinking,
@@ -17,6 +18,7 @@ pub enum SlashCommand {
 impl SlashCommand {
     pub fn description(self) -> &'static str {
         match self {
+            SlashCommand::Theme => "switch the UI theme",
             SlashCommand::Model => "choose the active model",
             SlashCommand::Compact => "compact the current session context",
             SlashCommand::Thinking => "choose the active thinking mode",
@@ -33,6 +35,7 @@ impl SlashCommand {
 
     pub fn command(self) -> &'static str {
         match self {
+            SlashCommand::Theme => "theme",
             SlashCommand::Model => "model",
             SlashCommand::Compact => "compact",
             SlashCommand::Thinking => "thinking",
@@ -52,7 +55,17 @@ impl SlashCommand {
     }
 
     pub fn available_during_task(self) -> bool {
-        !matches!(self, SlashCommand::Diff | SlashCommand::Compact)
+        !matches!(
+            self,
+            SlashCommand::Model
+                | SlashCommand::Theme
+                | SlashCommand::Thinking
+                | SlashCommand::Onboard
+                | SlashCommand::Compact
+                | SlashCommand::Diff
+                | SlashCommand::New
+                | SlashCommand::Resume
+        )
     }
 }
 
@@ -61,6 +74,7 @@ impl std::str::FromStr for SlashCommand {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "theme" => Ok(Self::Theme),
             "model" => Ok(Self::Model),
             "compact" => Ok(Self::Compact),
             "thinking" => Ok(Self::Thinking),
@@ -79,6 +93,7 @@ impl std::str::FromStr for SlashCommand {
 
 pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
     vec![
+        ("theme", SlashCommand::Theme),
         ("model", SlashCommand::Model),
         ("compact", SlashCommand::Compact),
         ("thinking", SlashCommand::Thinking),

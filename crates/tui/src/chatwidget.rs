@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use devo_protocol::InputItem;
 use devo_protocol::Model;
 use devo_protocol::ProviderWireApi;
@@ -64,6 +65,7 @@ use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::streaming::controller::StreamController;
+use crate::theme::ThemeSet;
 use crate::tui::frame_requester::FrameRequester;
 use devo_utils::ansi_escape::ansi_escape_line;
 
@@ -77,8 +79,11 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
     pub(crate) available_models: Vec<Model>,
+    /// Configured model slugs from config.toml used by the /model picker.
+    pub(crate) saved_model_slugs: Vec<String>,
     pub(crate) show_model_onboarding: bool,
     pub(crate) startup_tooltip_override: Option<String>,
+    pub(crate) initial_theme_name: Option<String>,
 }
 
 /// Resolved runtime session projection owned by the chat widget.
@@ -237,10 +242,13 @@ pub(crate) struct ChatWidget {
     active_reasoning_cell: Option<history_cell::AgentMessageCell>,
     stream_controller: Option<StreamController>,
     available_models: Vec<Model>,
+    saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
     resume_browser: Option<ResumeBrowserState>,
     resume_browser_loading: bool,
     picker_mode: Option<PickerMode>,
+    theme_set: ThemeSet,
+    active_theme_name: String,
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
@@ -249,6 +257,9 @@ pub(crate) struct ChatWidget {
     active_turn_id: Option<TurnId>,
     busy: bool,
     exit_layout_snapshot: Arc<Mutex<ExitLayoutSnapshot>>,
+    selection_mode: bool,
+    selected_user_cell_index: Option<usize>,
+    user_cell_history_indices: Vec<usize>,
 }
 
 impl ChatWidget {
@@ -262,6 +273,7 @@ impl ChatWidget {
         thinking_selection: Option<&str>,
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
+        accent_color: Color,
     ) -> Box<dyn HistoryCell> {
         let model = model.cloned().unwrap_or_else(|| Model {
             slug: "unknown".to_string(),
@@ -281,6 +293,7 @@ impl ChatWidget {
             is_first_run,
             startup_tooltip_override,
             /*show_fast_status*/ false,
+            accent_color,
         ))
     }
 
@@ -368,18 +381,19 @@ impl ChatWidget {
         ])
     }
 
-    fn failed_dot_prefix() -> Line<'static> {
+    fn failed_dot_prefix(&self) -> Line<'static> {
+        let error_color = self.active_error_color();
         Line::from(vec![
-            Span::styled("▌", Style::default().fg(Color::Rgb(255, 110, 110))),
+            Span::styled("▌", Style::default().fg(error_color)),
             " ".into(),
         ])
     }
 
-    fn dot_prefix(status: DotStatus) -> Line<'static> {
+    fn dot_prefix(&self, status: DotStatus) -> Line<'static> {
         match status {
             DotStatus::Pending => Self::pending_dot_prefix(),
             DotStatus::Completed => Self::completed_dot_prefix(),
-            DotStatus::Failed => Self::failed_dot_prefix(),
+            DotStatus::Failed => self.failed_dot_prefix(),
         }
     }
 
@@ -463,12 +477,14 @@ impl ChatWidget {
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
     ) {
+        let accent = self.active_accent_color();
         self.history.push(Self::build_header_box(
             &self.session.cwd,
             self.session.model.as_ref(),
             self.thinking_selection.as_deref(),
             is_first_run,
             startup_tooltip_override,
+            accent,
         ));
     }
 
@@ -481,9 +497,6 @@ impl ChatWidget {
     ) {
         self.history.clear();
         self.next_history_flush_index = 0;
-        self.push_session_header(
-            /*is_first_run*/ false, /*startup_tooltip_override*/ None,
-        );
 
         tracing::trace!(
             session_id,
@@ -552,8 +565,10 @@ impl ChatWidget {
             enhanced_keys_supported,
             is_first_run,
             available_models,
+            saved_model_slugs,
             show_model_onboarding,
             startup_tooltip_override,
+            initial_theme_name,
         } = common;
 
         // Prefer an explicit startup selection, but fall back to the model's default thinking mode.
@@ -570,8 +585,17 @@ impl ChatWidget {
             queued_user_messages.push_back(initial_user_message);
         }
 
+        let theme_set = ThemeSet::default();
+        let active_theme_name = initial_theme_name
+            .filter(|name| theme_set.find(name).is_some())
+            .unwrap_or_else(|| ThemeSet::default_theme().to_string());
+        let initial_accent_color = theme_set
+            .find(&active_theme_name)
+            .map(|t| t.accent_color)
+            .unwrap_or(Color::Cyan);
+
         // Build the bottom composer first, since the widget delegates all live input handling there.
-        let bottom_pane = BottomPane::new(BottomPaneParams {
+        let mut bottom_pane = BottomPane::new(BottomPaneParams {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             has_input_focus: true,
@@ -581,6 +605,7 @@ impl ChatWidget {
             skills: None,
             animations_enabled: true,
         });
+        bottom_pane.set_accent_color(initial_accent_color);
 
         let history: Vec<Box<dyn HistoryCell>> = vec![Self::build_header_box(
             &initial_session.cwd,
@@ -588,6 +613,7 @@ impl ChatWidget {
             thinking_selection.as_deref(),
             is_first_run,
             startup_tooltip_override,
+            initial_accent_color,
         )];
 
         // Assemble the full widget state from the initial session, composer, history, and queues.
@@ -612,10 +638,13 @@ impl ChatWidget {
             active_reasoning_cell: None,
             stream_controller: None,
             available_models,
+            saved_model_slugs,
             onboarding_step: None,
             resume_browser: None,
             resume_browser_loading: false,
             picker_mode: None,
+            theme_set,
+            active_theme_name,
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -624,6 +653,9 @@ impl ChatWidget {
             active_turn_id: None,
             busy: false,
             exit_layout_snapshot: Arc::new(Mutex::new(ExitLayoutSnapshot::default())),
+            selection_mode: false,
+            selected_user_cell_index: None,
+            user_cell_history_indices: Vec::new(),
         };
 
         // Model onboarding can inject additional startup UI before the first frame is drawn.
@@ -646,6 +678,9 @@ impl ChatWidget {
         }
         if let Some(result) = self.bottom_pane.poll_onboarding_result() {
             self.handle_onboarding_result(result);
+        }
+        if self.handle_selection_mode_key(key) {
+            return;
         }
         match self.bottom_pane.handle_key_event(key) {
             InputResult::Submitted {
@@ -686,8 +721,129 @@ impl ChatWidget {
                 Some(PickerMode::Thinking) => self.apply_thinking_selection(model),
                 _ => self.apply_model_selection(model),
             },
+            InputResult::ThemeSelected { name } => {
+                self.apply_theme_selection(name);
+            }
             InputResult::None => {}
         }
+    }
+
+    fn handle_selection_mode_key(&mut self, key: KeyEvent) -> bool {
+        let alt_up = key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::ALT);
+        let alt_down = key.code == KeyCode::Down && key.modifiers.contains(KeyModifiers::ALT);
+
+        if !alt_up && !alt_down {
+            if !self.selection_mode {
+                return false;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    self.exit_selection_mode();
+                    return true;
+                }
+                KeyCode::Enter => {
+                    self.open_selection_action_menu();
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+
+        if self.busy {
+            return false;
+        }
+
+        self.refresh_user_cell_indices();
+        let len = self.user_cell_history_indices.len();
+        if len == 0 {
+            return false;
+        }
+
+        if !self.selection_mode {
+            self.selection_mode = true;
+            // Start from the last user cell if no selection yet
+            self.selected_user_cell_index = Some(len - 1);
+            self.update_selection_status();
+            self.frame_requester.schedule_frame();
+            return true;
+        }
+
+        let current = self.selected_user_cell_index.unwrap_or(0);
+        let new = if alt_up {
+            current.saturating_sub(1)
+        } else {
+            (current + 1).min(len - 1)
+        };
+        if new != current {
+            self.selected_user_cell_index = Some(new);
+            self.update_selection_status();
+            self.frame_requester.schedule_frame();
+        }
+        true
+    }
+
+    fn exit_selection_mode(&mut self) {
+        self.selection_mode = false;
+        self.selected_user_cell_index = None;
+        self.bottom_pane
+            .set_status_line(Some(Line::from(self.session_summary_text()).dim()));
+        self.bottom_pane.set_status_line_enabled(true);
+        self.frame_requester.schedule_frame();
+    }
+
+    fn update_selection_status(&mut self) {
+        if let Some(idx) = self.selected_user_cell_index {
+            let turn_num = idx + 1;
+            self.bottom_pane.set_status_line(Some(
+                Line::from(format!(
+                    "Selected turn {turn_num} · Enter to act  Esc to cancel"
+                ))
+                .dim(),
+            ));
+            self.bottom_pane.set_status_line_enabled(true);
+        }
+    }
+
+    fn refresh_user_cell_indices(&mut self) {
+        self.user_cell_history_indices = self
+            .history
+            .iter()
+            .enumerate()
+            .filter_map(|(i, cell)| {
+                let cell_ref: &dyn HistoryCell = cell.as_ref();
+                cell_ref
+                    .as_any()
+                    .downcast_ref::<history_cell::UserHistoryCell>()
+                    .map(|_| i)
+            })
+            .collect();
+    }
+
+    fn open_selection_action_menu(&mut self) {
+        if self.selection_mode {
+            // Load the selected user message text into the composer for editing
+            // and exit selection mode.
+            if let Some(idx) = self.selected_user_cell_index
+                && let Some(history_idx) = self.user_cell_history_indices.get(idx)
+                && let Some(cell) = self.history.get(*history_idx)
+                && let Some(user_cell) = cell
+                    .as_ref()
+                    .as_any()
+                    .downcast_ref::<history_cell::UserHistoryCell>()
+            {
+                let text = user_cell.message.clone();
+                self.bottom_pane.restore_input_from_history(Some(text));
+                self.exit_selection_mode();
+                return;
+            }
+        }
+        self.exit_selection_mode();
+    }
+
+    pub(crate) fn handle_mouse_event(&mut self, _mouse: crossterm::event::MouseEvent) {
+        // Mouse events are only actionable in alt-screen mode.
+        // In inline mode, they are ignored.
+        self.frame_requester.schedule_frame();
     }
 
     pub(crate) fn handle_paste(&mut self, text: String) {
@@ -707,6 +863,9 @@ impl ChatWidget {
             AppEvent::SubmitUserInput { text } => self.submit_text(text),
             AppEvent::ModelSelected { model } => {
                 self.apply_model_selection(model);
+            }
+            AppEvent::ThemeSelected { name } => {
+                self.apply_theme_selection(name);
             }
             AppEvent::ThinkingSelected { value } => self.set_thinking_selection(value),
             AppEvent::StatusMessageChanged { message } => self.set_status_message(message),
@@ -741,6 +900,7 @@ impl ChatWidget {
             | AppEvent::RunSlashCommand { .. }
             | AppEvent::OpenModelPicker
             | AppEvent::OpenThinkingPicker
+            | AppEvent::OpenThemePicker
             | AppEvent::StatusLineBranchUpdated { .. }
             | AppEvent::StartFileSearch(_)
             | AppEvent::StatusLineSetup { .. }
@@ -885,7 +1045,7 @@ impl ChatWidget {
                 if !lines.is_empty() {
                     self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
                         lines,
-                        Self::dot_prefix(dot_status),
+                        self.dot_prefix(dot_status),
                         "  ",
                         false,
                     ));
@@ -906,7 +1066,7 @@ impl ChatWidget {
                 self.frame_requester.schedule_frame();
             }
             WorkerEvent::TurnFinished {
-                stop_reason: _,
+                stop_reason,
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
@@ -920,11 +1080,6 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                let elapsed = self
-                    .bottom_pane
-                    .status_widget()
-                    .map(|s| s.elapsed_seconds())
-                    .filter(|&secs| secs > 0);
                 let model_name = self
                     .session
                     .model
@@ -934,7 +1089,18 @@ impl ChatWidget {
                     .unwrap_or_default();
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
-                self.add_to_history(history_cell::TurnSummaryCell::new(model_name, elapsed));
+                let was_interrupted = stop_reason.contains("Interrupted");
+                let cell = if was_interrupted {
+                    history_cell::TurnSummaryCell::new_interrupted(model_name)
+                } else {
+                    let elapsed = self
+                        .bottom_pane
+                        .status_widget()
+                        .map(|s| s.elapsed_seconds())
+                        .filter(|&secs| secs > 0);
+                    history_cell::TurnSummaryCell::new(model_name, elapsed)
+                };
+                self.add_to_history(cell);
             }
             WorkerEvent::TurnFailed {
                 message,
@@ -952,6 +1118,14 @@ impl ChatWidget {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
+                let model_name = self
+                    .session
+                    .model
+                    .as_ref()
+                    .map(|m| m.display_name.clone())
+                    .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
+                    .unwrap_or_default();
+                self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(model_name));
                 self.add_to_history(history_cell::new_error_event(message));
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
@@ -1011,9 +1185,6 @@ impl ChatWidget {
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
                 self.prompt_token_estimate = 0;
-                self.push_session_header(
-                    /*is_first_run*/ false, /*startup_tooltip_override*/ None,
-                );
                 self.set_status_message("New session ready; send a prompt to start it");
             }
             WorkerEvent::SessionSwitched {
@@ -1143,6 +1314,7 @@ impl ChatWidget {
             user_message.text_elements.clone(),
             local_image_paths,
             user_message.remote_image_urls.clone(),
+            self.active_accent_color(),
         ));
 
         self.app_event_tx
@@ -1179,35 +1351,33 @@ impl ChatWidget {
                 self.begin_onboarding();
             }
             SlashCommand::Status => {
-                let context_line = self.context_budget().map_or_else(
-                    || "  context:  n/a".to_string(),
-                    |(used, usable, total)| {
-                        format!(
-                            "  context:  {} / {} usable ({} total)",
-                            Self::format_token_count(used),
-                            Self::format_token_count(usable),
-                            Self::format_token_count(total)
-                        )
-                    },
-                );
-                self.add_to_history(PlainHistoryCell::new(vec![
-                    Line::from("Status".bold()),
+                let model = self
+                    .session
+                    .model
+                    .as_ref()
+                    .map(|m| m.slug.as_str())
+                    .unwrap_or("unknown");
+                let thinking = self.thinking_selection.as_deref().unwrap_or("default");
+                let cwd = self.session.cwd.display().to_string();
+                let turns = self.turn_count;
+                let tokens_in = Self::format_token_count(self.total_input_tokens);
+                let tokens_out = Self::format_token_count(self.total_output_tokens);
+                let lines = history_cell::with_border(vec![
+                    Line::from("Session Status".bold()),
                     Line::from(""),
+                    Line::from(format!("  model:       {model}")),
+                    Line::from(format!("  thinking:    {thinking}")),
+                    Line::from(format!("  cwd:         {cwd}")),
+                    Line::from(format!("  turns:       {turns}")),
                     Line::from(format!(
-                        "  model:    {}\n  thinking: {}\n  tokens:   {} in / {} out\n{}\n  busy:     {}",
-                        self.session
-                            .model
-                            .as_ref()
-                            .map(|model| model.slug.as_str())
-                            .unwrap_or("unknown"),
-                        self.thinking_selection.as_deref().unwrap_or("default"),
-                        self.total_input_tokens,
-                        self.total_output_tokens,
-                        context_line,
-                        self.busy
+                        "  tokens:      \u{2191}{tokens_in} \u{2193}{tokens_out}",
                     )),
-                ]));
+                ]);
+                self.add_to_history(PlainHistoryCell::new(lines));
                 self.set_status_message("Session status shown");
+            }
+            SlashCommand::Theme => {
+                self.open_theme_picker();
             }
             SlashCommand::Model => {
                 if argument.is_empty() {
@@ -1246,6 +1416,7 @@ impl ChatWidget {
                         Vec::new(),
                         Vec::new(),
                         Vec::new(),
+                        self.active_accent_color(),
                     ));
                     self.app_event_tx
                         .send(AppEvent::Command(AppCommand::SteerTurn {
@@ -1439,7 +1610,7 @@ impl ChatWidget {
             self.add_history_entry_without_redraw(Box::new(
                 history_cell::AgentMessageCell::new_ai_response_with_prefix(
                     lines,
-                    Self::dot_prefix(status),
+                    self.dot_prefix(status),
                     "  ",
                     false,
                 ),
@@ -1497,6 +1668,7 @@ impl ChatWidget {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    self.active_accent_color(),
                 )));
             }
             TranscriptItemKind::Assistant => {
@@ -1655,12 +1827,14 @@ impl ChatWidget {
         if self.history.is_empty() {
             return;
         }
+        let accent = self.active_accent_color();
         self.history[0] = Self::build_header_box(
             &self.session.cwd,
             self.session.model.as_ref(),
             self.thinking_selection.as_deref(),
             /*is_first_run*/ false,
             None,
+            accent,
         );
     }
 
@@ -1836,6 +2010,7 @@ impl ChatWidget {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                self.active_accent_color(),
             ));
         }
         self.queued_count = self.queued_count.saturating_sub(1);
@@ -1969,17 +2144,52 @@ impl ChatWidget {
         self.picker_mode = Some(PickerMode::Model);
         let current_slug = self.session.model.as_ref().map(|model| model.slug.as_str());
         let entries = self
-            .available_models
+            .saved_model_slugs
             .iter()
+            .filter_map(|slug| {
+                self.available_models
+                    .iter()
+                    .find(|model| model.slug == *slug)
+            })
             .map(|model| ModelPickerEntry {
                 slug: model.slug.clone(),
                 display_name: model.display_name.clone(),
-                description: model.description.clone(),
+                description: model.channel.clone(),
                 is_current: current_slug == Some(model.slug.as_str()),
             })
             .collect();
         self.bottom_pane.open_model_picker(entries);
         self.set_status_message("Select a model");
+    }
+
+    fn open_theme_picker(&mut self) {
+        self.bottom_pane
+            .open_theme_picker(&self.theme_set.themes, self.active_theme_name.clone());
+        self.set_status_message("Select a theme");
+    }
+
+    fn apply_theme_selection(&mut self, name: String) {
+        if let Some(theme) = self.theme_set.find(&name).cloned() {
+            self.active_theme_name = name.clone();
+            self.bottom_pane.set_accent_color(theme.accent_color);
+            let _ = crate::onboarding::save_theme_selection(&name);
+            self.set_status_message(format!("Theme set to {name}"));
+            self.frame_requester.schedule_frame();
+        }
+    }
+
+    fn active_accent_color(&self) -> Color {
+        self.theme_set
+            .find(&self.active_theme_name)
+            .map(|t| t.accent_color)
+            .unwrap_or(Color::Cyan)
+    }
+
+    fn active_error_color(&self) -> Color {
+        self.theme_set
+            .find(&self.active_theme_name)
+            .map(|t| t.error_color)
+            .unwrap_or(Color::Rgb(0xF8, 0x51, 0x49))
     }
 
     fn apply_model_selection(&mut self, slug: String) {

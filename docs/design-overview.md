@@ -1,5 +1,5 @@
-# ClawCodeRust Design
-This document defines the specification for an SWE coding agent named devo, it is Claude Code / Codex Inspired. The documentation's goal is to guide implementation.
+# devo Design
+This document defines the specification for the devo coding agent. The documentation's goal is to guide implementation.
 
 ## 1. Overview
 Detailed specification: [Architecture Overview](./spec-overview-architecture.md)
@@ -10,8 +10,15 @@ The target crate split is:
 - `devo-tools`: built-in tool contracts and tool execution adapters
 - `devo-safety`: sandboxing, redaction, approvals, and safety policy
 - `devo-mcp`: MCP server lifecycle, discovery, and capability bridging
+- `devo-protocol`: shared structured types across crates (shell summaries, provider wire API enums, etc.)
 - `devo-server`: transport-neutral runtime API server
-- `devo-utils`: shared low-level utilities that are broadly reusable and not owned by a higher-level domain crate
+- `devo-client`: client library for connecting to devo-server
+- `devo-tui`: interactive terminal UI (ratatui/crossterm)
+- `devo-cli`: CLI binary entrypoint, config loading, command dispatch
+- `devo-utils`: shared low-level utilities (home dir, config paths, etc.)
+- `devo-arg0`: OS-specific arg0/binary path resolution
+- `devo-tasks`: background task state and long-running execution
+- `devo-file-search`: separate file-search binary for search functionality
 
 All crates must implement observability. At minimum, each crate must emit structured logs, useful tracing spans for long-running operations, and crate-appropriate metrics. Logging and observability are not optional add-ons; they are part of the baseline implementation contract.
 
@@ -192,10 +199,16 @@ Tools are a first-class subsystem. They are not just exposed model functions; th
 
 The first milestone should include at least:
 
-- shell command execution
-- file search
-- file reading
-- patch or file editing support
+- shell command execution (`bash` / `shell_command`)
+- file search (`glob` for filenames, `grep` for content)
+- file reading (`read`)
+- file writing (`write` / `file_write`)
+- patch or file editing support (`apply_patch`)
+- web content fetching (`webfetch`)
+- web search (`websearch`)
+- sub-agent task dispatch (`task`)
+- interactive user questions (`question`)
+- structured task list management (`todo_write`)
 
 Tool execution must follow a stable lifecycle:
 
@@ -234,7 +247,7 @@ The skills subsystem must support:
 Detailed specification: [Skills](./spec-skills.md)
 
 ## 1.8 Server API
-The agent runtime exposes a server API designed for integration with various user interfaces such as CLI tools, desktop applications, and IDE extensions. The API supports two transport: stdio (for local, process-based communication) and WebSocket (for networked or remote clients), follows a JSON-RPC 2.0 protocol (with the `"jsonrpc":"2.0"` header omitted on the wire). for structured request-response interactions. In addition to standard method calls for driving agent behavior (e.g., submitting user input, controlling execution), the API provides an event subscription mechanism, allowing clients to receive real-time updates such as streaming model outputs, tool execution progress, approval requests, and state changes.
+The agent runtime exposes a server API designed for integration with various user interfaces such as CLI tools, desktop applications, and IDE extensions. The API supports two transports: stdio (for local, process-based communication) and WebSocket (for networked or remote clients), follows a JSON-RPC 2.0 protocol (with the `"jsonrpc":"2.0"` header omitted on the wire) for structured request-response interactions. In addition to standard method calls for driving agent behavior (e.g., submitting user input, controlling execution), the API provides an event subscription mechanism, allowing clients to receive real-time updates such as streaming model outputs, tool execution progress, approval requests, and state changes.
 
 - stdio (`--listen stdio://`, default): newline-delimited JSON (JSONL)
 - websocket (`--listen ws://IP:PORT`): one JSON-RPC message per websocket text frame
@@ -304,4 +317,6 @@ The detailed specifications below are the implementation-facing source of truth 
 - [Skills](./spec-skills.md)
 - [Server API](./spec-server-api.md)
 - [App Config](./spec-app-config.md)
+- [Response Item IR](./spec-response-item.md)
+- [Interactive TUI](./spec-interactive-tui-v2.md)
 - [Observability via Architecture Overview](./spec-overview-architecture.md)

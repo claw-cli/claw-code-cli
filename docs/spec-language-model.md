@@ -36,12 +36,11 @@ The overview defines the model contract and budget knobs but does not prescribe 
 
 ## Module Responsibilities and Boundaries
 
-`devo-core::model` owns:
+`devo-core::model_catalog` and `devo-core::model_preset` own:
 
-- Model catalog loading.
-- Capability lookup.
-- Provider-specific request normalization.
-- Fallback model resolution.
+- Model catalog loading from embedded JSON and filesystem overrides.
+- Capability lookup and model resolution.
+- Conversion from raw `ModelPreset` to runtime `Model`.
 
 `devo-core` owns:
 
@@ -51,7 +50,7 @@ The overview defines the model contract and budget knobs but does not prescribe 
 
 ## Model Catalog File Format
 
-The overview requires a config JSON file containing an array of model configs.
+The built-in model catalog is embedded at compile time from `crates/core/models.json`. At runtime, optional override files are merged on top:
 
 Required path:
 
@@ -65,99 +64,108 @@ Optional project override:
 <workspace>/.devo/models.json
 ```
 
-Merge order:
+Merge order by `slug`: built-in defaults < user file < project file. On first
+run, the built-in catalog is automatically copied to `~/.devo/models.json`.
 
-1. Built-in defaults compiled into the binary
-2. User-level file
-3. Project-level file
+```rust
+pub struct Model {
+    pub slug: String,
+    pub display_name: String,
+    pub provider: ProviderWireApi,
+    pub channel: Option<String>,           // vendor/brand grouping (e.g. "DeepSeek")
+    ...
+}
+```
 
-Model `slug` is the merge key.
+The `channel` field groups models by vendor for UI display (onboarding,
+model picker).
 
 ## Core Data Structures
 
 ```rust
-pub struct ModelConfig {
+pub struct Model {
     pub slug: String,
     pub display_name: String,
+    pub provider: ProviderWireApi,
     pub description: Option<String>,
-    pub default_reasoning_level: ReasoningLevel,
-    pub supported_reasoning_levels: Vec<ReasoningLevel>,
+    pub thinking_capability: ThinkingCapability,
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    pub thinking_implementation: Option<ThinkingImplementation>,
     pub base_instructions: String,
-    pub model_messages: Option<Vec<ModelMessageTemplate>>,
-    pub shell_type: ShellToolType,
-    pub apply_patch_tool_type: ApplyPatchToolType,
-    pub web_search_tool_type: WebSearchToolType,
-    pub supports_parallel_tool_calls: bool,
-    pub supports_search_tool: bool,
-    pub experimental_supported_tools: Vec<String>,
-    pub support_verbosity: bool,
-    pub default_verbosity: Verbosity,
-    pub supports_reasoning_summaries: bool,
-    pub default_reasoning_summary: ReasoningSummaryMode,
     pub context_window: u32,
-    pub effective_context_window_percent: u8,
-    pub auto_compact_token_limit: Option<u32>,
+    pub effective_context_window_percent: Option<u8>,
     pub truncation_policy: TruncationPolicyConfig,
     pub input_modalities: Vec<InputModality>,
     pub supports_image_detail_original: bool,
-    pub visibility: ModelVisibility,
-    pub supported_in_api: bool,
-    pub priority: i32,
-    pub availability_nux: Option<String>,
-    pub upgrade: Option<String>,
-    pub used_fallback_model_metadata: bool,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<f64>,
+    pub max_tokens: Option<u32>,
 }
 ```
 
-Enums must be explicit and closed:
+```rust
+pub struct ModelPreset {
+    pub slug: String,
+    pub display_name: String,
+    pub provider: ProviderWireApi,
+    pub description: Option<String>,
+    pub thinking_capability: ThinkingCapability,
+    pub supported_reasoning_levels: Vec<ReasoningEffort>,
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+    pub thinking_implementation: Option<ThinkingImplementation>,
+    pub base_instructions: String,
+    pub context_window: u32,
+    pub effective_context_window_percent: Option<u8>,
+    pub truncation_policy: TruncationPolicyConfig,
+    pub input_modalities: Vec<InputModality>,
+    pub supports_image_detail_original: bool,
+    pub api_configured: bool,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
+    pub top_k: Option<f64>,
+    pub max_tokens: Option<u32>,
+    pub priority: i32,
+}
+```
 
-- `ReasoningLevel = Low | Medium | High | XHigh`
-- `Verbosity = Low | Medium | High`
+`ModelPreset` is deserialized from the JSON catalog and converted into the runtime `Model` type via `From<ModelPreset>`. The runtime works exclusively with `Model`.
+
+Relevant enums:
+
+- `ThinkingCapability = Unsupported | Toggle | ToggleWithLevels(Vec<ReasoningEffort>) | Levels(Vec<ReasoningEffort>)`
+- `ReasoningEffort = Low | Medium | High | XHigh`
 - `InputModality = Text | Image`
-- `ModelVisibility = Visible | Hidden | Experimental`
+- `ProviderWireApi = OpenAIChatCompletions | OpenAIResponses | AnthropicMessages`
 
 ## Interface Definitions
 
 ```rust
 pub trait ModelCatalog {
-    fn list_visible(&self) -> Vec<&ModelConfig>;
-    fn get(&self, slug: &str) -> Option<&ModelConfig>;
-    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&ModelConfig, ModelConfigError>;
+    fn list_visible(&self) -> Vec<&Model>;
+    fn get(&self, slug: &str) -> Option<&Model>;
+    fn resolve_for_turn(&self, requested: Option<&str>) -> Result<&Model, ModelError>;
 }
 ```
 
 ```rust
-pub struct ResolvedTurnModel {
-    pub config: ModelConfig,
-    pub effective_compact_limit: u32,
-    pub effective_input_budget: u32,
-    pub tool_capabilities: ToolCapabilitySet,
+pub struct PresetModelCatalog {
+    models: Vec<Model>,
 }
 ```
 
-Provider request interface additions:
-
-```rust
-pub struct ModelInvocation {
-    pub model: String,
-    pub system: PromptEnvelope,
-    pub messages: Vec<RequestMessage>,
-    pub tools: Vec<ToolDefinition>,
-    pub settings: TurnModelSettings,
-}
-```
+`PresetModelCatalog` is the concrete implementation. It loads the built-in model catalog from embedded JSON (`crates/core/models.json`) at compile time as a fallback. At runtime, user-level and project-level `models.json` files may override or extend the catalog.
 
 ## Prompt Assembly
 
 Prompt assembly inputs, in order:
 
-1. Base instructions from `ModelConfig.base_instructions`
-2. Optional structured `model_messages`
-3. Safety constraint messages
-4. Context summary items
-5. Full recent conversation items
-6. Current user input
-7. Tool definitions
+1. Base instructions from `Model.base_instructions`
+2. Safety constraint messages
+3. Context summary items
+4. Full recent conversation items
+5. Current user input
+6. Tool definitions
 
 Requirements:
 
@@ -218,34 +226,25 @@ Rules:
 
 Model resolution for a turn:
 
-1. Load catalog.
-2. Resolve requested slug or default highest-priority visible model.
+1. Load catalog via `PresetModelCatalog::load()`.
+2. Resolve requested slug or fall back to the highest-priority visible model.
 3. Validate turn-level overrides.
 4. Derive effective context budget and tool capability set.
-5. Pass `ResolvedTurnModel` to prompt builder and provider.
+5. Pass resolved `Model` to prompt builder and provider.
 
 Fallback behavior:
 
 1. Provider error indicates unsupported model or routing failure.
 2. Resolve fallback candidate by same provider family or configured upgrade target.
-3. Record `used_fallback_model_metadata = true` in turn metadata.
+3. Record fallback metadata in turn metadata.
 4. Rebuild request if capabilities differ.
 
 ## Error Handling Strategy
 
-`ModelConfigError` variants:
+`ModelError` variants:
 
 - `ModelNotFound`
-- `InvalidCatalog`
-- `UnsupportedTurnOverride`
-- `ContextBudgetInvalid`
-- `CapabilityMismatch`
-
-`ProviderSelectionError` variants:
-
-- `ProviderUnavailable`
-- `FallbackUnavailable`
-- `ProviderModelMismatch`
+- `NoVisibleModels`
 
 ## Concurrency and Async Model
 
@@ -310,8 +309,7 @@ Acceptance criteria:
 
 Assumptions:
 
-- Model catalogs remain JSON for compatibility with the overview.
-- `model_messages` is provider-neutral and interpreted by prompt assembly, not by provider adapters directly.
+- Model catalogs remain JSON for compatibility.
 
 Open questions:
 .

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use devo_file_search::FileMatch;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::widgets::WidgetRef;
 
 use crate::render::Insets;
@@ -26,16 +27,18 @@ pub(crate) struct FileSearchPopup {
     matches: Vec<FileMatch>,
     /// Shared selection/scroll state.
     state: ScrollState,
+    accent_color: Color,
 }
 
 impl FileSearchPopup {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(accent_color: Color) -> Self {
         Self {
             display_query: String::new(),
             pending_query: String::new(),
             waiting: true,
             matches: Vec::new(),
             state: ScrollState::new(),
+            accent_color,
         }
     }
 
@@ -149,6 +152,7 @@ impl WidgetRef for &FileSearchPopup {
             &self.state,
             MAX_POPUP_ROWS,
             empty_message,
+            self.accent_color,
         );
     }
 }
@@ -171,7 +175,7 @@ mod tests {
 
     #[test]
     fn set_matches_keeps_only_the_first_page_of_results() {
-        let mut popup = FileSearchPopup::new();
+        let mut popup = FileSearchPopup::new(Color::Cyan);
         popup.set_query("file");
         popup.set_matches("file", (0..(MAX_POPUP_ROWS + 2)).map(file_match).collect());
 

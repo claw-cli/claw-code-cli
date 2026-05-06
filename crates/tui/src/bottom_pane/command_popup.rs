@@ -1,5 +1,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::widgets::WidgetRef;
 
 use super::popup_consts::MAX_POPUP_ROWS;
@@ -23,6 +24,7 @@ pub(crate) struct CommandPopup {
     command_filter: String,
     builtins: Vec<(&'static str, SlashCommand)>,
     state: ScrollState,
+    accent_color: Color,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -53,7 +55,7 @@ impl From<CommandPopupFlags> for slash_commands::BuiltinCommandFlags {
 }
 
 impl CommandPopup {
-    pub(crate) fn new(flags: CommandPopupFlags) -> Self {
+    pub(crate) fn new(flags: CommandPopupFlags, accent_color: Color) -> Self {
         // Keep built-in availability in sync with the composer.
         let builtins: Vec<(&'static str, SlashCommand)> =
             slash_commands::builtins_for_input(flags.into())
@@ -63,6 +65,7 @@ impl CommandPopup {
             command_filter: String::new(),
             builtins,
             state: ScrollState::new(),
+            accent_color,
         }
     }
 
@@ -223,6 +226,7 @@ impl WidgetRef for CommandPopup {
             &self.state,
             MAX_POPUP_ROWS,
             "no matches",
+            self.accent_color,
         );
     }
 }
@@ -234,14 +238,14 @@ mod tests {
 
     #[test]
     fn filter_returns_empty_for_unknown_prefix() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/in".to_string());
         assert!(popup.filtered_items().is_empty());
     }
 
     #[test]
     fn exact_match_selects_model() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/model".to_string());
 
         let selected = popup.selected_item();
@@ -253,7 +257,7 @@ mod tests {
 
     #[test]
     fn model_is_first_suggestion_for_mo() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/mo".to_string());
         let matches = popup.filtered_items();
         match matches.first() {
@@ -264,7 +268,7 @@ mod tests {
 
     #[test]
     fn filtered_commands_keep_presentation_order_for_prefix() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/m".to_string());
 
         let cmds: Vec<&str> = popup
@@ -279,7 +283,7 @@ mod tests {
 
     #[test]
     fn prefix_filter_limits_matches_for_ac() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/ac".to_string());
 
         let cmds: Vec<&str> = popup
@@ -297,7 +301,7 @@ mod tests {
 
     #[test]
     fn exit_is_visible_for_matching_prefix() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/ex".to_string());
 
         match popup.selected_item() {
@@ -308,7 +312,7 @@ mod tests {
 
     #[test]
     fn popup_lists_only_supported_commands() {
-        let mut popup = CommandPopup::new(CommandPopupFlags::default());
+        let mut popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         popup.on_composer_text_change("/".to_string());
 
         let cmds: Vec<&str> = popup
@@ -321,24 +325,27 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
-                "model", "compact", "thinking", "resume", "new", "status", "clear", "onboard",
-                "diff", "btw", "exit",
+                "theme", "model", "compact", "thinking", "resume", "new", "status", "clear",
+                "onboard", "diff", "btw", "exit",
             ]
         );
     }
 
     #[test]
     fn settings_command_hidden_when_audio_device_selection_is_disabled() {
-        let mut popup = CommandPopup::new(CommandPopupFlags {
-            collaboration_modes_enabled: false,
-            connectors_enabled: false,
-            plugins_command_enabled: false,
-            fast_command_enabled: false,
-            personality_command_enabled: true,
-            realtime_conversation_enabled: true,
-            audio_device_selection_enabled: false,
-            windows_degraded_sandbox_active: false,
-        });
+        let mut popup = CommandPopup::new(
+            CommandPopupFlags {
+                collaboration_modes_enabled: false,
+                connectors_enabled: false,
+                plugins_command_enabled: false,
+                fast_command_enabled: false,
+                personality_command_enabled: true,
+                realtime_conversation_enabled: true,
+                audio_device_selection_enabled: false,
+                windows_degraded_sandbox_active: false,
+            },
+            Color::Cyan,
+        );
         popup.on_composer_text_change("/aud".to_string());
 
         let cmds: Vec<&str> = popup
@@ -357,7 +364,7 @@ mod tests {
 
     #[test]
     fn debug_commands_are_hidden_from_popup() {
-        let popup = CommandPopup::new(CommandPopupFlags::default());
+        let popup = CommandPopup::new(CommandPopupFlags::default(), Color::Cyan);
         let cmds: Vec<&str> = popup
             .filtered_items()
             .into_iter()

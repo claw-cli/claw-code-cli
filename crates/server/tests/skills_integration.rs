@@ -157,6 +157,7 @@ fn build_runtime_with_registry(
             })),
             devo_core::AgentsMdConfig::default(),
             db,
+            data_root.join("config.toml"),
         ),
     )
 }

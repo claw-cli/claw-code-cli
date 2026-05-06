@@ -44,8 +44,10 @@ fn widget_with_model_and_thinking(
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: Vec::new(),
+        saved_model_slugs: Vec::new(),
         show_model_onboarding: false,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
     (widget, app_event_rx)
 }
@@ -64,8 +66,10 @@ fn onboarding_widget_with_model(
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: Vec::new(),
+        saved_model_slugs: Vec::new(),
         show_model_onboarding: true,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
     (widget, app_event_rx)
 }
@@ -634,7 +638,8 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(1, committed_text.matches("directory:").count());
+    // The header box is rendered only once on initial launch, not on session switch.
+    assert_eq!(0, committed_text.matches("directory:").count());
     assert!(committed_text.contains("hello"));
     assert!(committed_text.contains("world"));
     assert!(!committed_text.contains("session 1 lingering line"));
@@ -961,8 +966,10 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: vec![model, alt_model],
+        saved_model_slugs: vec!["test-model".into(), "second-model".into()],
         show_model_onboarding: false,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
 
     widget.handle_app_event(AppEvent::RunSlashCommand {
@@ -1079,8 +1086,10 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         enhanced_keys_supported: true,
         is_first_run: false,
         available_models: vec![model, alt_model.clone()],
+        saved_model_slugs: vec!["test-model".into(), "second-model".into()],
         show_model_onboarding: false,
         startup_tooltip_override: None,
+        initial_theme_name: None,
     });
 
     widget.handle_app_event(AppEvent::ModelSelected {

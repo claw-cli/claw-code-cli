@@ -41,6 +41,7 @@ mod style;
 mod terminal_palette;
 mod test_backend;
 mod text_formatting;
+mod theme;
 mod tui;
 mod ui_consts;
 mod version;

@@ -47,15 +47,21 @@ Out of scope:
 
 ## Target Crate Responsibilities
 
-| Crate | Responsibility | Mandatory Additions |
-| --- | --- | --- |
-| `devo-core` | Session, turn, item model, main loop, model integration, context management, persistence / rollout, event emission, coding workflow orchestration, long-running execution, background task state, and completion routing | Add explicit session repository, turn state machine, model catalog, provider adapters, tokenizer estimation hooks, compaction machinery, turn-linked task registry, execution lifecycle management, and completion notification flow |
-| `devo-tools` | Tool traits, registry, orchestration, execution metadata, common tools like fuzzy search, shell command, read_file, write_file, patch_file, web_search etc | Add typed tool-call journal records and approval integration points |
-| `devo-safety` | Policy evaluation, rules, approval scopes, secret redaction contracts, and sandbox integration | Add resource-scoped approvals, rule persistence, policy snapshots, and platform safety adapters |
-| `devo-mcp` | MCP connection management and dynamic capability ingestion | Expand from placeholder into server registry and bridge adapters |
-| `devo-server` | Transport-neutral runtime server, JSON-RPC v2.0, lifecycle, subscriptions, and connection management. tokio+axum+jsonwebtoken | Add stdio and WebSocket listeners, session routing, approval response plumbing, and event fanout |
-| `devo-cli` | Local bootstrap, config loading, REPL, and human-oriented terminal UX, TUI+crossterm | Add client-side server bootstrap hooks and approval UX adapters | Claude Code / Codex Inspired. |
-| `devo-utils` | Cross-cutting low-level helpers with no stable domain owner | Add shared path normalization, absolute-path, approval-presets, cache, cargo-bin, cli, elapsed, fuzzy-match, home-dir, image, json-to-toml, oss, output-truncation, path-utils, plugins, pty, readiness, rustls-provider, sandbox-summary, sleep-inhibitor, stream-parser, string, template etc |
+| Crate | Responsibility |
+| --- | --- |
+| `devo-core` | Session, turn, item model, main loop, model integration, context management, persistence / rollout, event emission, coding workflow orchestration, config loading, and runtime state |
+| `devo-tools` | Tool traits, registry, orchestration, execution metadata, built-in tools (shell command, file search, read, write, patch) |
+| `devo-safety` | Policy evaluation, rules, approval scopes, secret redaction contracts, and sandbox integration |
+| `devo-mcp` | MCP server lifecycle, capability discovery, and bridging |
+| `devo-protocol` | Shared structured types across crates (shell summaries, provider wire API enums, token usage, etc.) |
+| `devo-server` | Transport-neutral runtime server, JSON-RPC 2.0, lifecycle, subscriptions, and connection management |
+| `devo-client` | Client library for connecting to devo-server over stdio or WebSocket |
+| `devo-tui` | Interactive terminal UI (ratatui + crossterm) |
+| `devo-cli` | Local bootstrap, config loading, command dispatch, and terminal UX entrypoint |
+| `devo-utils` | Cross-cutting low-level helpers (home dir, config paths, path normalization, etc.) |
+| `devo-arg0` | OS-specific arg0/binary path resolution |
+| `devo-tasks` | Background task state and long-running execution |
+| `devo-file-search` | Separate file-search binary for search functionality |
 
 ## Shared Vocabulary
 

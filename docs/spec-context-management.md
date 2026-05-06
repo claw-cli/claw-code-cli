@@ -1,4 +1,4 @@
-# ClawCodeRust Detailed Specification: Context Management
+# devo Detailed Specification: Context Management
 
 ## Background and Goals
 
