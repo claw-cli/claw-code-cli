@@ -10,7 +10,7 @@
 //! - catalog loading stays in `devo-core` because the embedded assets live here
 //! - this module is the bridge between raw preset/config data and runtime model consumers
 //! - models are sorted and materialized here so downstream code can work only with resolved `Model`
-//! - the layered merge order is: builtin < ~/.devo/models.json < <workspace>/.devo/models.json
+//! - the layered merge order is: builtin < ~/.devo/models.json < `<workspace>/.devo/models.json`
 //!
 //! Boundary:
 //! - this module should not define the runtime model shape itself; that lives in `devo-protocol`
