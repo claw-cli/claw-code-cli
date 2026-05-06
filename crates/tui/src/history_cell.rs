@@ -1026,11 +1026,6 @@ pub(crate) fn new_session_info(
             ]),
             Line::from(vec![
                 "  ".into(),
-                "/thinking".into(),
-                " - choose the active thinking mode".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
                 "/resume".into(),
                 " - resume a saved chat".dim(),
             ]),

@@ -4,7 +4,6 @@ pub enum SlashCommand {
     Theme,
     Model,
     Compact,
-    Thinking,
     Resume,
     New,
     Status,
@@ -21,7 +20,6 @@ impl SlashCommand {
             SlashCommand::Theme => "switch the UI theme",
             SlashCommand::Model => "choose the active model",
             SlashCommand::Compact => "compact the current session context",
-            SlashCommand::Thinking => "choose the active thinking mode",
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::New => "start a new chat",
             SlashCommand::Status => "show current session configuration and token usage",
@@ -38,7 +36,6 @@ impl SlashCommand {
             SlashCommand::Theme => "theme",
             SlashCommand::Model => "model",
             SlashCommand::Compact => "compact",
-            SlashCommand::Thinking => "thinking",
             SlashCommand::Resume => "resume",
             SlashCommand::New => "new",
             SlashCommand::Status => "status",
@@ -59,7 +56,6 @@ impl SlashCommand {
             self,
             SlashCommand::Model
                 | SlashCommand::Theme
-                | SlashCommand::Thinking
                 | SlashCommand::Onboard
                 | SlashCommand::Compact
                 | SlashCommand::Diff
@@ -77,7 +73,6 @@ impl std::str::FromStr for SlashCommand {
             "theme" => Ok(Self::Theme),
             "model" => Ok(Self::Model),
             "compact" => Ok(Self::Compact),
-            "thinking" => Ok(Self::Thinking),
             "resume" => Ok(Self::Resume),
             "new" => Ok(Self::New),
             "status" => Ok(Self::Status),
@@ -96,7 +91,6 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         ("theme", SlashCommand::Theme),
         ("model", SlashCommand::Model),
         ("compact", SlashCommand::Compact),
-        ("thinking", SlashCommand::Thinking),
         ("resume", SlashCommand::Resume),
         ("new", SlashCommand::New),
         ("status", SlashCommand::Status),

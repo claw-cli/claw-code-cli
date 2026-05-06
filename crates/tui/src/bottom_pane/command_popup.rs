@@ -325,8 +325,8 @@ mod tests {
         assert_eq!(
             cmds,
             vec![
-                "theme", "model", "compact", "thinking", "resume", "new", "status", "clear",
-                "onboard", "diff", "btw", "exit",
+                "theme", "model", "compact", "resume", "new", "status", "clear", "onboard",
+                "diff", "btw", "exit",
             ]
         );
     }

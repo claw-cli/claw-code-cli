@@ -216,6 +216,12 @@ enum PickerMode {
     Thinking,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingModelSelection {
+    slug: String,
+    thinking_selection: Option<String>,
+}
+
 pub(crate) struct ChatWidget {
     // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
@@ -247,6 +253,7 @@ pub(crate) struct ChatWidget {
     resume_browser: Option<ResumeBrowserState>,
     resume_browser_loading: bool,
     picker_mode: Option<PickerMode>,
+    pending_model_selection: Option<PendingModelSelection>,
     theme_set: ThemeSet,
     active_theme_name: String,
     turn_count: usize,
@@ -263,6 +270,29 @@ pub(crate) struct ChatWidget {
 }
 
 impl ChatWidget {
+    fn can_change_configuration(&self) -> bool {
+        !self.busy
+    }
+
+    fn add_busy_configuration_message(&mut self, command: SlashCommand) {
+        let noun = match command {
+            SlashCommand::Model => "model",
+            SlashCommand::Onboard => "provider",
+            SlashCommand::Theme => "theme",
+            SlashCommand::Compact => "session",
+            SlashCommand::New => "session",
+            SlashCommand::Resume => "session",
+            SlashCommand::Diff => "diff",
+            SlashCommand::Exit | SlashCommand::Status | SlashCommand::Clear | SlashCommand::Btw => {
+                return;
+            }
+        };
+        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
+            "Cannot change {noun} while generating"
+        ))]));
+        self.set_status_message(format!("Cannot change {noun} while generating"));
+    }
+
     fn is_blank_line(line: &Line<'_>) -> bool {
         line.spans.iter().all(|span| span.content.trim().is_empty())
     }
@@ -643,6 +673,7 @@ impl ChatWidget {
             resume_browser: None,
             resume_browser_loading: false,
             picker_mode: None,
+            pending_model_selection: None,
             theme_set,
             active_theme_name,
             turn_count: 0,
@@ -719,7 +750,7 @@ impl ChatWidget {
             }
             InputResult::ModelSelected { model } => match self.picker_mode.take() {
                 Some(PickerMode::Thinking) => self.apply_thinking_selection(model),
-                _ => self.apply_model_selection(model),
+                _ => self.handle_model_picker_selection(model),
             },
             InputResult::ThemeSelected { name } => {
                 self.apply_theme_selection(name);
@@ -862,7 +893,7 @@ impl ChatWidget {
             AppEvent::Redraw => self.frame_requester.schedule_frame(),
             AppEvent::SubmitUserInput { text } => self.submit_text(text),
             AppEvent::ModelSelected { model } => {
-                self.apply_model_selection(model);
+                self.handle_model_picker_selection(model);
             }
             AppEvent::ThemeSelected { name } => {
                 self.apply_theme_selection(name);
@@ -1332,6 +1363,11 @@ impl ChatWidget {
     }
 
     fn handle_slash_command(&mut self, command: SlashCommand, argument: String) {
+        if !self.can_change_configuration() && !command.available_during_task() {
+            self.add_busy_configuration_message(command);
+            return;
+        }
+
         match command {
             SlashCommand::Exit => {
                 self.app_event_tx
@@ -1389,9 +1425,6 @@ impl ChatWidget {
             SlashCommand::Compact => {
                 self.app_event_tx
                     .send(AppEvent::Command(AppCommand::compact()));
-            }
-            SlashCommand::Thinking => {
-                self.open_thinking_picker();
             }
             SlashCommand::New => {
                 self.app_event_tx
@@ -2142,6 +2175,7 @@ impl ChatWidget {
 
     fn open_model_picker(&mut self) {
         self.picker_mode = Some(PickerMode::Model);
+        self.pending_model_selection = None;
         let current_slug = self.session.model.as_ref().map(|model| model.slug.as_str());
         let entries = self
             .saved_model_slugs
@@ -2160,6 +2194,35 @@ impl ChatWidget {
             .collect();
         self.bottom_pane.open_model_picker(entries);
         self.set_status_message("Select a model");
+    }
+
+    fn handle_model_picker_selection(&mut self, slug: String) {
+        let Some(selected_model) = self
+            .available_models
+            .iter()
+            .find(|model| model.slug == slug)
+            .cloned()
+        else {
+            self.apply_model_selection(slug);
+            return;
+        };
+
+        let thinking_selection = selected_model.default_thinking_selection();
+        self.pending_model_selection = Some(PendingModelSelection {
+            slug: selected_model.slug.clone(),
+            thinking_selection: thinking_selection.clone(),
+        });
+        self.session.provider = Some(selected_model.provider);
+        self.session.model = Some(selected_model.clone());
+        self.thinking_selection = thinking_selection;
+        self.refresh_header_box();
+
+        if selected_model.effective_thinking_capability().options().is_empty() {
+            self.finalize_pending_model_selection();
+            return;
+        }
+
+        self.open_thinking_picker();
     }
 
     fn open_theme_picker(&mut self) {
@@ -2253,6 +2316,12 @@ impl ChatWidget {
 
     fn apply_thinking_selection(&mut self, value: String) {
         self.thinking_selection = Some(value.clone());
+        if let Some(pending) = self.pending_model_selection.as_mut() {
+            pending.thinking_selection = Some(value);
+            self.finalize_pending_model_selection();
+            return;
+        }
+
         self.refresh_header_box();
         self.app_event_tx
             .send(AppEvent::Command(AppCommand::override_turn_context(
@@ -2263,6 +2332,25 @@ impl ChatWidget {
                 /*approval_policy*/ None,
             )));
         self.set_status_message(format!("Thinking set to {value}"));
+    }
+
+    fn finalize_pending_model_selection(&mut self) {
+        let Some(pending) = self.pending_model_selection.take() else {
+            return;
+        };
+
+        self.picker_mode = None;
+        self.thinking_selection = pending.thinking_selection.clone();
+        self.refresh_header_box();
+        self.app_event_tx
+            .send(AppEvent::Command(AppCommand::override_turn_context(
+                /*cwd*/ None,
+                Some(pending.slug.clone()),
+                Some(self.thinking_selection.clone()),
+                /*sandbox*/ None,
+                /*approval_policy*/ None,
+            )));
+        self.set_status_message(format!("Model set to {}", pending.slug));
     }
 
     fn open_resume_browser(&mut self, sessions: Vec<SessionListEntry>) {

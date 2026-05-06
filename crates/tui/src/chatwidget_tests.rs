@@ -20,6 +20,7 @@ use crate::chatwidget::ExitLayoutMode;
 use crate::chatwidget::ThinkingListEntry;
 use crate::chatwidget::TuiSessionState;
 use crate::render::renderable::Renderable;
+use crate::slash_command::built_in_slash_commands;
 use crate::tui::frame_requester::FrameRequester;
 
 fn widget_with_model(
@@ -187,6 +188,47 @@ fn initial_thinking_selection_overrides_model_default() {
         widget_with_model_and_thinking(model, PathBuf::from("."), Some("low".to_string()));
 
     assert_eq!(widget.current_thinking_selection(), Some("low"));
+}
+
+#[test]
+fn slash_command_list_does_not_include_thinking() {
+    let commands = built_in_slash_commands();
+    assert!(!commands.iter().any(|(name, _)| *name == "thinking"));
+}
+
+#[test]
+fn busy_widget_blocks_model_change_with_transcript_message() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_paste("/model".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(app_event_rx.try_recv().is_err());
+
+    let scrollback = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scrollback.contains("Cannot change model while generating"));
 }
 
 #[test]
@@ -954,6 +996,11 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::High),
         ..Model::default()
     };
     let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
@@ -1074,6 +1121,11 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::High),
         ..Model::default()
     };
     let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
@@ -1095,6 +1147,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
     widget.handle_app_event(AppEvent::ModelSelected {
         model: "second-model".to_string(),
     });
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     widget.submit_text("hello".to_string());
 
     assert_eq!(widget.current_model(), Some(&alt_model));
@@ -1105,7 +1158,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         AppEvent::Command(AppCommand::OverrideTurnContext {
             cwd: None,
             model: Some("second-model".to_string()),
-            thinking: Some(None),
+            thinking: Some(Some("high".to_string())),
             sandbox: None,
             approval_policy: None,
         })
@@ -1118,7 +1171,109 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             }],
             cwd: Some(widget.current_cwd().to_path_buf()),
             model: Some("second-model".to_string()),
-            thinking: None,
+            thinking: Some("high".to_string()),
+            sandbox: None,
+            approval_policy: None,
+        })
+    );
+}
+
+#[test]
+fn model_selection_with_thinking_support_waits_for_second_step() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let alt_model = Model {
+        slug: "second-model".to_string(),
+        display_name: "Second Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::High),
+        ..Model::default()
+    };
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(cwd, Some(model)),
+        initial_thinking_selection: None,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: vec![alt_model.clone()],
+        saved_model_slugs: vec!["second-model".into()],
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    });
+
+    widget.handle_app_event(AppEvent::ModelSelected {
+        model: "second-model".to_string(),
+    });
+
+    assert_eq!(widget.current_model(), Some(&alt_model));
+    assert!(app_event_rx.try_recv().is_err());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx.try_recv().expect("context override command is emitted"),
+        AppEvent::Command(AppCommand::OverrideTurnContext {
+            cwd: None,
+            model: Some("second-model".to_string()),
+            thinking: Some(Some("high".to_string())),
+            sandbox: None,
+            approval_policy: None,
+        })
+    );
+}
+
+#[test]
+fn model_selection_without_thinking_support_finishes_immediately() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let base_model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let alt_model = Model {
+        slug: "plain-model".to_string(),
+        display_name: "Plain Model".to_string(),
+        thinking_capability: ThinkingCapability::Unsupported,
+        ..Model::default()
+    };
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(cwd, Some(base_model)),
+        initial_thinking_selection: None,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: vec![alt_model.clone()],
+        saved_model_slugs: vec!["plain-model".into()],
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    });
+
+    widget.handle_app_event(AppEvent::ModelSelected {
+        model: "plain-model".to_string(),
+    });
+
+    assert_eq!(widget.current_model(), Some(&alt_model));
+    assert_eq!(
+        app_event_rx.try_recv().expect("context override command is emitted"),
+        AppEvent::Command(AppCommand::OverrideTurnContext {
+            cwd: None,
+            model: Some("plain-model".to_string()),
+            thinking: Some(None),
             sandbox: None,
             approval_policy: None,
         })
