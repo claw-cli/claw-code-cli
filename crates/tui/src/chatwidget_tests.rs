@@ -713,6 +713,45 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
 }
 
 #[test]
+fn completed_turn_summary_keeps_duration_for_text_turns() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.force_task_elapsed_seconds(3);
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta("hello".to_string()));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Completed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
+    let committed = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(committed.contains("▣"));
+    assert!(committed.contains("Test Model"));
+    assert!(committed.contains("3s"));
+}
+
+#[test]
 fn active_response_renders_generating_status_without_devo_title() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {

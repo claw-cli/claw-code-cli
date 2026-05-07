@@ -1480,22 +1480,25 @@ pub struct TurnSummaryCell {
     pub model_name: String,
     pub duration: Option<u64>,
     pub interrupted: bool,
+    pub accent_color: Color,
 }
 
 impl TurnSummaryCell {
-    pub(crate) fn new(model_name: String, duration: Option<u64>) -> Self {
+    pub(crate) fn new(model_name: String, duration: Option<u64>, accent_color: Color) -> Self {
         Self {
             model_name,
             duration,
             interrupted: false,
+            accent_color,
         }
     }
 
-    pub(crate) fn new_interrupted(model_name: String) -> Self {
+    pub(crate) fn new_interrupted(model_name: String, accent_color: Color) -> Self {
         Self {
             model_name,
             duration: None,
             interrupted: true,
+            accent_color,
         }
     }
 }
@@ -1520,7 +1523,7 @@ impl HistoryCell for TurnSummaryCell {
         let _ = width;
         let mut spans: Vec<Span<'static>> = vec![
             Span::raw(" ".repeat(LIVE_PREFIX_COLS as usize)),
-            Span::styled("▣", Style::default().fg(Color::Rgb(0x8B, 0x94, 0x9E))),
+            Span::styled("▣", Style::default().fg(self.accent_color)),
             Span::styled(" ", Style::default()),
             Span::styled(self.model_name.clone(), Style::default().dim()),
         ];

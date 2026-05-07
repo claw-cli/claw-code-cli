@@ -1211,18 +1211,19 @@ impl ChatWidget {
                     .map(|m| m.display_name.clone())
                     .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
                     .unwrap_or_default();
+                let accent_color = self.active_accent_color();
+                let elapsed = self
+                    .bottom_pane
+                    .status_widget()
+                    .map(|status| status.elapsed_seconds())
+                    .filter(|&secs| secs > 0);
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
                 let was_interrupted = stop_reason.contains("Interrupted");
                 let cell = if was_interrupted {
-                    history_cell::TurnSummaryCell::new_interrupted(model_name)
+                    history_cell::TurnSummaryCell::new_interrupted(model_name, accent_color)
                 } else {
-                    let elapsed = self
-                        .bottom_pane
-                        .status_widget()
-                        .map(|s| s.elapsed_seconds())
-                        .filter(|&secs| secs > 0);
-                    history_cell::TurnSummaryCell::new(model_name, elapsed)
+                    history_cell::TurnSummaryCell::new(model_name, elapsed, accent_color)
                 };
                 self.add_to_history(cell);
             }
@@ -1249,7 +1250,10 @@ impl ChatWidget {
                     .map(|m| m.display_name.clone())
                     .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
                     .unwrap_or_default();
-                self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(model_name));
+                self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(
+                    model_name,
+                    self.active_accent_color(),
+                ));
                 self.add_to_history(history_cell::new_error_event(message));
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
@@ -1837,7 +1841,11 @@ impl ChatWidget {
             TranscriptItemKind::TurnSummary => {
                 // item.title contains model name, item.duration_ms contains seconds
                 self.add_history_entry_without_redraw(Box::new(
-                    history_cell::TurnSummaryCell::new(item.title.clone(), item.duration_ms),
+                    history_cell::TurnSummaryCell::new(
+                        item.title.clone(),
+                        item.duration_ms,
+                        self.active_accent_color(),
+                    ),
                 ));
             }
         }
@@ -2007,6 +2015,19 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn force_startup_header_animation_due(&mut self) {
         self.startup_header_next_animation_at = Instant::now();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_task_elapsed_seconds(&mut self, secs: u64) {
+        self.bottom_pane.set_task_running(true);
+        if let Some(status) = self.bottom_pane.status_widget_mut() {
+            let now = Instant::now();
+            status.pause_timer_at(now);
+            let resume_at = now
+                .checked_sub(std::time::Duration::from_secs(secs))
+                .unwrap_or(now);
+            status.resume_timer_at(resume_at);
+        }
     }
 
     #[cfg(test)]
