@@ -171,8 +171,6 @@ impl ServerRuntime {
                     runtime_session.summary.total_cache_read_tokens =
                         compacted_total_cache_read_tokens;
                     runtime_session.summary.prompt_token_estimate = compacted_prompt_token_estimate;
-                    runtime_session.summary.context_window_tokens_used =
-                        compacted_prompt_token_estimate;
                 }
 
                 if let Some(turn_id) = runtime_session

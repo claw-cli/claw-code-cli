@@ -502,6 +502,7 @@ fn streamed_lines_stay_in_live_viewport_until_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        last_query_total_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -533,6 +534,7 @@ fn committed_history_drains_to_scrollback_lines() {
         turn_count: 1,
         total_input_tokens: 10,
         total_output_tokens: 20,
+        last_query_total_tokens: 30,
         prompt_token_estimate: 10,
     });
 
@@ -635,6 +637,7 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        last_query_total_tokens: 8,
         prompt_token_estimate: 3,
         history_items: vec![
             crate::events::TranscriptItem::new(
@@ -700,6 +703,7 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        last_query_total_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -730,6 +734,7 @@ fn completed_turn_summary_keeps_duration_for_text_turns() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        last_query_total_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -849,6 +854,7 @@ fn committed_assistant_markdown_does_not_double_wrap() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        last_query_total_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -901,6 +907,7 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        last_query_total_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -927,6 +934,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         reasoning_effort: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        last_query_total_tokens: 0,
         prompt_token_estimate: 0,
         history_items: vec![crate::events::TranscriptItem::new(
             crate::events::TranscriptItemKind::Reasoning,
@@ -1083,6 +1091,7 @@ fn session_switch_updates_session_identity_projection() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        last_query_total_tokens: 8,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1097,6 +1106,64 @@ fn session_switch_updates_session_identity_projection() {
             ..resumed_model
         })
     );
+}
+
+#[test]
+fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: Some("Resumed".to_string()),
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 12,
+        total_output_tokens: 18,
+        last_query_total_tokens: 42,
+        prompt_token_estimate: 12,
+        history_items: Vec::new(),
+        loaded_item_count: 0,
+        pending_texts: vec![],
+    });
+
+    let idle_summary = widget.status_summary_text();
+    assert!(idle_summary.contains("(42)"));
+    assert!(!idle_summary.contains("(12)"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::UsageUpdated {
+        total_input_tokens: 7,
+        total_output_tokens: 2,
+        last_query_total_tokens: 9,
+    });
+
+    let busy_summary = widget.status_summary_text();
+    assert!(busy_summary.contains("(9)"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "stop".to_string(),
+        turn_count: 2,
+        total_input_tokens: 19,
+        total_output_tokens: 20,
+        last_query_total_tokens: 9,
+        prompt_token_estimate: 7,
+    });
+
+    let finished_summary = widget.status_summary_text();
+    assert!(finished_summary.contains("(9)"));
 }
 
 #[test]
@@ -1119,6 +1186,7 @@ fn new_session_prepared_resets_session_identity_projection() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        last_query_total_tokens: 8,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1129,6 +1197,7 @@ fn new_session_prepared_resets_session_identity_projection() {
         model: "new-session-model".to_string(),
         thinking: None,
         reasoning_effort: None,
+        last_query_total_tokens: 0,
     });
 
     assert_eq!(widget.current_cwd(), initial_cwd.as_path());

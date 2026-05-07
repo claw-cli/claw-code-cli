@@ -358,6 +358,7 @@ async fn run_worker_inner(
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
     let mut total_output_tokens = 0usize;
+    let mut last_query_total_tokens = 0usize;
     let mut latest_completed_agent_message: Option<String> = None;
     let mut input_history_cursor: Option<usize> = None;
 
@@ -472,6 +473,7 @@ async fn run_worker_inner(
                         client.initialize().await?;
                         session_id = None;
                         active_turn_id = None;
+                        last_query_total_tokens = 0;
                     }
                     Some(OperationCommand::ListSessions) => {
                         match tokio::time::timeout(
@@ -604,11 +606,13 @@ async fn run_worker_inner(
                         session_id = None;
                         session_cwd = config.cwd.clone();
                         input_history_cursor = None;
+                        last_query_total_tokens = 0;
                         let _ = event_tx.send(WorkerEvent::NewSessionPrepared {
                             cwd: session_cwd.clone(),
                             model: model.clone(),
                             thinking: thinking_selection.clone(),
                             reasoning_effort: None,
+                            last_query_total_tokens,
                         });
                     }
                     Some(OperationCommand::SwitchSession(next_session_id)) => {
@@ -633,6 +637,9 @@ async fn run_worker_inner(
                                     reasoning_effort: result.session.reasoning_effort,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    last_query_total_tokens: result
+                                        .session
+                                        .last_query_total_tokens,
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
@@ -646,6 +653,8 @@ async fn run_worker_inner(
                                 thinking_selection = result.session.thinking.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
+                                last_query_total_tokens =
+                                    result.session.last_query_total_tokens;
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -727,6 +736,9 @@ async fn run_worker_inner(
                                     reasoning_effort: result.session.reasoning_effort,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    last_query_total_tokens: result
+                                        .session
+                                        .last_query_total_tokens,
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
@@ -736,6 +748,8 @@ async fn run_worker_inner(
                                 thinking_selection = result.session.thinking.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
+                                last_query_total_tokens =
+                                    result.session.last_query_total_tokens;
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -790,6 +804,9 @@ async fn run_worker_inner(
                                             reasoning_effort: resumed.session.reasoning_effort,
                                             total_input_tokens: resumed.session.total_input_tokens,
                                             total_output_tokens: resumed.session.total_output_tokens,
+                                            last_query_total_tokens: resumed
+                                                .session
+                                                .last_query_total_tokens,
                                             prompt_token_estimate: resumed.session.prompt_token_estimate,
                                             history_items: project_history_items(&resumed.history_items),
                                             loaded_item_count: resumed.loaded_item_count,
@@ -799,6 +816,8 @@ async fn run_worker_inner(
                                         thinking_selection = resumed.session.thinking.clone();
                                         total_input_tokens = resumed.session.total_input_tokens;
                                         total_output_tokens = resumed.session.total_output_tokens;
+                                        last_query_total_tokens =
+                                            resumed.session.last_query_total_tokens;
                                     }
                                     Err(error) => {
                                         let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -1012,28 +1031,33 @@ async fn run_worker_inner(
                                     active_turn_id = None;
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
+                                    // TODO: Should include cahed input tokens.
                                     if completed {
                                         turn_count += 1;
                                         if let Some(usage) = &payload.turn.usage {
                                             total_input_tokens = usage.input_tokens as usize;
                                             total_output_tokens = usage.output_tokens as usize;
+                                            last_query_total_tokens = usage.input_tokens as usize
+                                                + usage.output_tokens as usize;
                                         }
-                                        let _ = event_tx.send(WorkerEvent::TurnFinished {
-                                            stop_reason: format!("{:?}", payload.turn.status),
-                                            turn_count,
-                                            total_input_tokens,
-                                            total_output_tokens,
-                                            prompt_token_estimate: payload
-                                                .turn
-                                                .usage
-                                                .as_ref()
-                                                .map(|usage| usage.input_tokens as usize)
-                                                .unwrap_or(total_input_tokens),
-                                        });
-                                        latest_completed_agent_message = None;
-                                    }
-                                }
+                                let _ = event_tx.send(WorkerEvent::TurnFinished {
+                                    stop_reason: format!("{:?}", payload.turn.status),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    last_query_total_tokens,
+                                    prompt_token_estimate: payload
+                                        .turn
+                                        .usage
+                                        .as_ref()
+                                        .map(|usage| usage.input_tokens as usize)
+                                        .unwrap_or(total_input_tokens),
+                                });
+                                latest_completed_agent_message = None;
                             }
+                        }
+                            }
+                            // TODO: Should include cached input tokens.
                             "turn/usage/updated" => {
                                 if let ServerEvent::TurnUsageUpdated(payload) = event {
                                     total_input_tokens = payload.total_input_tokens;
@@ -1041,9 +1065,12 @@ async fn run_worker_inner(
                                     let _ = event_tx.send(WorkerEvent::UsageUpdated {
                                         total_input_tokens: payload.total_input_tokens,
                                         total_output_tokens: payload.total_output_tokens,
+                                        last_query_total_tokens: payload.usage.input_tokens as usize
+                                            + payload.usage.output_tokens as usize,
                                     });
                                 }
                             }
+                            // TODO: Should include cached input tokens.
                             "turn/failed" => {
                                 if let ServerEvent::TurnFailed(TurnEventPayload { turn, .. }) = event {
                                     active_turn_id = None;
@@ -1735,7 +1762,7 @@ mod tests {
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
-            context_window_tokens_used: 0,
+            last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {
@@ -1770,7 +1797,7 @@ mod tests {
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
-            context_window_tokens_used: 0,
+            last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {

@@ -37,7 +37,14 @@ pub struct SessionMetadata {
     pub total_cache_creation_tokens: usize,
     pub total_cache_read_tokens: usize,
     pub prompt_token_estimate: usize,
-    pub context_window_tokens_used: usize,
+    /// Last completed query token usage, measured as `input_tokens + output_tokens`.
+    ///
+    /// This value is refreshed on every completed model invoke so the UI can
+    /// show the latest completed-query usage after each request, and it remains
+    /// the persisted value used when a session is resumed. While a turn is in
+    /// flight, the UI may temporarily fall back to the live prompt estimate
+    /// instead.
+    pub last_query_total_tokens: usize,
     pub status: SessionRuntimeStatus,
 }
 
@@ -205,7 +212,7 @@ mod tests {
             total_cache_creation_tokens: 5,
             total_cache_read_tokens: 7,
             prompt_token_estimate: 21,
-            context_window_tokens_used: 21,
+            last_query_total_tokens: 21,
             status: SessionRuntimeStatus::Idle,
         };
 

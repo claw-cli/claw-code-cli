@@ -165,7 +165,6 @@ impl ServerRuntime {
                     session.summary.total_cache_creation_tokens = stats.total_cache_creation_tokens;
                     session.summary.total_cache_read_tokens = stats.total_cache_read_tokens;
                     session.summary.prompt_token_estimate = stats.prompt_token_estimate;
-                    session.summary.context_window_tokens_used = stats.prompt_token_estimate;
                     if let Ok(mut core) = session.core_session.try_lock() {
                         core.total_input_tokens = stats.total_input_tokens;
                         core.total_output_tokens = stats.total_output_tokens;

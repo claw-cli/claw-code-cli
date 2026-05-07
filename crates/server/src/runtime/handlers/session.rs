@@ -97,7 +97,7 @@ impl ServerRuntime {
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
-            context_window_tokens_used: 0,
+            last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         if let Some(record) = &record
@@ -694,7 +694,11 @@ impl ServerRuntime {
             total_cache_creation_tokens: source_core_session.total_cache_creation_tokens,
             total_cache_read_tokens: source_core_session.total_cache_read_tokens,
             prompt_token_estimate: source_core_session.prompt_token_estimate,
-            context_window_tokens_used: source_core_session.prompt_token_estimate,
+            last_query_total_tokens: latest_turn
+                .as_ref()
+                .and_then(|turn| turn.usage.as_ref())
+                .map(|usage| usage.input_tokens as usize + usage.output_tokens as usize)
+                .unwrap_or(0),
             status: SessionRuntimeStatus::Idle,
         };
         drop(source_core_session);

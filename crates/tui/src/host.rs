@@ -454,6 +454,7 @@ fn handle_worker_event(
         WorkerEvent::UsageUpdated {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            last_query_total_tokens: _,
         } => {
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;

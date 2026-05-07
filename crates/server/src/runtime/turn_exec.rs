@@ -284,8 +284,50 @@ impl ServerRuntime {
                         output_tokens,
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
+                    } => {
+                        let usage = TurnUsage {
+                            input_tokens: input_tokens as u32,
+                            output_tokens: output_tokens as u32,
+                            cache_creation_input_tokens: cache_creation_input_tokens
+                                .map(|value| value as u32),
+                            cache_read_input_tokens: cache_read_input_tokens
+                                .map(|value| value as u32),
+                        };
+                        latest_usage = Some(usage.clone());
+
+                        let base = if let Some(base) = usage_base {
+                            base
+                        } else {
+                            let base = {
+                                let session = event_session_arc.lock().await;
+                                (
+                                    session.summary.total_input_tokens,
+                                    session.summary.total_output_tokens,
+                                )
+                            };
+                            usage_base = Some(base);
+                            base
+                        };
+                        {
+                            let mut session = event_session_arc.lock().await;
+                            session.summary.total_input_tokens =
+                                base.0 + usage.input_tokens as usize;
+                            session.summary.total_output_tokens =
+                                base.1 + usage.output_tokens as usize;
+                        }
+                        let _ = runtime
+                            .broadcast_event(ServerEvent::TurnUsageUpdated(
+                                TurnUsageUpdatedPayload {
+                                    session_id,
+                                    turn_id: turn_for_events.turn_id,
+                                    usage,
+                                    total_input_tokens: base.0 + input_tokens,
+                                    total_output_tokens: base.1 + output_tokens,
+                                },
+                            ))
+                            .await;
                     }
-                    | QueryEvent::Usage {
+                    QueryEvent::Usage {
                         input_tokens,
                         output_tokens,
                         cache_creation_input_tokens,
@@ -320,6 +362,8 @@ impl ServerRuntime {
                                 base.0 + usage.input_tokens as usize;
                             session.summary.total_output_tokens =
                                 base.1 + usage.output_tokens as usize;
+                            session.summary.last_query_total_tokens =
+                                usage.input_tokens as usize + usage.output_tokens as usize;
                         }
                         let _ = runtime
                             .broadcast_event(ServerEvent::TurnUsageUpdated(
@@ -380,6 +424,7 @@ impl ServerRuntime {
             session_total_output_tokens,
             session_total_cache_creation_tokens,
             session_total_cache_read_tokens,
+            session_last_input_tokens,
             session_prompt_token_estimate,
         ) = {
             // Run the model query only after the event pipeline is ready so
@@ -411,6 +456,7 @@ impl ServerRuntime {
                 core_session.total_output_tokens,
                 core_session.total_cache_creation_tokens,
                 core_session.total_cache_read_tokens,
+                core_session.last_input_tokens,
                 core_session.prompt_token_estimate,
             )
         };
@@ -439,7 +485,10 @@ impl ServerRuntime {
             session.summary.total_cache_creation_tokens = session_total_cache_creation_tokens;
             session.summary.total_cache_read_tokens = session_total_cache_read_tokens;
             session.summary.prompt_token_estimate = session_prompt_token_estimate;
-            session.summary.context_window_tokens_used = session_prompt_token_estimate;
+            if let Some(usage) = &final_turn.usage {
+                session.summary.last_query_total_tokens =
+                    usage.input_tokens as usize + usage.output_tokens as usize;
+            }
 
             // Persist token stats to SQLite (skip for ephemeral sessions)
             if !session.summary.ephemeral {
@@ -452,7 +501,7 @@ impl ServerRuntime {
                         .usage
                         .as_ref()
                         .map(|u| u.input_tokens as usize)
-                        .unwrap_or(0),
+                        .unwrap_or(session_last_input_tokens),
                     turn_count: session.summary.updated_at.timestamp() as usize,
                     prompt_token_estimate: session_prompt_token_estimate,
                 };

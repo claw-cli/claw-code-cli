@@ -385,7 +385,6 @@ impl ServerRuntime {
                 session.summary.total_cache_creation_tokens = total_cache_creation_tokens;
                 session.summary.total_cache_read_tokens = total_cache_read_tokens;
                 session.summary.prompt_token_estimate = prompt_token_estimate;
-                session.summary.context_window_tokens_used = prompt_token_estimate;
             }
             turn
         };

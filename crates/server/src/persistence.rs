@@ -521,7 +521,7 @@ impl ReplayState {
         core_session.prompt_token_estimate = core_session
             .prompt_source_messages()
             .iter()
-                .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+            .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
             .sum::<usize>()
             .div_ceil(4);
         let pending_turn_queue = std::sync::Arc::clone(&core_session.pending_turn_queue);
@@ -552,7 +552,12 @@ impl ReplayState {
             total_cache_creation_tokens: self.total_cache_creation_tokens,
             total_cache_read_tokens: self.total_cache_read_tokens,
             prompt_token_estimate: core_session.prompt_token_estimate,
-            context_window_tokens_used: core_session.prompt_token_estimate,
+            last_query_total_tokens: self
+                .latest_turn_metadata
+                .as_ref()
+                .and_then(|turn| turn.usage.as_ref())
+                .map(|usage| usage.input_tokens as usize + usage.output_tokens as usize)
+                .unwrap_or(0),
             status: SessionRuntimeStatus::Idle,
         };
 

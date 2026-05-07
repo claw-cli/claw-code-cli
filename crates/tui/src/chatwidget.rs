@@ -248,6 +248,7 @@ pub(crate) struct ChatWidget {
     total_input_tokens: usize,
     total_output_tokens: usize,
     prompt_token_estimate: usize,
+    last_query_total_tokens: usize,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
     busy: bool,
@@ -433,7 +434,7 @@ impl ChatWidget {
         let model = self.session.model.as_ref()?;
         let total = model.context_window as usize;
         let usable = total.saturating_mul(model.effective_context_window_percent() as usize) / 100;
-        let used = self.prompt_token_estimate.min(usable);
+        let used = self.last_query_total_tokens.min(usable);
         Some((used, usable, total))
     }
 
@@ -674,6 +675,7 @@ impl ChatWidget {
             total_input_tokens: 0,
             total_output_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_total_tokens: 0,
             queued_count: 0,
             active_turn_id: None,
             busy: false,
@@ -1180,12 +1182,15 @@ impl ChatWidget {
                     "Tool completed"
                 });
             }
+            // TODO: The token usage should include `total_input_cahed_tokens` or `total_read_cached_tokens`
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,
+                last_query_total_tokens,
             } => {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
                 self.prompt_token_estimate = total_input_tokens;
                 self.frame_requester.schedule_frame();
             }
@@ -1194,6 +1199,7 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                last_query_total_tokens,
                 prompt_token_estimate,
             } => {
                 self.commit_active_streams(DotStatus::Completed);
@@ -1203,6 +1209,7 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 let model_name = self
                     .session
@@ -1295,6 +1302,7 @@ impl ChatWidget {
                 model,
                 thinking,
                 reasoning_effort,
+                last_query_total_tokens,
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
@@ -1312,6 +1320,7 @@ impl ChatWidget {
                 self.turn_count = 0;
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
+                self.last_query_total_tokens = last_query_total_tokens;
                 self.prompt_token_estimate = 0;
                 self.set_status_message("New session ready; send a prompt to start it");
             }
@@ -1324,6 +1333,7 @@ impl ChatWidget {
                 reasoning_effort,
                 total_input_tokens,
                 total_output_tokens,
+                last_query_total_tokens,
                 prompt_token_estimate,
                 history_items,
                 loaded_item_count,
@@ -1345,6 +1355,7 @@ impl ChatWidget {
                 self.stream_controller = None;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 self.rebuild_restored_session_history(
                     history_items,
@@ -2033,6 +2044,11 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn placeholder_text(&self) -> &str {
         self.bottom_pane.placeholder_text()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_summary_text(&self) -> String {
+        self.session_summary_text()
     }
 
     pub(crate) fn current_thinking_selection(&self) -> Option<&str> {
