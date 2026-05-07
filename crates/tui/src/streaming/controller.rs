@@ -110,6 +110,13 @@ impl StreamController {
         patch_lines_style(self.state.collector.pending_lines(), self.content_style)
     }
 
+    /// Render all lines currently visible in the live viewport, including queued committed lines.
+    pub(crate) fn live_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = patch_lines_style(self.state.queued_lines(), self.content_style);
+        lines.extend(self.pending_lines());
+        lines
+    }
+
     fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
         if lines.is_empty() {
             return None;

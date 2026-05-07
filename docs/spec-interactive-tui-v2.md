@@ -268,7 +268,7 @@ Requirements:
   │ thinking:    high                                    │
   │ cwd:         ~\Desktop\devo                          │
   │ turns:       3                                       │
-  │ tokens:      ↑1,234 ↓45,678  ░░░░░░░░░░ 12% (58K)    │
+  │ tokens:      ↑1,234 ↓45,678  ▱▱▱▱▱▱▱▱▱▱ 12% (58K)    │
   ╰──────────────────────────────────────────────────────╯
   ```
 
@@ -506,7 +506,7 @@ PS C:\Users\lenovo\Desktop\devo> .\target\debug\devo                            
                                                                                          │
 ┃ Ask Devo                                                     COMPOSER                 │
                                                                   - ┃ in accent color     │
-  <model-name> <effort>  ↑0 ↓0  ░░░░░░░░░░ 0% (0)               STATUS LINE             │
+  <model-name> <effort>  ↑0 ↓0  ▱▱▱▱▱▱▱▱▱▱ 0% (0)               STATUS LINE             │
                                                                                          │
 PS C:\Users\lenovo\Desktop\devo>                                                        │ shell prompt (post-exit)
 ```

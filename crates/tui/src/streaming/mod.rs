@@ -85,6 +85,13 @@ impl StreamState {
     pub(crate) fn queued_len(&self) -> usize {
         self.queued_lines.len()
     }
+    /// Returns a snapshot of queued committed lines in queue order.
+    pub(crate) fn queued_lines(&self) -> Vec<Line<'static>> {
+        self.queued_lines
+            .iter()
+            .map(|queued| queued.line.clone())
+            .collect()
+    }
     /// Returns the age of the oldest queued line.
     pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
         self.queued_lines

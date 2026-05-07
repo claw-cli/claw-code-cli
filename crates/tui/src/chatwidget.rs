@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::Instant;
 
 use crossterm::event::KeyCode;
@@ -67,6 +68,9 @@ use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
+use crate::streaming::chunking::AdaptiveChunkingPolicy;
+use crate::streaming::commit_tick::CommitTickScope;
+use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::StreamController;
 use crate::theme::ThemeSet;
 use crate::tui::frame_requester::FrameRequester;
@@ -235,6 +239,7 @@ pub(crate) struct ChatWidget {
     active_assistant_cell: Option<history_cell::AgentMessageCell>,
     active_reasoning_cell: Option<history_cell::AgentMessageCell>,
     stream_controller: Option<StreamController>,
+    stream_chunking_policy: AdaptiveChunkingPolicy,
     available_models: Vec<Model>,
     saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
@@ -464,8 +469,8 @@ impl ChatWidget {
         let ratio = (used as f64 / total as f64).clamp(0.0, 1.0);
         let filled = (ratio * bar_width as f64).round() as usize;
         let empty = bar_width.saturating_sub(filled);
-        let bar: String = std::iter::repeat_n('█', filled)
-            .chain(std::iter::repeat_n('░', empty))
+        let bar: String = std::iter::repeat_n('▰', filled)
+            .chain(std::iter::repeat_n('▱', empty))
             .collect();
         let pct = (ratio * 100.0).round() as usize;
         format!("{bar} {pct}%")
@@ -694,6 +699,7 @@ impl ChatWidget {
             active_assistant_cell: None,
             active_reasoning_cell: None,
             stream_controller: None,
+            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
             available_models,
             saved_model_slugs,
             onboarding_step: None,
@@ -1014,6 +1020,9 @@ impl ChatWidget {
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.advance_startup_header_animation();
+        if self.stream_controller.is_some() {
+            self.run_stream_commit_tick();
+        }
         self.bottom_pane.pre_draw_tick();
     }
 
@@ -1103,7 +1112,8 @@ impl ChatWidget {
                 self.active_reasoning_text.clear();
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
-                self.stream_controller = None;
+                self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
+                self.stream_chunking_policy.reset();
                 self.bottom_pane.set_task_running(true);
             }
             WorkerEvent::TextDelta(text) => {
@@ -1362,6 +1372,7 @@ impl ChatWidget {
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
+                self.stream_chunking_policy.reset();
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.busy = false;
@@ -1405,6 +1416,7 @@ impl ChatWidget {
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
+                self.stream_chunking_policy.reset();
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.total_cache_read_tokens = total_cache_read_tokens;
@@ -1543,6 +1555,7 @@ impl ChatWidget {
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
+                self.stream_chunking_policy.reset();
                 self.set_status_message("Transcript cleared");
             }
             SlashCommand::Onboard => {
@@ -1921,21 +1934,37 @@ impl ChatWidget {
         // this call will not re-create the active reasoning/assistant cells
         // with stale content.
         let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
-        let assistant_text = std::mem::take(&mut self.active_assistant_text);
         self.active_reasoning_cell = None;
         self.active_assistant_cell = None;
-        self.stream_controller = None;
-
         if !reasoning_text.trim().is_empty() {
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
-        if !assistant_text.trim().is_empty() {
-            self.add_markdown_history_with_status("Assistant", &assistant_text, status);
+        if let Some(controller) = self.stream_controller.as_mut() {
+            if let Some(cell) = controller.finalize() {
+                self.add_history_entry_without_redraw(cell);
+            }
+            self.stream_controller = None;
+            self.stream_chunking_policy.reset();
+        } else {
+            let assistant_text = std::mem::take(&mut self.active_assistant_text);
+            if !assistant_text.trim().is_empty() {
+                self.add_markdown_history_with_status_without_redraw(
+                    "Assistant",
+                    &assistant_text,
+                    status,
+                );
+            }
         }
     }
 
     fn push_assistant_stream_delta(&mut self, text: &str) {
-        self.active_assistant_text.push_str(text);
+        if self.stream_controller.is_none() {
+            self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
+            self.stream_chunking_policy.reset();
+        }
+        if let Some(controller) = self.stream_controller.as_mut() {
+            controller.push(text);
+        }
         self.sync_active_assistant_cell();
         self.frame_requester.schedule_frame();
     }
@@ -1950,7 +1979,20 @@ impl ChatWidget {
     }
 
     fn sync_active_assistant_cell(&mut self) {
-        if !self.active_assistant_text.trim().is_empty() {
+        if let Some(controller) = &self.stream_controller {
+            let lines = controller.live_lines();
+            if lines.iter().any(|line| !Self::is_blank_line(line)) {
+                self.active_assistant_cell =
+                    Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                        lines,
+                        Self::pending_dot_prefix(),
+                        "  ",
+                        false,
+                    ));
+            } else {
+                self.active_assistant_cell = None;
+            }
+        } else if !self.active_assistant_text.trim().is_empty() {
             self.active_assistant_cell =
                 Some(self.bulleted_markdown_cell(
                     &self.active_assistant_text,
@@ -1958,6 +2000,29 @@ impl ChatWidget {
                 ));
         } else {
             self.active_assistant_cell = None;
+        }
+    }
+
+    fn run_stream_commit_tick(&mut self) {
+        let now = Instant::now();
+        let output = run_commit_tick(
+            &mut self.stream_chunking_policy,
+            self.stream_controller.as_mut(),
+            CommitTickScope::AnyMode,
+            now,
+        );
+
+        if !output.cells.is_empty() {
+            for cell in output.cells {
+                self.add_history_entry_without_redraw(cell);
+            }
+            self.sync_active_assistant_cell();
+            self.frame_requester.schedule_frame();
+        }
+
+        if self.stream_controller.is_some() && !output.all_idle {
+            self.frame_requester
+                .schedule_frame_in(Duration::from_millis(16));
         }
     }
 
@@ -2075,6 +2140,11 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn startup_header_mascot_frame_index(&self) -> usize {
         self.startup_header_mascot_frame_index
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_stream_controller(&self) -> bool {
+        self.stream_controller.is_some()
     }
 
     #[cfg(test)]

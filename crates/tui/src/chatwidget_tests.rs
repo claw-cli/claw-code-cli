@@ -1197,6 +1197,60 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
 }
 
 #[test]
+fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    assert!(widget.has_stream_controller());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "first line\nsecond line\n".to_string(),
+    ));
+
+    widget.pre_draw_tick();
+    let first_pass = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first_pass.contains("first line"));
+    assert!(!first_pass.contains("second line"));
+
+    widget.pre_draw_tick();
+    let second_pass = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(second_pass.contains("second line"));
+}
+
+#[test]
 fn new_session_prepared_resets_session_identity_projection() {
     let initial_cwd = std::env::current_dir().expect("current directory is available");
     let resumed_cwd = initial_cwd.join("resumed");
