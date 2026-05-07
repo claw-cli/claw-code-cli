@@ -53,7 +53,6 @@ use crate::ItemKind;
 use crate::NotificationEnvelope;
 use crate::ProtocolError;
 use crate::ProtocolErrorCode;
-use crate::ServerCapabilities;
 use crate::ServerEvent;
 use crate::ServerRequestResolvedPayload;
 use crate::SessionCompactParams;
@@ -131,16 +130,6 @@ impl ServerRuntime {
                 platform_family: std::env::consts::FAMILY.into(),
                 platform_os: std::env::consts::OS.into(),
                 server_home,
-                capabilities: ServerCapabilities {
-                    session_resume: true,
-                    session_fork: true,
-                    session_rollback: true,
-                    turn_interrupt: true,
-                    approval_requests: true,
-                    event_streaming: true,
-                    model_catalog: true,
-                    model_saved: true,
-                },
             },
             deps,
             rollout_store,

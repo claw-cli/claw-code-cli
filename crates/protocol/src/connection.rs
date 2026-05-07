@@ -36,18 +36,4 @@ pub struct InitializeResult {
     pub platform_family: String,
     pub platform_os: String,
     pub server_home: PathBuf,
-    pub capabilities: ServerCapabilities,
-}
-
-// TODO: The `ServerCapabilities` should be removed, cause we don't need it anymore.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerCapabilities {
-    pub session_resume: bool,
-    pub session_fork: bool,
-    pub session_rollback: bool,
-    pub turn_interrupt: bool,
-    pub approval_requests: bool,
-    pub event_streaming: bool,
-    pub model_catalog: bool,
-    pub model_saved: bool,
 }
