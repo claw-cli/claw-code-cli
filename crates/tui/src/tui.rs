@@ -800,5 +800,4 @@ mod tests {
             "expected old session transcript to be cleared, rows: {rows_after:?}"
         );
     }
-
 }

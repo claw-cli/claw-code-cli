@@ -19,6 +19,7 @@ use devo_core::SkillCatalog;
 use devo_core::SkillError;
 use devo_core::SkillId;
 use devo_core::TurnConfig;
+use devo_core::TurnId;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
 use devo_protocol::PendingInputItem;
@@ -34,6 +35,7 @@ use crate::turn::TurnMetadata;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PersistedTurnItem {
+    pub(crate) turn_id: TurnId,
     pub(crate) item_id: devo_core::ItemId,
     pub(crate) turn_item: devo_core::TurnItem,
 }

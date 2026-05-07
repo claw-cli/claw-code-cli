@@ -67,6 +67,8 @@ use crate::SessionMetadataUpdateParams;
 use crate::SessionMetadataUpdateResult;
 use crate::SessionResumeParams;
 use crate::SessionResumeResult;
+use crate::SessionRollbackParams;
+use crate::SessionRollbackResult;
 use crate::SessionRuntimeStatus;
 use crate::SessionStartParams;
 use crate::SessionStartResult;
@@ -128,6 +130,7 @@ impl ServerRuntime {
                 capabilities: ServerCapabilities {
                     session_resume: true,
                     session_fork: true,
+                    session_rollback: true,
                     turn_interrupt: true,
                     approval_requests: true,
                     event_streaming: true,
@@ -462,6 +465,10 @@ impl ServerRuntime {
             "session/title/update" => Some(self.handle_session_title_update(id?, params).await),
             "session/resume" => Some(self.handle_session_resume(connection_id, id?, params).await),
             "session/fork" => Some(self.handle_session_fork(connection_id, id?, params).await),
+            "session/rollback" => Some(
+                self.handle_session_rollback(connection_id, id?, params)
+                    .await,
+            ),
             "session/compact" => Some(self.handle_session_compact(id?, params).await),
             "skills/list" => Some(self.handle_skills_list(id?, params).await),
             "skills/changed" => Some(self.handle_skills_changed(id?, params).await),
@@ -921,73 +928,30 @@ impl ServerRuntime {
             );
         };
         let source = source_arc.lock().await;
-        let source_core_session = source.core_session.lock().await;
         let now = Utc::now();
         let forked_id = SessionId::new();
-        let fork_cwd = params.cwd.unwrap_or_else(|| source.summary.cwd.clone());
-        let fork_model = source
-            .summary
-            .model
-            .clone()
-            .unwrap_or_else(|| self.deps.default_model.clone());
-        let summary = crate::SessionMetadata {
-            session_id: forked_id,
-            cwd: fork_cwd.clone(),
-            created_at: now,
-            updated_at: now,
-            title: params.title.or_else(|| source.summary.title.clone()),
-            title_state: source.summary.title_state.clone(),
-            ephemeral: source.summary.ephemeral,
-            model: Some(fork_model.clone()),
-            thinking: source.summary.thinking.clone(),
-            reasoning_effort: source.summary.reasoning_effort,
-            total_input_tokens: source_core_session.total_input_tokens,
-            total_output_tokens: source_core_session.total_output_tokens,
-            prompt_token_estimate: source_core_session.prompt_token_estimate,
-            status: SessionRuntimeStatus::Idle,
-        };
-        let mut core_session = self.deps.new_session_state(forked_id, fork_cwd);
-        core_session.messages = source_core_session.messages.clone();
-        core_session.prompt_messages = source_core_session.prompt_messages.clone();
-        core_session.session_context = source_core_session.session_context.clone();
-        core_session.latest_turn_context = source_core_session.latest_turn_context.clone();
-        core_session.turn_count = source_core_session.turn_count;
-        core_session.total_input_tokens = source_core_session.total_input_tokens;
-        core_session.total_output_tokens = source_core_session.total_output_tokens;
-        core_session.total_cache_creation_tokens = source_core_session.total_cache_creation_tokens;
-        core_session.total_cache_read_tokens = source_core_session.total_cache_read_tokens;
-        core_session.last_input_tokens = source_core_session.last_input_tokens;
-        let latest_turn = source.latest_turn.clone();
-        let loaded_item_count = source.loaded_item_count;
-        let history_items = source.history_items.clone();
-        let latest_compaction_snapshot = source.latest_compaction_snapshot.clone();
-        let persisted_turn_items = source.persisted_turn_items.clone();
-        drop(source_core_session);
-        drop(source);
-        let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
-        let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
-        self.sessions.lock().await.insert(
-            forked_id,
-            RuntimeSession {
-                record: None,
-                summary: summary.clone(),
-                core_session: Arc::new(Mutex::new(core_session)),
-                active_turn: None,
-                latest_turn,
-                loaded_item_count,
-                history_items,
-                persisted_turn_items,
-                latest_compaction_snapshot,
-                pending_turn_queue,
-                btw_input_queue,
-                active_task: None,
-                deferred_assistant: None,
-                deferred_reasoning: None,
-                next_item_seq: loaded_item_count + 1,
-                first_user_input: None,
+        let forked_runtime = match self
+            .build_runtime_session_from_user_turn_cut(
+                &source,
+                forked_id,
+                params.user_turn_index,
+                params.cwd.clone(),
+                params.title.clone(),
+                now,
+            )
+            .await
+        {
+            Ok(runtime) => runtime,
+            Err(message) => {
+                return self.error_response(request_id, ProtocolErrorCode::InvalidParams, message);
             }
-            .shared(),
-        );
+        };
+        let summary = forked_runtime.summary.clone();
+        drop(source);
+        self.sessions
+            .lock()
+            .await
+            .insert(forked_id, forked_runtime.shared());
         let sessions = self.sessions.lock().await;
         if let Some(forked_session) = sessions.get(&forked_id).cloned() {
             drop(sessions);
@@ -1038,6 +1002,217 @@ impl ServerRuntime {
             },
         })
         .expect("serialize session/fork response")
+    }
+
+    async fn handle_session_rollback(
+        &self,
+        connection_id: u64,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: SessionRollbackParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid session/rollback params: {error}"),
+                );
+            }
+        };
+        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+        let source = session_arc.lock().await;
+        let rebuilt = match self
+            .build_runtime_session_from_user_turn_cut(
+                &source,
+                params.session_id,
+                Some(params.user_turn_index),
+                None,
+                source.summary.title.clone(),
+                source.summary.created_at,
+            )
+            .await
+        {
+            Ok(runtime) => runtime,
+            Err(message) => {
+                return self.error_response(request_id, ProtocolErrorCode::InvalidParams, message);
+            }
+        };
+        let summary = rebuilt.summary.clone();
+        let latest_turn = rebuilt.latest_turn.clone();
+        let loaded_item_count = rebuilt.loaded_item_count;
+        let history_items = rebuilt.history_items.clone();
+        drop(source);
+        *session_arc.lock().await = rebuilt;
+        self.subscribe_connection_to_session(connection_id, params.session_id, None)
+            .await;
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: SessionRollbackResult {
+                session: summary,
+                latest_turn,
+                loaded_item_count,
+                history_items,
+                pending_texts: Vec::new(),
+            },
+        })
+        .expect("serialize session/rollback response")
+    }
+
+    async fn build_runtime_session_from_user_turn_cut(
+        &self,
+        source: &RuntimeSession,
+        session_id: SessionId,
+        user_turn_index: Option<u32>,
+        cwd_override: Option<PathBuf>,
+        title_override: Option<String>,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Result<RuntimeSession, String> {
+        let source_core_session = source.core_session.lock().await;
+        let kept_items = if let Some(user_turn_index) = user_turn_index {
+            let mut user_turn_ids: Vec<TurnId> = Vec::new();
+            for item in &source.persisted_turn_items {
+                if matches!(item.turn_item, TurnItem::UserMessage(_))
+                    && user_turn_ids.last().copied() != Some(item.turn_id)
+                {
+                    user_turn_ids.push(item.turn_id);
+                }
+            }
+            let selected_idx = usize::try_from(user_turn_index)
+                .map_err(|_| "selected turn index is invalid".to_string())?;
+            let Some(selected_turn_id) = user_turn_ids.get(selected_idx).copied() else {
+                return Err("selected turn does not exist".to_string());
+            };
+            source
+                .persisted_turn_items
+                .iter()
+                .take_while(|item| item.turn_id != selected_turn_id)
+                .cloned()
+                .chain(
+                    source
+                        .persisted_turn_items
+                        .iter()
+                        .skip_while(|item| item.turn_id != selected_turn_id)
+                        .take_while(|item| item.turn_id == selected_turn_id)
+                        .cloned(),
+                )
+                .collect::<Vec<_>>()
+        } else {
+            source.persisted_turn_items.clone()
+        };
+
+        let cwd = cwd_override.unwrap_or_else(|| source.summary.cwd.clone());
+        let mut core_session = self.deps.new_session_state(session_id, cwd.clone());
+        core_session.session_context = source_core_session.session_context.clone();
+        core_session.latest_turn_context = None;
+        core_session.total_input_tokens = source_core_session.total_input_tokens;
+        core_session.total_output_tokens = source_core_session.total_output_tokens;
+        core_session.total_cache_creation_tokens = source_core_session.total_cache_creation_tokens;
+        core_session.total_cache_read_tokens = source_core_session.total_cache_read_tokens;
+        core_session.last_input_tokens = source_core_session.last_input_tokens;
+
+        let mut rebuilt_history_items = Vec::new();
+        let mut rebuilt_messages = Vec::new();
+        let mut tool_names_by_id = HashMap::new();
+        for item in &kept_items {
+            crate::persistence::apply_turn_item(
+                &mut rebuilt_messages,
+                &mut rebuilt_history_items,
+                &mut tool_names_by_id,
+                item.turn_item.clone(),
+            );
+        }
+        core_session.messages = rebuilt_messages;
+        core_session.prompt_messages = None;
+        core_session.turn_count = kept_items
+            .iter()
+            .filter(|item| matches!(item.turn_item, TurnItem::UserMessage(_)))
+            .count();
+
+        let latest_turn = if let Some(last_turn_id) = kept_items.last().map(|item| item.turn_id) {
+            source
+                .latest_turn
+                .clone()
+                .filter(|turn| turn.turn_id == last_turn_id)
+                .or_else(|| {
+                    let sequence = kept_items
+                        .iter()
+                        .filter(|item| matches!(item.turn_item, TurnItem::UserMessage(_)))
+                        .count() as u32;
+                    Some(TurnMetadata {
+                        turn_id: last_turn_id,
+                        session_id,
+                        sequence,
+                        status: TurnStatus::Completed,
+                        kind: devo_protocol::TurnKind::Regular,
+                        model: source
+                            .summary
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| self.deps.default_model.clone()),
+                        thinking: source.summary.thinking.clone(),
+                        reasoning_effort: source.summary.reasoning_effort,
+                        request_model: source
+                            .summary
+                            .model
+                            .clone()
+                            .unwrap_or_else(|| self.deps.default_model.clone()),
+                        request_thinking: source.summary.thinking.clone(),
+                        started_at: source.summary.created_at,
+                        completed_at: Some(source.summary.updated_at),
+                        usage: None,
+                    })
+                })
+        } else {
+            None
+        };
+
+        let updated_at = Utc::now();
+        let summary = crate::SessionMetadata {
+            session_id,
+            cwd: cwd.clone(),
+            created_at,
+            updated_at,
+            title: title_override.or_else(|| source.summary.title.clone()),
+            title_state: source.summary.title_state.clone(),
+            ephemeral: source.summary.ephemeral,
+            model: source.summary.model.clone(),
+            thinking: source.summary.thinking.clone(),
+            reasoning_effort: source.summary.reasoning_effort,
+            total_input_tokens: source_core_session.total_input_tokens,
+            total_output_tokens: source_core_session.total_output_tokens,
+            prompt_token_estimate: source_core_session.prompt_token_estimate,
+            status: SessionRuntimeStatus::Idle,
+        };
+        drop(source_core_session);
+
+        let pending_turn_queue = Arc::clone(&core_session.pending_turn_queue);
+        let btw_input_queue = Arc::clone(&core_session.btw_input_queue);
+        Ok(RuntimeSession {
+            record: None,
+            summary,
+            core_session: Arc::new(Mutex::new(core_session)),
+            active_turn: None,
+            latest_turn,
+            loaded_item_count: u64::try_from(kept_items.len()).unwrap_or(u64::MAX),
+            history_items: rebuilt_history_items,
+            persisted_turn_items: kept_items,
+            latest_compaction_snapshot: None,
+            pending_turn_queue,
+            btw_input_queue,
+            active_task: None,
+            deferred_assistant: None,
+            deferred_reasoning: None,
+            next_item_seq: u64::try_from(source.persisted_turn_items.len().saturating_add(1))
+                .unwrap_or(u64::MAX),
+            first_user_input: source.first_user_input.clone(),
+        })
     }
 
     async fn handle_session_compact(
@@ -1249,6 +1424,7 @@ impl ServerRuntime {
                             });
                         runtime_session.persisted_turn_items.push(
                             crate::execution::PersistedTurnItem {
+                                turn_id,
                                 item_id,
                                 turn_item: summary_turn_item.clone(),
                             },
@@ -3103,6 +3279,7 @@ impl ServerRuntime {
                 session
                     .persisted_turn_items
                     .push(crate::execution::PersistedTurnItem {
+                        turn_id,
                         item_id,
                         turn_item: turn_item.clone(),
                     });

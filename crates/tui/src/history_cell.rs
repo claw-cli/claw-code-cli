@@ -204,6 +204,7 @@ pub(crate) struct UserHistoryCell {
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
     pub accent_color: Color,
+    pub selected: bool,
 }
 
 /// Build logical lines for a user message with styled text elements.
@@ -291,7 +292,11 @@ impl HistoryCell for UserHistoryCell {
             .max(1);
 
         let accent = self.accent_color;
-        let style = user_message_style();
+        let style = if self.selected {
+            user_message_style().fg(accent)
+        } else {
+            user_message_style()
+        };
         let element_style = style.fg(accent);
         let prefix_style = Style::default().fg(accent);
         let blank_prefixed_line = || {
@@ -1083,6 +1088,7 @@ pub(crate) fn new_user_prompt(
         local_image_paths,
         remote_image_urls,
         accent_color,
+        selected: false,
     }
 }
 

@@ -31,6 +31,7 @@ use devo_server::SessionHistoryItem;
 use devo_server::SessionHistoryItemKind;
 use devo_server::SessionListParams;
 use devo_server::SessionResumeParams;
+use devo_server::SessionRollbackParams;
 use devo_server::SessionStartParams;
 use devo_server::SessionTitleUpdateParams;
 use devo_server::SkillListParams;
@@ -112,6 +113,10 @@ enum OperationCommand {
     SwitchSession(SessionId),
     /// Rename the current active session.
     RenameSession(String),
+    /// Roll back the active session to a selected user turn.
+    RollbackToUserTurn(u32),
+    /// Fork a new session at a selected user turn.
+    ForkAtUserTurn(u32),
     /// Interrupt the active turn when one is running.
     InterruptTurn,
     /// Steer text into the currently active turn.
@@ -244,6 +249,18 @@ impl QueryWorkerHandle {
     pub(crate) fn rename_session(&self, title: String) -> Result<()> {
         self.command_tx
             .send(OperationCommand::RenameSession(title))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn rollback_to_user_turn(&self, user_turn_index: u32) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::RollbackToUserTurn(user_turn_index))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn fork_at_user_turn(&self, user_turn_index: u32) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ForkAtUserTurn(user_turn_index))
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -667,6 +684,132 @@ async fn run_worker_inner(
                                         .title
                                         .unwrap_or(title),
                                 });
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::RollbackToUserTurn(user_turn_index)) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: "no active session exists yet; send a prompt or switch to a saved session first".to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                            });
+                            continue;
+                        };
+                        match client
+                            .session_rollback(SessionRollbackParams {
+                                session_id: active_session_id,
+                                user_turn_index,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                active_turn_id = None;
+                                session_cwd = result.session.cwd.clone();
+                                input_history_cursor = None;
+                                let _ = event_tx.send(WorkerEvent::SessionSwitched {
+                                    session_id: active_session_id.to_string(),
+                                    cwd: result.session.cwd,
+                                    title: result.session.title,
+                                    model: result.session.model.clone(),
+                                    thinking: result.session.thinking.clone(),
+                                    reasoning_effort: result.session.reasoning_effort,
+                                    total_input_tokens: result.session.total_input_tokens,
+                                    total_output_tokens: result.session.total_output_tokens,
+                                    prompt_token_estimate: result.session.prompt_token_estimate,
+                                    history_items: project_history_items(&result.history_items),
+                                    loaded_item_count: result.loaded_item_count,
+                                    pending_texts: result.pending_texts,
+                                });
+                                model = result.session.model.clone().unwrap_or(model);
+                                thinking_selection = result.session.thinking.clone();
+                                total_input_tokens = result.session.total_input_tokens;
+                                total_output_tokens = result.session.total_output_tokens;
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ForkAtUserTurn(user_turn_index)) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: "no active session exists yet; send a prompt or switch to a saved session first".to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                            });
+                            continue;
+                        };
+                        match client
+                            .session_fork(devo_server::SessionForkParams {
+                                session_id: active_session_id,
+                                title: None,
+                                cwd: None,
+                                user_turn_index: Some(user_turn_index),
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let next_session_id = result.session.session_id;
+                                match client
+                                    .session_resume(SessionResumeParams {
+                                        session_id: next_session_id,
+                                    })
+                                    .await
+                                {
+                                    Ok(resumed) => {
+                                        active_turn_id = None;
+                                        session_id = Some(next_session_id);
+                                        session_cwd = resumed.session.cwd.clone();
+                                        input_history_cursor = None;
+                                        let _ = event_tx.send(WorkerEvent::SessionSwitched {
+                                            session_id: next_session_id.to_string(),
+                                            cwd: resumed.session.cwd,
+                                            title: resumed.session.title,
+                                            model: resumed.session.model.clone(),
+                                            thinking: resumed.session.thinking.clone(),
+                                            reasoning_effort: resumed.session.reasoning_effort,
+                                            total_input_tokens: resumed.session.total_input_tokens,
+                                            total_output_tokens: resumed.session.total_output_tokens,
+                                            prompt_token_estimate: resumed.session.prompt_token_estimate,
+                                            history_items: project_history_items(&resumed.history_items),
+                                            loaded_item_count: resumed.loaded_item_count,
+                                            pending_texts: resumed.pending_texts,
+                                        });
+                                        model = resumed.session.model.clone().unwrap_or(model);
+                                        thinking_selection = resumed.session.thinking.clone();
+                                        total_input_tokens = resumed.session.total_input_tokens;
+                                        total_output_tokens = resumed.session.total_output_tokens;
+                                    }
+                                    Err(error) => {
+                                        let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                            message: error.to_string(),
+                                            turn_count,
+                                            total_input_tokens,
+                                            total_output_tokens,
+                                            prompt_token_estimate: total_input_tokens,
+                                        });
+                                    }
+                                }
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {

@@ -808,10 +808,10 @@ impl ModifierDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_backend::VT100Backend;
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
-    use crate::test_backend::VT100Backend;
 
     #[test]
     fn diff_buffers_does_not_emit_clear_to_end_for_full_width_row() {
@@ -854,7 +854,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-            .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
+                .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
             "expected clear-to-end to start after the remaining wide char; commands: {commands:?}"
         );
     }
@@ -876,9 +876,7 @@ mod tests {
             .expect("cursor position");
         std::io::Write::write_all(terminal.backend_mut(), b"inline row").expect("write");
 
-        terminal
-            .clear()
-            .expect("clear should succeed");
+        terminal.clear().expect("clear should succeed");
 
         let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
         assert!(rows[1].contains("scrollback row"), "rows: {rows:?}");

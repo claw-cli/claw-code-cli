@@ -8,8 +8,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -50,6 +48,9 @@ use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
 use crate::bottom_pane::ModelPickerEntry;
+use crate::bottom_pane::list_selection_view::ListSelectionView;
+use crate::bottom_pane::list_selection_view::SelectionItem;
+use crate::bottom_pane::list_selection_view::SelectionViewParams;
 use crate::events::SessionListEntry;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
@@ -124,21 +125,6 @@ pub(crate) struct ActiveCellTranscriptKey {
     pub(crate) revision: u64,
     pub(crate) is_stream_continuation: bool,
     pub(crate) animation_tick: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ExitLayoutMode {
-    #[default]
-    SpecialSurface,
-    InlineChat,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ExitLayoutSnapshot {
-    pub(crate) mode: ExitLayoutMode,
-    pub(crate) frame_area: Rect,
-    pub(crate) history_area: Rect,
-    pub(crate) bottom_pane_area: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -263,7 +249,6 @@ pub(crate) struct ChatWidget {
     queued_count: usize,
     active_turn_id: Option<TurnId>,
     busy: bool,
-    exit_layout_snapshot: Arc<Mutex<ExitLayoutSnapshot>>,
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
     user_cell_history_indices: Vec<usize>,
@@ -683,7 +668,6 @@ impl ChatWidget {
             queued_count: 0,
             active_turn_id: None,
             busy: false,
-            exit_layout_snapshot: Arc::new(Mutex::new(ExitLayoutSnapshot::default())),
             selection_mode: false,
             selected_user_cell_index: None,
             user_cell_history_indices: Vec::new(),
@@ -794,6 +778,7 @@ impl ChatWidget {
             self.selection_mode = true;
             // Start from the last user cell if no selection yet
             self.selected_user_cell_index = Some(len - 1);
+            self.sync_selected_user_cell_highlight();
             self.update_selection_status();
             self.frame_requester.schedule_frame();
             return true;
@@ -807,6 +792,7 @@ impl ChatWidget {
         };
         if new != current {
             self.selected_user_cell_index = Some(new);
+            self.sync_selected_user_cell_highlight();
             self.update_selection_status();
             self.frame_requester.schedule_frame();
         }
@@ -816,6 +802,7 @@ impl ChatWidget {
     fn exit_selection_mode(&mut self) {
         self.selection_mode = false;
         self.selected_user_cell_index = None;
+        self.sync_selected_user_cell_highlight();
         self.bottom_pane
             .set_status_line(Some(Line::from(self.session_summary_text()).dim()));
         self.bottom_pane.set_status_line_enabled(true);
@@ -850,25 +837,119 @@ impl ChatWidget {
             .collect();
     }
 
-    fn open_selection_action_menu(&mut self) {
-        if self.selection_mode {
-            // Load the selected user message text into the composer for editing
-            // and exit selection mode.
-            if let Some(idx) = self.selected_user_cell_index
-                && let Some(history_idx) = self.user_cell_history_indices.get(idx)
-                && let Some(cell) = self.history.get(*history_idx)
-                && let Some(user_cell) = cell
-                    .as_ref()
-                    .as_any()
-                    .downcast_ref::<history_cell::UserHistoryCell>()
-            {
-                let text = user_cell.message.clone();
-                self.bottom_pane.restore_input_from_history(Some(text));
-                self.exit_selection_mode();
-                return;
-            }
+    fn sync_selected_user_cell_highlight(&mut self) {
+        for (history_idx, cell) in self.history.iter_mut().enumerate() {
+            let Some(user_cell) = cell
+                .as_mut()
+                .as_any_mut()
+                .downcast_mut::<history_cell::UserHistoryCell>()
+            else {
+                continue;
+            };
+            let is_selected = self.selection_mode
+                && self
+                    .selected_user_cell_index
+                    .and_then(|selected_idx| self.user_cell_history_indices.get(selected_idx))
+                    .is_some_and(|selected_history_idx| *selected_history_idx == history_idx);
+            user_cell.selected = is_selected;
         }
-        self.exit_selection_mode();
+    }
+
+    fn open_selection_action_menu(&mut self) {
+        if !self.selection_mode {
+            return;
+        }
+        let Some(selected_idx) = self.selected_user_cell_index else {
+            self.exit_selection_mode();
+            return;
+        };
+        let Some(history_idx) = self.user_cell_history_indices.get(selected_idx).copied() else {
+            self.exit_selection_mode();
+            return;
+        };
+        let Some(user_cell) = self.history.get(history_idx).and_then(|cell| {
+            cell.as_ref()
+                .as_any()
+                .downcast_ref::<history_cell::UserHistoryCell>()
+        }) else {
+            self.exit_selection_mode();
+            return;
+        };
+
+        let is_latest_user_turn = selected_idx + 1 == self.user_cell_history_indices.len();
+        let selected_turn_index = u32::try_from(selected_idx).unwrap_or(u32::MAX);
+        let selected_text = user_cell.message.clone();
+        let mut items = Vec::new();
+
+        items.push(SelectionItem {
+            name: "Rollback".to_string(),
+            description: None,
+            selected_description: None,
+            is_current: false,
+            is_default: false,
+            is_disabled: is_latest_user_turn,
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::Command(AppCommand::rollback_to_user_turn(
+                    selected_turn_index,
+                )));
+            })],
+            dismiss_on_select: true,
+            search_value: None,
+            disabled_reason: is_latest_user_turn
+                .then_some("Latest user turn cannot be rolled back".to_string()),
+            ..SelectionItem::default()
+        });
+
+        let fork_turn_index = selected_turn_index;
+        items.push(SelectionItem {
+            name: "Fork".to_string(),
+            description: None,
+            selected_description: None,
+            is_current: false,
+            is_default: false,
+            is_disabled: is_latest_user_turn,
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::Command(AppCommand::fork_at_user_turn(
+                    fork_turn_index,
+                )));
+            })],
+            dismiss_on_select: true,
+            search_value: None,
+            disabled_reason: is_latest_user_turn
+                .then_some("Latest user turn cannot be forked".to_string()),
+            ..SelectionItem::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Cancel".to_string(),
+            description: None,
+            selected_description: None,
+            is_current: false,
+            is_default: false,
+            is_disabled: false,
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::StatusMessageChanged {
+                    message: "Selection cancelled".to_string(),
+                });
+            })],
+            dismiss_on_select: true,
+            search_value: None,
+            disabled_reason: None,
+            ..SelectionItem::default()
+        });
+
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    items,
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.bottom_pane
+            .restore_input_from_history(Some(selected_text));
+        self.set_status_message("Select an action");
     }
 
     pub(crate) fn handle_mouse_event(&mut self, _mouse: crossterm::event::MouseEvent) {
@@ -2217,7 +2298,11 @@ impl ChatWidget {
         self.thinking_selection = thinking_selection;
         self.refresh_header_box();
 
-        if selected_model.effective_thinking_capability().options().is_empty() {
+        if selected_model
+            .effective_thinking_capability()
+            .options()
+            .is_empty()
+        {
             self.finalize_pending_model_selection();
             return;
         }
@@ -2413,23 +2498,11 @@ impl ChatWidget {
     pub(crate) fn is_resume_browser_open(&self) -> bool {
         self.resume_browser_loading || self.resume_browser.is_some()
     }
-
-    pub(crate) fn exit_layout_snapshot_handle(&self) -> Arc<Mutex<ExitLayoutSnapshot>> {
-        Arc::clone(&self.exit_layout_snapshot)
-    }
 }
 
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if self.resume_browser_loading {
-            if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
-                *snapshot = ExitLayoutSnapshot {
-                    mode: ExitLayoutMode::SpecialSurface,
-                    frame_area: area,
-                    history_area: Rect::default(),
-                    bottom_pane_area: Rect::default(),
-                };
-            }
             let lines = vec![
                 Line::from("Resume Session".bold()),
                 Line::from("Loading saved sessions...".dim()),
@@ -2444,14 +2517,6 @@ impl Renderable for ChatWidget {
         }
 
         if let Some(browser) = &self.resume_browser {
-            if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
-                *snapshot = ExitLayoutSnapshot {
-                    mode: ExitLayoutMode::SpecialSurface,
-                    frame_area: area,
-                    history_area: Rect::default(),
-                    bottom_pane_area: Rect::default(),
-                };
-            }
             Block::default().style(Style::default()).render(area, buf);
             let title_width = browser
                 .sessions
@@ -2520,14 +2585,6 @@ impl Renderable for ChatWidget {
             .min(area.height.saturating_sub(1).max(3));
         let [history_area, bottom_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(area);
-        if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
-            *snapshot = ExitLayoutSnapshot {
-                mode: ExitLayoutMode::InlineChat,
-                frame_area: area,
-                history_area,
-                bottom_pane_area: bottom_area,
-            };
-        }
 
         let viewport_lines = self.active_viewport_lines(history_area.width);
         if !viewport_lines.is_empty() {

@@ -42,6 +42,7 @@ pub struct InitializeResult {
 pub struct ServerCapabilities {
     pub session_resume: bool,
     pub session_fork: bool,
+    pub session_rollback: bool,
     pub turn_interrupt: bool,
     pub approval_requests: bool,
     pub event_streaming: bool,

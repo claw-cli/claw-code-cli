@@ -151,12 +151,29 @@ pub struct SessionForkParams {
     pub session_id: SessionId,
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_turn_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionForkResult {
     pub session: SessionMetadata,
     pub forked_from_session_id: SessionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRollbackParams {
+    pub session_id: SessionId,
+    pub user_turn_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRollbackResult {
+    pub session: SessionMetadata,
+    pub latest_turn: Option<TurnMetadata>,
+    pub loaded_item_count: u64,
+    pub history_items: Vec<SessionHistoryItem>,
+    pub pending_texts: Vec<String>,
 }
 
 #[cfg(test)]

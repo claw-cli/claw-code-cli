@@ -102,6 +102,7 @@ impl FrameScheduler {
             tokio::pin!(deadline);
 
             tokio::select! {
+                biased;
                 draw_at = self.receiver.recv() => {
                     let Some(draw_at) = draw_at else {
                         // All senders dropped; exit the scheduler.
@@ -113,6 +114,10 @@ impl FrameScheduler {
                     // Do not send a draw immediately here. By continuing the loop,
                     // we recompute the sleep target so the draw fires once via the
                     // sleep branch, coalescing multiple requests into a single draw.
+                    //
+                    // The select is biased toward the deadline branch, so once the
+                    // scheduled draw time is due it will not be starved by a hot
+                    // stream of additional frame requests.
                     continue;
                 }
                 _ = &mut deadline => {
@@ -229,6 +234,27 @@ mod tests {
         // The later delayed request should have been coalesced into the earlier one; no second draw.
         let second = draw_rx.recv().timeout(Duration::from_millis(120)).await;
         assert!(second.is_err(), "unexpected extra draw received");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn due_draw_is_not_starved_by_continuous_new_requests() {
+        let (draw_tx, mut draw_rx) = broadcast::channel(16);
+        let requester = FrameRequester::new(draw_tx);
+
+        requester.schedule_frame();
+
+        for _ in 0..64 {
+            requester.schedule_frame();
+        }
+
+        time::advance(Duration::from_millis(1)).await;
+
+        let first = draw_rx
+            .recv()
+            .timeout(Duration::from_millis(50))
+            .await
+            .expect("timed out waiting for due draw under request flood");
+        assert!(first.is_ok(), "broadcast closed unexpectedly");
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

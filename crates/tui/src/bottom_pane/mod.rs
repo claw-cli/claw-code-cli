@@ -20,7 +20,7 @@ mod chat_composer_history;
 mod command_popup;
 mod file_search_popup;
 mod footer;
-mod list_selection_view;
+pub(crate) mod list_selection_view;
 mod onboarding_view;
 mod paste_burst;
 mod pending_thread_approvals;
@@ -477,6 +477,10 @@ impl BottomPane {
             themes,
             current_name,
         )));
+    }
+
+    pub(crate) fn open_popup_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.push_view(view);
     }
 
     pub(crate) fn restore_input_from_history(&mut self, text: Option<String>) {

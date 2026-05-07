@@ -642,6 +642,16 @@ fn handle_app_command(
             tui.replace_inline_session_ui()?;
             worker.switch_session(*session_id)?;
         }
+        AppCommand::RollbackToUserTurn { user_turn_index } => {
+            loop_state.session_switch_pending = true;
+            tui.replace_inline_session_ui()?;
+            worker.rollback_to_user_turn(*user_turn_index)?;
+        }
+        AppCommand::ForkAtUserTurn { user_turn_index } => {
+            loop_state.session_switch_pending = true;
+            tui.replace_inline_session_ui()?;
+            worker.fork_at_user_turn(*user_turn_index)?;
+        }
     }
     Ok(())
 }
