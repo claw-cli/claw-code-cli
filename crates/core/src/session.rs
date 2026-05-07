@@ -1,15 +1,20 @@
-use std::{
-    collections::VecDeque,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use devo_safety::legacy_permissions::PermissionMode;
 
-use devo_protocol::{PendingInputItem, TurnKind};
+use devo_protocol::PendingInputItem;
+use devo_protocol::TurnKind;
 
+use crate::AgentsMdConfig;
+use crate::Message;
+use crate::Model;
+use crate::SessionContext;
+use crate::TokenBudget;
+use crate::TurnContext;
 use crate::state::turn::TurnState;
-use crate::{AgentsMdConfig, Message, Model, SessionContext, TokenBudget, TurnContext};
 
 /// Configuration for a session.
 #[derive(Debug, Clone)]
@@ -51,8 +56,8 @@ pub struct SessionState {
     pub turn_count: usize,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
-    pub total_cache_creation_tokens: usize,
-    pub total_cache_read_tokens: usize,
+    pub total_cache_creation_tokens: usize, // TODO: from Anthropic Messages API, indicate how many tokens utlized to create cache.
+    pub total_cache_read_tokens: usize,     // TODO: same with `total_input_cached_tokens`.
     pub prompt_token_estimate: usize,
     /// Input tokens reported by the model for the most recent turn.
     /// Used by `TokenBudget::should_compact()` to decide when to compact.

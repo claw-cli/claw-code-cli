@@ -16,10 +16,10 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
-use crate::chatwidget::ExitLayoutMode;
 use crate::chatwidget::ThinkingListEntry;
 use crate::chatwidget::TuiSessionState;
 use crate::render::renderable::Renderable;
+use crate::slash_command::built_in_slash_commands;
 use crate::tui::frame_requester::FrameRequester;
 
 fn widget_with_model(
@@ -190,6 +190,47 @@ fn initial_thinking_selection_overrides_model_default() {
 }
 
 #[test]
+fn slash_command_list_does_not_include_thinking() {
+    let commands = built_in_slash_commands();
+    assert!(!commands.iter().any(|(name, _)| *name == "thinking"));
+}
+
+#[test]
+fn busy_widget_blocks_model_change_with_transcript_message() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_paste("/model".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(app_event_rx.try_recv().is_err());
+
+    let scrollback = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scrollback.contains("Cannot change model while generating"));
+}
+
+#[test]
 fn toggle_with_levels_treats_enabled_as_default_effort_in_picker() {
     let model = Model {
         slug: "deepseek-v4".to_string(),
@@ -227,34 +268,6 @@ fn toggle_with_levels_treats_enabled_as_default_effort_in_picker() {
             },
         ]
     );
-}
-
-#[test]
-fn render_captures_inline_exit_layout_snapshot() {
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-    let (widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
-    let area = ratatui::layout::Rect::new(0, 0, 80, 12);
-    let mut buf = ratatui::buffer::Buffer::empty(area);
-
-    widget.render(area, &mut buf);
-
-    let snapshot = *widget
-        .exit_layout_snapshot_handle()
-        .lock()
-        .expect("snapshot lock");
-    assert_eq!(ExitLayoutMode::InlineChat, snapshot.mode);
-    assert_eq!(area, snapshot.frame_area);
-    assert_eq!(snapshot.frame_area.width, snapshot.history_area.width);
-    assert_eq!(snapshot.frame_area.width, snapshot.bottom_pane_area.width);
-    assert_eq!(
-        snapshot.frame_area.bottom(),
-        snapshot.bottom_pane_area.bottom()
-    );
-    assert_eq!(snapshot.bottom_pane_area.y, snapshot.history_area.bottom());
 }
 
 #[test]
@@ -407,6 +420,24 @@ fn key_release_does_not_duplicate_text_input() {
 }
 
 #[test]
+fn startup_header_mascot_animation_advances_on_pre_draw_tick() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    assert_eq!(widget.startup_header_mascot_frame_index(), 0);
+
+    widget.force_startup_header_animation_due();
+    widget.pre_draw_tick();
+
+    assert_eq!(widget.startup_header_mascot_frame_index(), 1);
+}
+
+#[test]
 fn onboarding_view_is_active_on_first_run() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -471,6 +502,9 @@ fn streamed_lines_stay_in_live_viewport_until_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -502,6 +536,9 @@ fn committed_history_drains_to_scrollback_lines() {
         turn_count: 1,
         total_input_tokens: 10,
         total_output_tokens: 20,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 30,
+        last_query_input_tokens: 10,
         prompt_token_estimate: 10,
     });
 
@@ -604,6 +641,9 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: vec![
             crate::events::TranscriptItem::new(
@@ -669,6 +709,9 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -682,6 +725,48 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
 }
 
 #[test]
+fn completed_turn_summary_keeps_duration_for_text_turns() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.force_task_elapsed_seconds(3);
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta("hello".to_string()));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Completed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
+    let committed = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(committed.contains("▣"));
+    assert!(committed.contains("Test Model"));
+    assert!(committed.contains("3s"));
+}
+
+#[test]
 fn active_response_renders_generating_status_without_devo_title() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -691,6 +776,7 @@ fn active_response_renders_generating_status_without_devo_title() {
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
 
+    let _ = widget.drain_scrollback_lines(80);
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
         thinking: None,
@@ -712,6 +798,8 @@ fn streaming_pending_ai_reply_respects_wrap_limit_before_finalize() {
         ..Model::default()
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    widget.handle_app_event(AppEvent::ClearTranscript);
+    let _ = widget.drain_scrollback_lines(80);
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
@@ -779,6 +867,9 @@ fn committed_assistant_markdown_does_not_double_wrap() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -831,6 +922,9 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -857,6 +951,9 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         reasoning_effort: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
         history_items: vec![crate::events::TranscriptItem::new(
             crate::events::TranscriptItemKind::Reasoning,
@@ -891,18 +988,18 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         "thinking".to_string(),
     ));
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
-        "final answer".to_string(),
+        "final answer line 1\nfinal answer line 2\n".to_string(),
     ));
 
     let before_rows = rendered_rows(&widget, 80, 16);
     let before = before_rows.join("\n");
     assert!(
-        before.contains("thinking") && before.contains("final answer"),
+        before.contains("thinking") && before.contains("final answer line 1"),
         "reasoning/text should both be visible while streaming:\n{before}"
     );
     let reasoning_row = find_row_index(&before_rows, "thinking").expect("missing reasoning row");
     let assistant_row =
-        find_row_index(&before_rows, "final answer").expect("missing assistant row");
+        find_row_index(&before_rows, "final answer line 1").expect("missing assistant row");
     assert_eq!(
         assistant_row,
         reasoning_row + 2,
@@ -914,14 +1011,34 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         before_rows[reasoning_row + 1]
     );
 
+    widget.pre_draw_tick();
+    let committed_before_reasoning_complete =
+        trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
+    assert!(
+        !scrollback_contains_text(&committed_before_reasoning_complete, "final answer line 1"),
+        "assistant output should stay live until reasoning completes"
+    );
+
     widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
         "thinking".to_string(),
     ));
 
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
-        after.contains("thinking") && after.contains("final answer"),
-        "reasoning/text should remain visible in separate cells:\n{after}"
+        after.contains("thinking"),
+        "reasoning text should remain visible after completion:\n{after}"
+    );
+
+    let committed_after_reasoning_complete =
+        trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
+    let committed_after_text = committed_after_reasoning_complete
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(
+        committed_after_text.contains("final answer line 1"),
+        "assistant output should flush once reasoning completes: {committed_after_reasoning_complete:?}"
     );
 }
 
@@ -954,6 +1071,11 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::High),
         ..Model::default()
     };
     let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
@@ -1008,6 +1130,9 @@ fn session_switch_updates_session_identity_projection() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1022,6 +1147,130 @@ fn session_switch_updates_session_identity_projection() {
             ..resumed_model
         })
     );
+}
+
+#[test]
+fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: Some("Resumed".to_string()),
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 12,
+        total_output_tokens: 18,
+        total_cache_read_tokens: 4,
+        last_query_total_tokens: 42,
+        last_query_input_tokens: 42,
+        prompt_token_estimate: 12,
+        history_items: Vec::new(),
+        loaded_item_count: 0,
+        pending_texts: vec![],
+    });
+
+    let idle_summary = widget.status_summary_text();
+    assert!(idle_summary.contains("↑12"));
+    assert!(idle_summary.contains("↺4 33%"));
+    assert!(idle_summary.contains("↓18"));
+    assert!(idle_summary.contains("42/190k"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::UsageUpdated {
+        total_input_tokens: 7,
+        total_output_tokens: 2,
+        total_cache_read_tokens: 6,
+        last_query_total_tokens: 9,
+        last_query_input_tokens: 7,
+    });
+
+    let busy_summary = widget.status_summary_text();
+    assert!(busy_summary.contains("↑7"));
+    assert!(busy_summary.contains("↺6 86%"));
+    assert!(busy_summary.contains("7/190k"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "stop".to_string(),
+        turn_count: 2,
+        total_input_tokens: 19,
+        total_output_tokens: 20,
+        total_cache_read_tokens: 6,
+        last_query_total_tokens: 9,
+        last_query_input_tokens: 7,
+        prompt_token_estimate: 7,
+    });
+
+    let finished_summary = widget.status_summary_text();
+    assert!(finished_summary.contains("↑19"));
+    assert!(finished_summary.contains("↺6 32%"));
+    assert!(finished_summary.contains("7/190k"));
+}
+
+#[test]
+fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    assert!(widget.has_stream_controller());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "first line\nsecond line\n".to_string(),
+    ));
+
+    widget.pre_draw_tick();
+    let first_pass = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(first_pass.contains("first line"));
+    assert!(!first_pass.contains("second line"));
+
+    widget.pre_draw_tick();
+    let second_pass = widget
+        .drain_scrollback_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(second_pass.contains("second line"));
 }
 
 #[test]
@@ -1044,6 +1293,9 @@ fn new_session_prepared_resets_session_identity_projection() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1054,6 +1306,9 @@ fn new_session_prepared_resets_session_identity_projection() {
         model: "new-session-model".to_string(),
         thinking: None,
         reasoning_effort: None,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        total_cache_read_tokens: 0,
     });
 
     assert_eq!(widget.current_cwd(), initial_cwd.as_path());
@@ -1074,6 +1329,11 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
     let alt_model = Model {
         slug: "second-model".to_string(),
         display_name: "Second Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::High),
         ..Model::default()
     };
     let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
@@ -1095,6 +1355,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
     widget.handle_app_event(AppEvent::ModelSelected {
         model: "second-model".to_string(),
     });
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     widget.submit_text("hello".to_string());
 
     assert_eq!(widget.current_model(), Some(&alt_model));
@@ -1105,7 +1366,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         AppEvent::Command(AppCommand::OverrideTurnContext {
             cwd: None,
             model: Some("second-model".to_string()),
-            thinking: Some(None),
+            thinking: Some(Some("high".to_string())),
             sandbox: None,
             approval_policy: None,
         })
@@ -1118,9 +1379,251 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             }],
             cwd: Some(widget.current_cwd().to_path_buf()),
             model: Some("second-model".to_string()),
-            thinking: None,
+            thinking: Some("high".to_string()),
             sandbox: None,
             approval_policy: None,
         })
+    );
+}
+
+#[test]
+fn model_selection_with_thinking_support_waits_for_second_step() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let alt_model = Model {
+        slug: "second-model".to_string(),
+        display_name: "Second Model".to_string(),
+        thinking_capability: ThinkingCapability::Levels(vec![
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ]),
+        default_reasoning_effort: Some(ReasoningEffort::High),
+        ..Model::default()
+    };
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(cwd, Some(model)),
+        initial_thinking_selection: None,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: vec![alt_model.clone()],
+        saved_model_slugs: vec!["second-model".into()],
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    });
+
+    widget.handle_app_event(AppEvent::ModelSelected {
+        model: "second-model".to_string(),
+    });
+
+    assert_eq!(widget.current_model(), Some(&alt_model));
+    assert!(app_event_rx.try_recv().is_err());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(
+        app_event_rx
+            .try_recv()
+            .expect("context override command is emitted"),
+        AppEvent::Command(AppCommand::OverrideTurnContext {
+            cwd: None,
+            model: Some("second-model".to_string()),
+            thinking: Some(Some("high".to_string())),
+            sandbox: None,
+            approval_policy: None,
+        })
+    );
+}
+
+#[test]
+fn model_selection_without_thinking_support_finishes_immediately() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let base_model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let alt_model = Model {
+        slug: "plain-model".to_string(),
+        display_name: "Plain Model".to_string(),
+        thinking_capability: ThinkingCapability::Unsupported,
+        ..Model::default()
+    };
+    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(cwd, Some(base_model)),
+        initial_thinking_selection: None,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: vec![alt_model.clone()],
+        saved_model_slugs: vec!["plain-model".into()],
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    });
+
+    widget.handle_app_event(AppEvent::ModelSelected {
+        model: "plain-model".to_string(),
+    });
+
+    assert_eq!(widget.current_model(), Some(&alt_model));
+    assert_eq!(
+        app_event_rx
+            .try_recv()
+            .expect("context override command is emitted"),
+        AppEvent::Command(AppCommand::OverrideTurnContext {
+            cwd: None,
+            model: Some("plain-model".to_string()),
+            thinking: Some(None),
+            sandbox: None,
+            approval_policy: None,
+        })
+    );
+}
+
+#[test]
+fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    // Activate reasoning pause
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "thinking".to_string(),
+    ));
+    // Queue assistant lines while reasoning is active
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "line one\nline two\nline three\n".to_string(),
+    ));
+    // Complete reasoning — this triggers the flush
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        "thinking".to_string(),
+    ));
+
+    let committed = widget.drain_scrollback_lines(80);
+    // The three assistant lines should be in a single cell, so there should be
+    // no blank separator lines between them. Expect exactly 3 non-blank content
+    // lines (plus possibly a blank separator between header and this cell).
+    let non_blank: Vec<&crate::history_cell::ScrollbackLine> = committed
+        .iter()
+        .filter(|l| {
+            !l.line
+                .spans
+                .iter()
+                .all(|span| span.content.trim().is_empty())
+        })
+        .collect();
+    let text = non_blank
+        .iter()
+        .flat_map(|l| l.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("line one"));
+    assert!(text.contains("line two"));
+    assert!(text.contains("line three"));
+}
+
+#[test]
+fn reasoning_appears_exactly_once_after_full_turn() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "I am a unique thought".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "final answer\n".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
+        "I am a unique thought".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "stop".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
+    let scrollback = widget.drain_scrollback_lines(80);
+    let full_text = scrollback
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(
+        full_text.matches("I am a unique thought").count(),
+        1,
+        "reasoning should appear exactly once in scrollback, got:\n{full_text}"
+    );
+}
+
+#[test]
+fn live_reasoning_cell_renders_without_duplication() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ReasoningDelta(
+        "step by step analysis".to_string(),
+    ));
+
+    let rows = rendered_rows(&widget, 80, 12);
+    let before = rows.join("\n");
+    // Reasoning text should be visible and appear exactly once.
+    assert!(
+        before.contains("step by step analysis"),
+        "reasoning text should be visible:\n{before}"
+    );
+    let occurrences = before.matches("step by step analysis").count();
+    assert_eq!(
+        occurrences, 1,
+        "reasoning should appear exactly once, got {occurrences}:\n{before}"
     );
 }

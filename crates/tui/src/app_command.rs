@@ -48,6 +48,12 @@ pub(crate) enum AppCommand {
     SwitchSession {
         session_id: SessionId,
     },
+    RollbackToUserTurn {
+        user_turn_index: u32,
+    },
+    ForkAtUserTurn {
+        user_turn_index: u32,
+    },
 }
 
 #[allow(dead_code)]
@@ -98,6 +104,12 @@ pub(crate) enum AppCommandView<'a> {
     },
     SwitchSession {
         session_id: SessionId,
+    },
+    RollbackToUserTurn {
+        user_turn_index: u32,
+    },
+    ForkAtUserTurn {
+        user_turn_index: u32,
     },
 }
 
@@ -165,6 +177,14 @@ impl AppCommand {
         Self::SwitchSession { session_id }
     }
 
+    pub(crate) fn rollback_to_user_turn(user_turn_index: u32) -> Self {
+        Self::RollbackToUserTurn { user_turn_index }
+    }
+
+    pub(crate) fn fork_at_user_turn(user_turn_index: u32) -> Self {
+        Self::ForkAtUserTurn { user_turn_index }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn kind(&self) -> &'static str {
         match self {
@@ -175,6 +195,8 @@ impl AppCommand {
             Self::SteerTurn { .. } => "steer_turn",
             Self::BrowseInputHistory { .. } => "browse_input_history",
             Self::SwitchSession { .. } => "switch_session",
+            Self::RollbackToUserTurn { .. } => "rollback_to_user_turn",
+            Self::ForkAtUserTurn { .. } => "fork_at_user_turn",
         }
     }
 
@@ -219,6 +241,12 @@ impl AppCommand {
             },
             Self::SwitchSession { session_id } => AppCommandView::SwitchSession {
                 session_id: *session_id,
+            },
+            Self::RollbackToUserTurn { user_turn_index } => AppCommandView::ThreadRollback {
+                num_turns: *user_turn_index,
+            },
+            Self::ForkAtUserTurn { user_turn_index } => AppCommandView::ThreadRollback {
+                num_turns: *user_turn_index,
             },
         }
     }

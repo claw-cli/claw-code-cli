@@ -17,13 +17,14 @@ use crate::exec_cell::OutputLinesParams;
 use crate::exec_cell::TOOL_CALL_MAX_LINES;
 use crate::exec_cell::output_lines;
 use crate::exec_cell::spinner;
-use crate::exec_command::relativize_to_home;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::live_wrap::take_prefix_by_width;
 use crate::markdown::append_markdown;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
+use crate::startup_header::StartupHeaderData;
+use crate::startup_header::build_startup_header;
 use crate::style::user_message_style;
 use crate::text_formatting::truncate_text;
 use crate::theme::ThemeSet;
@@ -204,6 +205,7 @@ pub(crate) struct UserHistoryCell {
     pub local_image_paths: Vec<PathBuf>,
     pub remote_image_urls: Vec<String>,
     pub accent_color: Color,
+    pub selected: bool,
 }
 
 /// Build logical lines for a user message with styled text elements.
@@ -291,7 +293,11 @@ impl HistoryCell for UserHistoryCell {
             .max(1);
 
         let accent = self.accent_color;
-        let style = user_message_style();
+        let style = if self.selected {
+            user_message_style().fg(accent)
+        } else {
+            user_message_style()
+        };
         let element_style = style.fg(accent);
         let prefix_style = Style::default().fg(accent);
         let blank_prefixed_line = || {
@@ -846,16 +852,6 @@ impl HistoryCell for CompletedMcpToolCallWithImageOutput {
     }
 }
 
-pub(crate) const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
-
-pub(crate) fn card_inner_width(width: u16, max_inner_width: usize) -> Option<usize> {
-    if width < 4 {
-        return None;
-    }
-    let inner_width = std::cmp::min(width.saturating_sub(4) as usize, max_inner_width);
-    Some(inner_width)
-}
-
 /// Render `lines` inside a border sized to the widest span in the content.
 pub(crate) fn with_border(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     with_border_internal(lines, /*forced_inner_width*/ None)
@@ -990,7 +986,8 @@ fn random_tip() -> String {
 pub(crate) fn new_session_info(
     cwd: &Path,
     requested_model: &str,
-    model: String,
+    header_model: String,
+    resolved_model: String,
     thinking_capability: ThinkingCapability,
     default_reasoning_effort: Option<ReasoningEffort>,
     thinking_implementation: Option<ThinkingImplementation>,
@@ -998,10 +995,11 @@ pub(crate) fn new_session_info(
     tooltip_override: Option<String>,
     show_fast_status: bool,
     accent_color: Color,
+    mascot_frame_index: usize,
 ) -> SessionInfoCell {
     // Header box rendered as history (so it appears at the very top)
     let header = HeaderHistoryCell::new(
-        model.clone(),
+        header_model.clone(),
         thinking_capability,
         default_reasoning_effort,
         thinking_implementation,
@@ -1009,64 +1007,19 @@ pub(crate) fn new_session_info(
         cwd.to_path_buf(),
         CLI_VERSION,
         accent_color,
+        mascot_frame_index,
     );
     let mut parts: Vec<Box<dyn HistoryCell>> = vec![Box::new(header)];
 
-    if is_first_event {
-        // Help lines below the header (new copy and list)
-        let help_lines: Vec<Line<'static>> = vec![
-            "  To get started, describe a task or try one of these commands:"
-                .dim()
-                .into(),
-            Line::from(""),
-            Line::from(vec![
-                "  ".into(),
-                "/model".into(),
-                " - choose the active model".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "/thinking".into(),
-                " - choose the active thinking mode".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "/resume".into(),
-                " - resume a saved chat".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "/new".into(),
-                " - start a new chat".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "/status".into(),
-                " - show current session configuration and token usage".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "/clear".into(),
-                " - clear the current transcript".dim(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "/onboard".into(),
-                " - configure model provider connection".dim(),
-            ]),
-            Line::from(vec!["  ".into(), "/exit".into(), " - exit Devo".dim()]),
-        ];
-
-        parts.push(Box::new(PlainHistoryCell { lines: help_lines }));
-    } else {
+    if !is_first_event {
         if let Some(tip) = tooltip_override {
             parts.push(Box::new(TooltipHistoryCell::new(tip, cwd)));
         }
-        if requested_model != model {
+        if requested_model != header_model {
             let lines = vec![
                 "model changed:".magenta().bold().into(),
                 format!("requested: {requested_model}").into(),
-                format!("used: {model}").into(),
+                format!("used: {resolved_model}").into(),
             ];
             parts.push(Box::new(PlainHistoryCell { lines }));
         }
@@ -1088,6 +1041,7 @@ pub(crate) fn new_user_prompt(
         local_image_paths,
         remote_image_urls,
         accent_color,
+        selected: false,
     }
 }
 
@@ -1102,6 +1056,7 @@ pub(crate) struct HeaderHistoryCell {
     show_fast_status: bool,
     directory: PathBuf,
     accent_color: Color,
+    mascot_frame_index: usize,
 }
 
 impl HeaderHistoryCell {
@@ -1115,6 +1070,7 @@ impl HeaderHistoryCell {
         directory: PathBuf,
         version: &'static str,
         accent_color: Color,
+        mascot_frame_index: usize,
     ) -> Self {
         Self::new_with_style(
             model,
@@ -1126,6 +1082,7 @@ impl HeaderHistoryCell {
             directory,
             version,
             accent_color,
+            mascot_frame_index,
         )
     }
 
@@ -1140,6 +1097,7 @@ impl HeaderHistoryCell {
         directory: PathBuf,
         version: &'static str,
         accent_color: Color,
+        mascot_frame_index: usize,
     ) -> Self {
         Self {
             version,
@@ -1151,34 +1109,8 @@ impl HeaderHistoryCell {
             show_fast_status,
             directory,
             accent_color,
+            mascot_frame_index,
         }
-    }
-
-    fn format_directory(&self, max_width: Option<usize>) -> String {
-        Self::format_directory_inner(&self.directory, max_width)
-    }
-
-    fn format_directory_inner(directory: &Path, max_width: Option<usize>) -> String {
-        let formatted = if let Some(rel) = relativize_to_home(directory) {
-            if rel.as_os_str().is_empty() {
-                "~".to_string()
-            } else {
-                format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display())
-            }
-        } else {
-            directory.display().to_string()
-        };
-
-        if let Some(max_width) = max_width {
-            if max_width == 0 {
-                return String::new();
-            }
-            if UnicodeWidthStr::width(formatted.as_str()) > max_width {
-                return crate::text_formatting::center_truncate_path(&formatted, max_width);
-            }
-        }
-
-        formatted
     }
 
     fn reasoning_label(&self) -> Option<&'static str> {
@@ -1224,68 +1156,20 @@ impl HeaderHistoryCell {
 
 impl HistoryCell for HeaderHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let Some(inner_width) = card_inner_width(width, SESSION_HEADER_MAX_INNER_WIDTH) else {
-            return Vec::new();
-        };
-
-        let make_row = |spans: Vec<Span<'static>>| Line::from(spans);
-
-        // Title line rendered inside the box: ">_  Devo (vX)"
-        let title_spans: Vec<Span<'static>> = vec![
-            Span::from(">_ ").dim(),
-            Span::from(" Devo").bold(),
-            Span::from(" ").dim(),
-            Span::from(format!("(v{})", self.version)).dim(),
-        ];
-
-        const CHANGE_MODEL_HINT_COMMAND: &str = "/model";
-        const CHANGE_MODEL_HINT_EXPLANATION: &str = " to change";
-        const DIR_LABEL: &str = "directory:";
-        let label_width = DIR_LABEL.len();
-
-        let model_label = format!(
-            "{model_label:<label_width$}",
-            model_label = "model:",
-            label_width = label_width
-        );
-        let reasoning_label = self.reasoning_label();
-        let model_spans: Vec<Span<'static>> = {
-            let mut spans = vec![
-                Span::from(format!("{model_label} ")).dim(),
-                Span::styled(self.model.clone(), self.model_style),
-            ];
-            if let Some(reasoning) = reasoning_label {
-                spans.push(Span::from(" "));
-                spans.push(Span::from(reasoning));
-            }
-            if self.show_fast_status {
-                spans.push("   ".into());
-                spans.push(Span::styled("fast", self.model_style.magenta()));
-            }
-            spans.push("   ".dim());
-            spans.push(Span::styled(
-                CHANGE_MODEL_HINT_COMMAND,
-                Style::default().fg(self.accent_color),
-            ));
-            spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
-            spans
-        };
-
-        let dir_label = format!("{DIR_LABEL:<label_width$}");
-        let dir_prefix = format!("{dir_label} ");
-        let dir_prefix_width = UnicodeWidthStr::width(dir_prefix.as_str());
-        let dir_max_width = inner_width.saturating_sub(dir_prefix_width);
-        let dir = self.format_directory(Some(dir_max_width));
-        let dir_spans = vec![Span::from(dir_prefix).dim(), Span::from(dir)];
-
-        let lines = vec![
-            make_row(title_spans),
-            make_row(Vec::new()),
-            make_row(model_spans),
-            make_row(dir_spans),
-        ];
-
-        with_border(lines)
+        let reasoning = self.reasoning_label().unwrap_or("unknown");
+        let _ = self.show_fast_status;
+        let _ = self.model_style;
+        build_startup_header(
+            StartupHeaderData {
+                version: self.version,
+                model: &self.model,
+                reasoning,
+                directory: &self.directory,
+                accent_color: self.accent_color,
+                mascot_frame_index: self.mascot_frame_index,
+            },
+            width,
+        )
     }
 }
 
@@ -1596,22 +1480,25 @@ pub struct TurnSummaryCell {
     pub model_name: String,
     pub duration: Option<u64>,
     pub interrupted: bool,
+    pub accent_color: Color,
 }
 
 impl TurnSummaryCell {
-    pub(crate) fn new(model_name: String, duration: Option<u64>) -> Self {
+    pub(crate) fn new(model_name: String, duration: Option<u64>, accent_color: Color) -> Self {
         Self {
             model_name,
             duration,
             interrupted: false,
+            accent_color,
         }
     }
 
-    pub(crate) fn new_interrupted(model_name: String) -> Self {
+    pub(crate) fn new_interrupted(model_name: String, accent_color: Color) -> Self {
         Self {
             model_name,
             duration: None,
             interrupted: true,
+            accent_color,
         }
     }
 }
@@ -1636,7 +1523,7 @@ impl HistoryCell for TurnSummaryCell {
         let _ = width;
         let mut spans: Vec<Span<'static>> = vec![
             Span::raw(" ".repeat(LIVE_PREFIX_COLS as usize)),
-            Span::styled("▣", Style::default().fg(Color::Rgb(0x8B, 0x94, 0x9E))),
+            Span::styled("▣", Style::default().fg(self.accent_color)),
             Span::styled(" ", Style::default()),
             Span::styled(self.model_name.clone(), Style::default().dim()),
         ];

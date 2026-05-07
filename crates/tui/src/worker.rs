@@ -31,6 +31,7 @@ use devo_server::SessionHistoryItem;
 use devo_server::SessionHistoryItemKind;
 use devo_server::SessionListParams;
 use devo_server::SessionResumeParams;
+use devo_server::SessionRollbackParams;
 use devo_server::SessionStartParams;
 use devo_server::SessionTitleUpdateParams;
 use devo_server::SkillListParams;
@@ -112,6 +113,10 @@ enum OperationCommand {
     SwitchSession(SessionId),
     /// Rename the current active session.
     RenameSession(String),
+    /// Roll back the active session to a selected user turn.
+    RollbackToUserTurn(u32),
+    /// Fork a new session at a selected user turn.
+    ForkAtUserTurn(u32),
     /// Interrupt the active turn when one is running.
     InterruptTurn,
     /// Steer text into the currently active turn.
@@ -247,6 +252,18 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    pub(crate) fn rollback_to_user_turn(&self, user_turn_index: u32) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::RollbackToUserTurn(user_turn_index))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn fork_at_user_turn(&self, user_turn_index: u32) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ForkAtUserTurn(user_turn_index))
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     /// Interrupts the active turn when one exists.
     pub(crate) fn interrupt_turn(&self) -> Result<()> {
         self.command_tx
@@ -319,7 +336,9 @@ async fn run_worker(
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_input_tokens: 0,
         });
     }
 }
@@ -341,6 +360,10 @@ async fn run_worker_inner(
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
     let mut total_output_tokens = 0usize;
+    let mut total_cache_read_tokens = 0usize;
+    let mut last_query_total_tokens = 0usize;
+    let mut last_query_input_tokens = 0usize;
+    let mut saw_usage_update_for_turn = false;
     let mut latest_completed_agent_message: Option<String> = None;
     let mut input_history_cursor: Option<usize> = None;
 
@@ -383,7 +406,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -455,6 +480,7 @@ async fn run_worker_inner(
                         client.initialize().await?;
                         session_id = None;
                         active_turn_id = None;
+                        last_query_total_tokens = 0;
                     }
                     Some(OperationCommand::ListSessions) => {
                         match tokio::time::timeout(
@@ -488,7 +514,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                             Err(_) => {
@@ -497,7 +525,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -521,7 +551,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                             Err(_) => {
@@ -530,7 +562,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -542,7 +576,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         };
@@ -552,7 +588,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         }
@@ -577,7 +615,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -587,11 +627,15 @@ async fn run_worker_inner(
                         session_id = None;
                         session_cwd = config.cwd.clone();
                         input_history_cursor = None;
+                        last_query_total_tokens = 0;
                         let _ = event_tx.send(WorkerEvent::NewSessionPrepared {
                             cwd: session_cwd.clone(),
                             model: model.clone(),
                             thinking: thinking_selection.clone(),
                             reasoning_effort: None,
+                            last_query_total_tokens,
+                            last_query_input_tokens,
+                            total_cache_read_tokens,
                         });
                     }
                     Some(OperationCommand::SwitchSession(next_session_id)) => {
@@ -616,6 +660,16 @@ async fn run_worker_inner(
                                     reasoning_effort: result.session.reasoning_effort,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    total_cache_read_tokens: result.session.total_cache_read_tokens,
+                                    last_query_total_tokens: result
+                                        .session
+                                        .last_query_total_tokens,
+                                    last_query_input_tokens: result
+                                        .latest_turn
+                                        .as_ref()
+                                        .and_then(|turn| turn.usage.as_ref())
+                                        .map(|usage| usage.input_tokens as usize)
+                                        .unwrap_or(0),
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
@@ -629,6 +683,8 @@ async fn run_worker_inner(
                                 thinking_selection = result.session.thinking.clone();
                                 total_input_tokens = result.session.total_input_tokens;
                                 total_output_tokens = result.session.total_output_tokens;
+                                last_query_total_tokens =
+                                    result.session.last_query_total_tokens;
                             }
                             Err(error) => {
                                 let _ = event_tx.send(WorkerEvent::TurnFailed {
@@ -636,7 +692,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -648,7 +706,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         };
@@ -674,7 +734,169 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::RollbackToUserTurn(user_turn_index)) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: "no active session exists yet; send a prompt or switch to a saved session first".to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                            continue;
+                        };
+                        match client
+                            .session_rollback(SessionRollbackParams {
+                                session_id: active_session_id,
+                                user_turn_index,
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                active_turn_id = None;
+                                session_cwd = result.session.cwd.clone();
+                                input_history_cursor = None;
+                                let _ = event_tx.send(WorkerEvent::SessionSwitched {
+                                    session_id: active_session_id.to_string(),
+                                    cwd: result.session.cwd,
+                                    title: result.session.title,
+                                    model: result.session.model.clone(),
+                                    thinking: result.session.thinking.clone(),
+                                    reasoning_effort: result.session.reasoning_effort,
+                                    total_input_tokens: result.session.total_input_tokens,
+                                    total_output_tokens: result.session.total_output_tokens,
+                                    total_cache_read_tokens: result.session.total_cache_read_tokens,
+                                    last_query_total_tokens: result
+                                        .session
+                                        .last_query_total_tokens,
+                                    last_query_input_tokens: result
+                                        .latest_turn
+                                        .as_ref()
+                                        .and_then(|turn| turn.usage.as_ref())
+                                        .map(|usage| usage.input_tokens as usize)
+                                        .unwrap_or(0),
+                                    prompt_token_estimate: result.session.prompt_token_estimate,
+                                    history_items: project_history_items(&result.history_items),
+                                    loaded_item_count: result.loaded_item_count,
+                                    pending_texts: result.pending_texts,
+                                });
+                                model = result.session.model.clone().unwrap_or(model);
+                                thinking_selection = result.session.thinking.clone();
+                                total_input_tokens = result.session.total_input_tokens;
+                                total_output_tokens = result.session.total_output_tokens;
+                                last_query_total_tokens =
+                                    result.session.last_query_total_tokens;
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
+                            }
+                        }
+                    }
+                    Some(OperationCommand::ForkAtUserTurn(user_turn_index)) => {
+                        let Some(active_session_id) = session_id else {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: "no active session exists yet; send a prompt or switch to a saved session first".to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                            continue;
+                        };
+                        match client
+                            .session_fork(devo_server::SessionForkParams {
+                                session_id: active_session_id,
+                                title: None,
+                                cwd: None,
+                                user_turn_index: Some(user_turn_index),
+                            })
+                            .await
+                        {
+                            Ok(result) => {
+                                let next_session_id = result.session.session_id;
+                                match client
+                                    .session_resume(SessionResumeParams {
+                                        session_id: next_session_id,
+                                    })
+                                    .await
+                                {
+                                    Ok(resumed) => {
+                                        active_turn_id = None;
+                                        session_id = Some(next_session_id);
+                                        session_cwd = resumed.session.cwd.clone();
+                                        input_history_cursor = None;
+                                        let _ = event_tx.send(WorkerEvent::SessionSwitched {
+                                            session_id: next_session_id.to_string(),
+                                            cwd: resumed.session.cwd,
+                                            title: resumed.session.title,
+                                            model: resumed.session.model.clone(),
+                                            thinking: resumed.session.thinking.clone(),
+                                            reasoning_effort: resumed.session.reasoning_effort,
+                                            total_input_tokens: resumed.session.total_input_tokens,
+                                            total_output_tokens: resumed.session.total_output_tokens,
+                                            total_cache_read_tokens: resumed.session.total_cache_read_tokens,
+                                            last_query_total_tokens: resumed
+                                                .session
+                                                .last_query_total_tokens,
+                                            last_query_input_tokens: resumed
+                                                .latest_turn
+                                                .as_ref()
+                                                .and_then(|turn| turn.usage.as_ref())
+                                                .map(|usage| usage.input_tokens as usize)
+                                                .unwrap_or(0),
+                                            prompt_token_estimate: resumed.session.prompt_token_estimate,
+                                            history_items: project_history_items(&resumed.history_items),
+                                            loaded_item_count: resumed.loaded_item_count,
+                                            pending_texts: resumed.pending_texts,
+                                        });
+                                        model = resumed.session.model.clone().unwrap_or(model);
+                                        thinking_selection = resumed.session.thinking.clone();
+                                        total_input_tokens = resumed.session.total_input_tokens;
+                                        total_output_tokens = resumed.session.total_output_tokens;
+                                        last_query_total_tokens =
+                                            resumed.session.last_query_total_tokens;
+                                    }
+                                    Err(error) => {
+                                        let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                            message: error.to_string(),
+                                            turn_count,
+                                            total_input_tokens,
+                                            total_output_tokens,
+                                            total_cache_read_tokens,
+                                            prompt_token_estimate: total_input_tokens,
+                                            last_query_input_tokens,
+                                        });
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -689,13 +911,15 @@ async fn run_worker_inner(
                                 })
                                 .await
                             {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: error.to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                });
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
                             }
                     }
                     Some(OperationCommand::SteerTurn {
@@ -716,16 +940,18 @@ async fn run_worker_inner(
                                         turn_id: result.turn_id,
                                     });
                                 }
-                                Err(error) => {
-                                    let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                        message: error.to_string(),
-                                        turn_count,
-                                        total_input_tokens,
-                                        total_output_tokens,
-                                        prompt_token_estimate: total_input_tokens,
-                                    });
-                                }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
                             }
+                        }
                         }
                     }
                     Some(OperationCommand::BrowseInputHistory(direction)) => {
@@ -779,7 +1005,9 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_cache_read_tokens,
                                         prompt_token_estimate: total_input_tokens,
+                                        last_query_input_tokens,
                                     });
                                     None
                                 }
@@ -801,6 +1029,7 @@ async fn run_worker_inner(
                             "turn/started" => {
                                 if let ServerEvent::TurnStarted(payload) = event {
                                     active_turn_id = Some(payload.turn.turn_id);
+                                    saw_usage_update_for_turn = false;
                                     model = payload.turn.model.clone();
                                     thinking_selection = payload.turn.thinking.clone();
                                     let _ = event_tx.send(WorkerEvent::TurnStarted {
@@ -872,32 +1101,50 @@ async fn run_worker_inner(
                                     if completed {
                                         turn_count += 1;
                                         if let Some(usage) = &payload.turn.usage {
-                                            total_input_tokens = usage.input_tokens as usize;
-                                            total_output_tokens = usage.output_tokens as usize;
+                                            last_query_input_tokens = usage.input_tokens as usize;
+                                            last_query_total_tokens = usage.input_tokens as usize
+                                                + usage.output_tokens as usize;
+                                            if !saw_usage_update_for_turn {
+                                                total_input_tokens += usage.input_tokens as usize;
+                                                total_output_tokens += usage.output_tokens as usize;
+                                                total_cache_read_tokens += usage
+                                                    .cache_read_input_tokens
+                                                    .unwrap_or(0) as usize;
+                                            }
                                         }
-                                        let _ = event_tx.send(WorkerEvent::TurnFinished {
-                                            stop_reason: format!("{:?}", payload.turn.status),
-                                            turn_count,
-                                            total_input_tokens,
-                                            total_output_tokens,
-                                            prompt_token_estimate: payload
-                                                .turn
-                                                .usage
-                                                .as_ref()
-                                                .map(|usage| usage.input_tokens as usize)
-                                                .unwrap_or(total_input_tokens),
-                                        });
-                                        latest_completed_agent_message = None;
                                     }
+                                    let _ = event_tx.send(WorkerEvent::TurnFinished {
+                                        stop_reason: format!("{:?}", payload.turn.status),
+                                        turn_count,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        total_cache_read_tokens,
+                                        last_query_total_tokens,
+                                        last_query_input_tokens,
+                                        prompt_token_estimate: payload
+                                            .turn
+                                            .usage
+                                            .as_ref()
+                                            .map(|usage| usage.input_tokens as usize)
+                                            .unwrap_or(total_input_tokens),
+                                    });
+                                    latest_completed_agent_message = None;
                                 }
                             }
                             "turn/usage/updated" => {
                                 if let ServerEvent::TurnUsageUpdated(payload) = event {
+                                    saw_usage_update_for_turn = true;
                                     total_input_tokens = payload.total_input_tokens;
                                     total_output_tokens = payload.total_output_tokens;
+                                    total_cache_read_tokens = payload.total_cache_read_tokens;
+                                    last_query_input_tokens = payload.last_query_input_tokens;
                                     let _ = event_tx.send(WorkerEvent::UsageUpdated {
                                         total_input_tokens: payload.total_input_tokens,
                                         total_output_tokens: payload.total_output_tokens,
+                                        total_cache_read_tokens: payload.total_cache_read_tokens,
+                                        last_query_total_tokens: payload.usage.input_tokens as usize
+                                            + payload.usage.output_tokens as usize,
+                                        last_query_input_tokens: payload.last_query_input_tokens,
                                     });
                                 }
                             }
@@ -908,19 +1155,33 @@ async fn run_worker_inner(
                                         .take()
                                         .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
                                     if let Some(usage) = &turn.usage {
-                                        total_input_tokens = usage.input_tokens as usize;
-                                        total_output_tokens = usage.output_tokens as usize;
+                                        last_query_input_tokens = usage.input_tokens as usize;
+                                        last_query_total_tokens = usage.input_tokens as usize
+                                            + usage.output_tokens as usize;
+                                        if !saw_usage_update_for_turn {
+                                            total_input_tokens += usage.input_tokens as usize;
+                                            total_output_tokens += usage.output_tokens as usize;
+                                            total_cache_read_tokens += usage
+                                                .cache_read_input_tokens
+                                                .unwrap_or(0) as usize;
+                                        }
                                     }
                                     let _ = event_tx.send(WorkerEvent::TurnFailed {
                                         message,
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_cache_read_tokens,
                                         prompt_token_estimate: turn
                                             .usage
                                             .as_ref()
                                             .map(|usage| usage.input_tokens as usize)
                                             .unwrap_or(total_input_tokens),
+                                        last_query_input_tokens: turn
+                                            .usage
+                                            .as_ref()
+                                            .map(|usage| usage.input_tokens as usize)
+                                            .unwrap_or(last_query_input_tokens),
                                     });
                                 }
                             }
@@ -1589,7 +1850,10 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {
@@ -1621,7 +1885,10 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_total_tokens: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {

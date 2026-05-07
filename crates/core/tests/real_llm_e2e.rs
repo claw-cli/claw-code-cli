@@ -104,6 +104,17 @@ fn collect_text_messages(session: &SessionState) -> Vec<String> {
         .collect()
 }
 
+fn last_usage(events: &[QueryEvent]) -> Option<(usize, usize)> {
+    events.iter().rev().find_map(|event| match event {
+        QueryEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => Some((*input_tokens, *output_tokens)),
+        _ => None,
+    })
+}
+
 async fn run_query(
     session: &mut SessionState,
     model: Model,
@@ -235,6 +246,43 @@ async fn real_llm_context_diffs_and_agents_updates() -> Result<()> {
             .is_some_and(|context| context.environment.cwd == nested),
         "expected latest turn context cwd to track the nested workspace"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires DEVO_E2E_BASE_URL, DEVO_E2E_API_KEY, and DEVO_E2E_MODEL"]
+async fn real_llm_session_token_totals_accumulate_across_queries() -> Result<()> {
+    let config = RealLlmConfig::from_env()?;
+    let workspace = unique_temp_dir("accumulation")?;
+    write_file(
+        &workspace.join("AGENTS.md"),
+        "You are running a live token accumulation integration test. Keep replies short.",
+    )?;
+
+    let mut session = SessionState::new(SessionConfig::default(), workspace);
+
+    session.push_message(Message::user("Reply with a short confirmation."));
+    let first_events = run_query(&mut session, config.model(), None).await?;
+    let (first_input_tokens, first_output_tokens) =
+        last_usage(&first_events).context("missing first query usage event")?;
+
+    session.push_message(Message::user("Reply with another short confirmation."));
+    let second_events = run_query(&mut session, config.model(), None).await?;
+    let (second_input_tokens, second_output_tokens) =
+        last_usage(&second_events).context("missing second query usage event")?;
+
+    assert_eq!(
+        session.total_input_tokens,
+        first_input_tokens + second_input_tokens
+    );
+    assert_eq!(
+        session.total_output_tokens,
+        first_output_tokens + second_output_tokens
+    );
+    assert_eq!(session.last_input_tokens, second_input_tokens);
+    assert!(session.total_input_tokens >= first_input_tokens);
+    assert!(session.total_output_tokens >= first_output_tokens);
 
     Ok(())
 }

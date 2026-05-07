@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 use devo_core::AgentsMdConfig;
 use devo_core::Model;
@@ -19,6 +18,7 @@ use devo_core::SkillCatalog;
 use devo_core::SkillError;
 use devo_core::SkillId;
 use devo_core::TurnConfig;
+use devo_core::TurnId;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
 use devo_protocol::PendingInputItem;
@@ -34,6 +34,7 @@ use crate::turn::TurnMetadata;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PersistedTurnItem {
+    pub(crate) turn_id: TurnId,
     pub(crate) item_id: devo_core::ItemId,
     pub(crate) turn_item: devo_core::TurnItem,
 }
@@ -45,6 +46,9 @@ pub struct ServerRuntimeDependencies {
     /// Shared built-in tool registry used by turn execution.
     pub(crate) registry: Arc<ToolRegistry>,
     /// Default model applied when no model override is present.
+    ///
+    /// This is guaranteed by server bootstrap and used as the fallback model
+    /// when session or turn metadata does not specify one.
     pub(crate) default_model: String,
     /// Model catalog used to resolve builtin prompt metadata.
     pub(crate) model_catalog: Arc<dyn ModelCatalog>,
@@ -52,7 +56,7 @@ pub struct ServerRuntimeDependencies {
     pub(crate) skill_workspace_root: Option<PathBuf>,
     /// Skill catalog for discovering and loading skills.
     pub(crate) skill_catalog: StdMutex<Box<dyn SkillCatalog + Send>>,
-    /// AGENTS.md discovery configuration applied to new sessions.
+    /// AGENTS.md/PROMPT.md/CLAUDE.md discovery configuration applied to new sessions.
     pub(crate) agents_md: AgentsMdConfig,
     /// SQLite database for session metadata, token stats, and pending queues.
     pub(crate) db: Arc<Database>,
@@ -236,14 +240,10 @@ pub(crate) struct RuntimeSession {
     pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
     /// Latest compaction snapshot used to rebuild the model-facing prompt view.
     pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
-    /// Pending turn inputs (from turn/start while a turn is active).
-    /// Preserved across turns; unconsumed items are pushed back when the turn ends.
+    /// Shared handle to the pending-turn queue owned by `core_session`.
     pub(crate) pending_turn_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
-    /// /btw steer inputs scoped to the current turn.
-    /// Drained by the query loop at each iteration and never carried to the next turn.
+    /// Shared handle to the `/btw` queue owned by `core_session`.
     pub(crate) btw_input_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
-    /// Live query task for the active turn.
-    pub(crate) active_task: Option<JoinHandle<()>>,
     /// Deferred completion info for in-progress assistant text item.
     /// Cleared when the item is completed; used for crash/interrupt recovery.
     pub(crate) deferred_assistant: Option<(devo_core::ItemId, u64, String)>,

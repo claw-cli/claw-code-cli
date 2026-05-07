@@ -30,6 +30,8 @@ use devo_protocol::SessionMetadataUpdateParams;
 use devo_protocol::SessionMetadataUpdateResult;
 use devo_protocol::SessionResumeParams;
 use devo_protocol::SessionResumeResult;
+use devo_protocol::SessionRollbackParams;
+use devo_protocol::SessionRollbackResult;
 use devo_protocol::SessionStartParams;
 use devo_protocol::SessionStartResult;
 use devo_protocol::SessionTitleUpdateParams;
@@ -191,6 +193,13 @@ impl StdioServerClient {
 
     pub async fn session_fork(&mut self, params: SessionForkParams) -> Result<SessionForkResult> {
         self.request("session/fork", params).await
+    }
+
+    pub async fn session_rollback(
+        &mut self,
+        params: SessionRollbackParams,
+    ) -> Result<SessionRollbackResult> {
+        self.request("session/rollback", params).await
     }
 
     pub async fn skills_list(&mut self, params: SkillListParams) -> Result<SkillListResult> {

@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -50,6 +50,9 @@ use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::MentionBinding;
 use crate::bottom_pane::ModelPickerEntry;
+use crate::bottom_pane::list_selection_view::ListSelectionView;
+use crate::bottom_pane::list_selection_view::SelectionItem;
+use crate::bottom_pane::list_selection_view::SelectionViewParams;
 use crate::events::SessionListEntry;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
@@ -64,6 +67,10 @@ use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
+use crate::streaming::chunking::AdaptiveChunkingPolicy;
+use crate::streaming::commit_tick::CommitTickScope;
+use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::StreamController;
 use crate::theme::ThemeSet;
 use crate::tui::frame_requester::FrameRequester;
@@ -124,21 +131,6 @@ pub(crate) struct ActiveCellTranscriptKey {
     pub(crate) revision: u64,
     pub(crate) is_stream_continuation: bool,
     pub(crate) animation_tick: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ExitLayoutMode {
-    #[default]
-    SpecialSurface,
-    InlineChat,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ExitLayoutSnapshot {
-    pub(crate) mode: ExitLayoutMode,
-    pub(crate) frame_area: Rect,
-    pub(crate) history_area: Rect,
-    pub(crate) bottom_pane_area: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -216,6 +208,12 @@ enum PickerMode {
     Thinking,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingModelSelection {
+    slug: String,
+    thinking_selection: Option<String>,
+}
+
 pub(crate) struct ChatWidget {
     // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
@@ -241,28 +239,58 @@ pub(crate) struct ChatWidget {
     active_assistant_cell: Option<history_cell::AgentMessageCell>,
     active_reasoning_cell: Option<history_cell::AgentMessageCell>,
     stream_controller: Option<StreamController>,
+    stream_chunking_policy: AdaptiveChunkingPolicy,
+    reasoning_stream_active: bool,
     available_models: Vec<Model>,
     saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
     resume_browser: Option<ResumeBrowserState>,
     resume_browser_loading: bool,
     picker_mode: Option<PickerMode>,
+    pending_model_selection: Option<PendingModelSelection>,
     theme_set: ThemeSet,
     active_theme_name: String,
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_cache_read_tokens: usize,
     prompt_token_estimate: usize,
+    last_query_input_tokens: usize,
+    last_query_total_tokens: usize,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
     busy: bool,
-    exit_layout_snapshot: Arc<Mutex<ExitLayoutSnapshot>>,
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
     user_cell_history_indices: Vec<usize>,
+    startup_header_mascot_frame_index: usize,
+    startup_header_next_animation_at: Instant,
 }
 
 impl ChatWidget {
+    fn can_change_configuration(&self) -> bool {
+        !self.busy
+    }
+
+    fn add_busy_configuration_message(&mut self, command: SlashCommand) {
+        let noun = match command {
+            SlashCommand::Model => "model",
+            SlashCommand::Onboard => "provider",
+            SlashCommand::Theme => "theme",
+            SlashCommand::Compact => "session",
+            SlashCommand::New => "session",
+            SlashCommand::Resume => "session",
+            SlashCommand::Diff => "diff",
+            SlashCommand::Exit | SlashCommand::Status | SlashCommand::Clear | SlashCommand::Btw => {
+                return;
+            }
+        };
+        self.add_to_history(PlainHistoryCell::new(vec![Line::from(format!(
+            "Cannot change {noun} while generating"
+        ))]));
+        self.set_status_message(format!("Cannot change {noun} while generating"));
+    }
+
     fn is_blank_line(line: &Line<'_>) -> bool {
         line.spans.iter().all(|span| span.content.trim().is_empty())
     }
@@ -274,6 +302,7 @@ impl ChatWidget {
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
         accent_color: Color,
+        mascot_frame_index: usize,
     ) -> Box<dyn HistoryCell> {
         let model = model.cloned().unwrap_or_else(|| Model {
             slug: "unknown".to_string(),
@@ -284,6 +313,7 @@ impl ChatWidget {
         Box::new(history_cell::new_session_info(
             cwd,
             &model.slug,
+            model.slug.clone(),
             model.display_name.clone(),
             model.thinking_capability.clone(),
             model
@@ -294,6 +324,7 @@ impl ChatWidget {
             startup_tooltip_override,
             /*show_fast_status*/ false,
             accent_color,
+            mascot_frame_index,
         ))
     }
 
@@ -407,12 +438,19 @@ impl ChatWidget {
         }
     }
 
-    fn context_budget(&self) -> Option<(usize, usize, usize)> {
+    fn context_usage(&self) -> Option<(usize, usize, usize)> {
         let model = self.session.model.as_ref()?;
-        let total = model.context_window as usize;
-        let usable = total.saturating_mul(model.effective_context_window_percent() as usize) / 100;
-        let used = self.prompt_token_estimate.min(usable);
-        Some((used, usable, total))
+        let total = (model
+            .context_window
+            .saturating_mul(model.effective_context_window_percent() as u32)
+            / 100) as usize;
+        let used = self.last_query_input_tokens.min(total);
+        let percent = if total == 0 {
+            0
+        } else {
+            used.saturating_mul(100) / total
+        };
+        Some((used, total, percent))
     }
 
     fn format_compact_token_count(value: usize) -> String {
@@ -432,11 +470,19 @@ impl ChatWidget {
         let ratio = (used as f64 / total as f64).clamp(0.0, 1.0);
         let filled = (ratio * bar_width as f64).round() as usize;
         let empty = bar_width.saturating_sub(filled);
-        let bar: String = std::iter::repeat_n('█', filled)
-            .chain(std::iter::repeat_n('░', empty))
+        let bar: String = std::iter::repeat_n('▰', filled)
+            .chain(std::iter::repeat_n('▱', empty))
             .collect();
         let pct = (ratio * 100.0).round() as usize;
-        format!("{bar} {pct}% ({})", Self::format_compact_token_count(used))
+        format!("{bar} {pct}%")
+    }
+
+    fn percent_of(numerator: usize, denominator: usize) -> usize {
+        if denominator == 0 {
+            0
+        } else {
+            (numerator.saturating_mul(100) + denominator / 2) / denominator
+        }
     }
 
     fn session_summary_text(&self) -> String {
@@ -447,17 +493,32 @@ impl ChatWidget {
             .map(|model| model.slug.as_str())
             .unwrap_or("unknown");
         let thinking = self.thinking_selection.as_deref().unwrap_or("default");
+        let cached_input_percent =
+            Self::percent_of(self.total_cache_read_tokens, self.total_input_tokens);
         let context = self
-            .context_budget()
-            .map_or_else(String::new, |(used, usable, _total)| {
-                Self::render_progress_bar(used, usable, 10)
+            .context_usage()
+            .map_or_else(String::new, |(used, total, _percent)| {
+                format!(
+                    "{} {}/{}",
+                    Self::render_progress_bar(used, total, 10),
+                    Self::format_compact_token_count(used),
+                    Self::format_compact_token_count(total)
+                )
             });
 
         let mut parts: Vec<String> = Vec::new();
         parts.push(format!("{model} {thinking}"));
         parts.push(format!(
-            "\u{2191}{} \u{2193}{}",
-            Self::format_compact_token_count(self.total_input_tokens),
+            "↑{}",
+            Self::format_compact_token_count(self.total_input_tokens)
+        ));
+        parts.push(format!(
+            "↺{} {}%",
+            Self::format_compact_token_count(self.total_cache_read_tokens),
+            cached_input_percent
+        ));
+        parts.push(format!(
+            "↓{}",
             Self::format_compact_token_count(self.total_output_tokens)
         ));
         if !context.is_empty() {
@@ -485,6 +546,7 @@ impl ChatWidget {
             is_first_run,
             startup_tooltip_override,
             accent,
+            self.startup_header_mascot_frame_index,
         ));
     }
 
@@ -614,6 +676,7 @@ impl ChatWidget {
             is_first_run,
             startup_tooltip_override,
             initial_accent_color,
+            0,
         )];
 
         // Assemble the full widget state from the initial session, composer, history, and queues.
@@ -637,25 +700,32 @@ impl ChatWidget {
             active_assistant_cell: None,
             active_reasoning_cell: None,
             stream_controller: None,
+            stream_chunking_policy: AdaptiveChunkingPolicy::default(),
+            reasoning_stream_active: false,
             available_models,
             saved_model_slugs,
             onboarding_step: None,
             resume_browser: None,
             resume_browser_loading: false,
             picker_mode: None,
+            pending_model_selection: None,
             theme_set,
             active_theme_name,
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_input_tokens: 0,
+            last_query_total_tokens: 0,
             queued_count: 0,
             active_turn_id: None,
             busy: false,
-            exit_layout_snapshot: Arc::new(Mutex::new(ExitLayoutSnapshot::default())),
             selection_mode: false,
             selected_user_cell_index: None,
             user_cell_history_indices: Vec::new(),
+            startup_header_mascot_frame_index: 0,
+            startup_header_next_animation_at: Instant::now() + STARTUP_HEADER_ANIMATION_INTERVAL,
         };
 
         // Model onboarding can inject additional startup UI before the first frame is drawn.
@@ -719,7 +789,7 @@ impl ChatWidget {
             }
             InputResult::ModelSelected { model } => match self.picker_mode.take() {
                 Some(PickerMode::Thinking) => self.apply_thinking_selection(model),
-                _ => self.apply_model_selection(model),
+                _ => self.handle_model_picker_selection(model),
             },
             InputResult::ThemeSelected { name } => {
                 self.apply_theme_selection(name);
@@ -763,6 +833,7 @@ impl ChatWidget {
             self.selection_mode = true;
             // Start from the last user cell if no selection yet
             self.selected_user_cell_index = Some(len - 1);
+            self.sync_selected_user_cell_highlight();
             self.update_selection_status();
             self.frame_requester.schedule_frame();
             return true;
@@ -776,6 +847,7 @@ impl ChatWidget {
         };
         if new != current {
             self.selected_user_cell_index = Some(new);
+            self.sync_selected_user_cell_highlight();
             self.update_selection_status();
             self.frame_requester.schedule_frame();
         }
@@ -785,6 +857,7 @@ impl ChatWidget {
     fn exit_selection_mode(&mut self) {
         self.selection_mode = false;
         self.selected_user_cell_index = None;
+        self.sync_selected_user_cell_highlight();
         self.bottom_pane
             .set_status_line(Some(Line::from(self.session_summary_text()).dim()));
         self.bottom_pane.set_status_line_enabled(true);
@@ -819,25 +892,119 @@ impl ChatWidget {
             .collect();
     }
 
-    fn open_selection_action_menu(&mut self) {
-        if self.selection_mode {
-            // Load the selected user message text into the composer for editing
-            // and exit selection mode.
-            if let Some(idx) = self.selected_user_cell_index
-                && let Some(history_idx) = self.user_cell_history_indices.get(idx)
-                && let Some(cell) = self.history.get(*history_idx)
-                && let Some(user_cell) = cell
-                    .as_ref()
-                    .as_any()
-                    .downcast_ref::<history_cell::UserHistoryCell>()
-            {
-                let text = user_cell.message.clone();
-                self.bottom_pane.restore_input_from_history(Some(text));
-                self.exit_selection_mode();
-                return;
-            }
+    fn sync_selected_user_cell_highlight(&mut self) {
+        for (history_idx, cell) in self.history.iter_mut().enumerate() {
+            let Some(user_cell) = cell
+                .as_mut()
+                .as_any_mut()
+                .downcast_mut::<history_cell::UserHistoryCell>()
+            else {
+                continue;
+            };
+            let is_selected = self.selection_mode
+                && self
+                    .selected_user_cell_index
+                    .and_then(|selected_idx| self.user_cell_history_indices.get(selected_idx))
+                    .is_some_and(|selected_history_idx| *selected_history_idx == history_idx);
+            user_cell.selected = is_selected;
         }
-        self.exit_selection_mode();
+    }
+
+    fn open_selection_action_menu(&mut self) {
+        if !self.selection_mode {
+            return;
+        }
+        let Some(selected_idx) = self.selected_user_cell_index else {
+            self.exit_selection_mode();
+            return;
+        };
+        let Some(history_idx) = self.user_cell_history_indices.get(selected_idx).copied() else {
+            self.exit_selection_mode();
+            return;
+        };
+        let Some(user_cell) = self.history.get(history_idx).and_then(|cell| {
+            cell.as_ref()
+                .as_any()
+                .downcast_ref::<history_cell::UserHistoryCell>()
+        }) else {
+            self.exit_selection_mode();
+            return;
+        };
+
+        let is_latest_user_turn = selected_idx + 1 == self.user_cell_history_indices.len();
+        let selected_turn_index = u32::try_from(selected_idx).unwrap_or(u32::MAX);
+        let selected_text = user_cell.message.clone();
+        let mut items = Vec::new();
+
+        items.push(SelectionItem {
+            name: "Rollback".to_string(),
+            description: None,
+            selected_description: None,
+            is_current: false,
+            is_default: false,
+            is_disabled: is_latest_user_turn,
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::Command(AppCommand::rollback_to_user_turn(
+                    selected_turn_index,
+                )));
+            })],
+            dismiss_on_select: true,
+            search_value: None,
+            disabled_reason: is_latest_user_turn
+                .then_some("Latest user turn cannot be rolled back".to_string()),
+            ..SelectionItem::default()
+        });
+
+        let fork_turn_index = selected_turn_index;
+        items.push(SelectionItem {
+            name: "Fork".to_string(),
+            description: None,
+            selected_description: None,
+            is_current: false,
+            is_default: false,
+            is_disabled: is_latest_user_turn,
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::Command(AppCommand::fork_at_user_turn(
+                    fork_turn_index,
+                )));
+            })],
+            dismiss_on_select: true,
+            search_value: None,
+            disabled_reason: is_latest_user_turn
+                .then_some("Latest user turn cannot be forked".to_string()),
+            ..SelectionItem::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Cancel".to_string(),
+            description: None,
+            selected_description: None,
+            is_current: false,
+            is_default: false,
+            is_disabled: false,
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::StatusMessageChanged {
+                    message: "Selection cancelled".to_string(),
+                });
+            })],
+            dismiss_on_select: true,
+            search_value: None,
+            disabled_reason: None,
+            ..SelectionItem::default()
+        });
+
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    items,
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.bottom_pane
+            .restore_input_from_history(Some(selected_text));
+        self.set_status_message("Select an action");
     }
 
     pub(crate) fn handle_mouse_event(&mut self, _mouse: crossterm::event::MouseEvent) {
@@ -854,6 +1021,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
+        self.advance_startup_header_animation();
+        if self.stream_controller.is_some() {
+            self.run_stream_commit_tick();
+        }
         self.bottom_pane.pre_draw_tick();
     }
 
@@ -862,7 +1033,7 @@ impl ChatWidget {
             AppEvent::Redraw => self.frame_requester.schedule_frame(),
             AppEvent::SubmitUserInput { text } => self.submit_text(text),
             AppEvent::ModelSelected { model } => {
-                self.apply_model_selection(model);
+                self.handle_model_picker_selection(model);
             }
             AppEvent::ThemeSelected { name } => {
                 self.apply_theme_selection(name);
@@ -943,7 +1114,9 @@ impl ChatWidget {
                 self.active_reasoning_text.clear();
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
-                self.stream_controller = None;
+                self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
+                self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.bottom_pane.set_task_running(true);
             }
             WorkerEvent::TextDelta(text) => {
@@ -951,6 +1124,7 @@ impl ChatWidget {
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningDelta(text) => {
+                self.reasoning_stream_active = true;
                 self.active_reasoning_text.push_str(&text);
                 self.sync_active_reasoning_cell();
                 self.set_status_message("Thinking");
@@ -967,6 +1141,8 @@ impl ChatWidget {
                     self.active_reasoning_text = text;
                 }
                 self.sync_active_reasoning_cell();
+                self.reasoning_stream_active = false;
+                self.flush_stream_commit_ticks();
                 self.set_status_message("Thinking");
             }
             WorkerEvent::ToolCall {
@@ -1056,12 +1232,19 @@ impl ChatWidget {
                     "Tool completed"
                 });
             }
+            // TODO: The token usage should include `total_input_cahed_tokens` or `total_read_cached_tokens`
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
+                last_query_total_tokens,
+                last_query_input_tokens,
             } => {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = total_input_tokens;
                 self.frame_requester.schedule_frame();
             }
@@ -1070,6 +1253,9 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
+                last_query_total_tokens,
+                last_query_input_tokens,
                 prompt_token_estimate,
             } => {
                 self.commit_active_streams(DotStatus::Completed);
@@ -1079,6 +1265,9 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 let model_name = self
                     .session
@@ -1087,18 +1276,19 @@ impl ChatWidget {
                     .map(|m| m.display_name.clone())
                     .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
                     .unwrap_or_default();
+                let accent_color = self.active_accent_color();
+                let elapsed = self
+                    .bottom_pane
+                    .status_widget()
+                    .map(|status| status.elapsed_seconds())
+                    .filter(|&secs| secs > 0);
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Ready");
                 let was_interrupted = stop_reason.contains("Interrupted");
                 let cell = if was_interrupted {
-                    history_cell::TurnSummaryCell::new_interrupted(model_name)
+                    history_cell::TurnSummaryCell::new_interrupted(model_name, accent_color)
                 } else {
-                    let elapsed = self
-                        .bottom_pane
-                        .status_widget()
-                        .map(|s| s.elapsed_seconds())
-                        .filter(|&secs| secs > 0);
-                    history_cell::TurnSummaryCell::new(model_name, elapsed)
+                    history_cell::TurnSummaryCell::new(model_name, elapsed, accent_color)
                 };
                 self.add_to_history(cell);
             }
@@ -1107,7 +1297,9 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
                 prompt_token_estimate,
+                last_query_input_tokens,
             } => {
                 self.resume_browser_loading = false;
                 self.commit_active_streams(DotStatus::Failed);
@@ -1117,6 +1309,8 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 let model_name = self
                     .session
@@ -1125,7 +1319,10 @@ impl ChatWidget {
                     .map(|m| m.display_name.clone())
                     .or_else(|| self.session.model.as_ref().map(|m| m.slug.clone()))
                     .unwrap_or_default();
-                self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(model_name));
+                self.add_to_history(history_cell::TurnSummaryCell::new_interrupted(
+                    model_name,
+                    self.active_accent_color(),
+                ));
                 self.add_to_history(history_cell::new_error_event(message));
                 self.bottom_pane.set_task_running(false);
                 self.set_status_message("Query failed; see error above");
@@ -1167,6 +1364,9 @@ impl ChatWidget {
                 model,
                 thinking,
                 reasoning_effort,
+                last_query_total_tokens,
+                last_query_input_tokens,
+                total_cache_read_tokens,
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
@@ -1178,12 +1378,17 @@ impl ChatWidget {
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
+                self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.busy = false;
                 self.turn_count = 0;
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = 0;
                 self.set_status_message("New session ready; send a prompt to start it");
             }
@@ -1196,6 +1401,9 @@ impl ChatWidget {
                 reasoning_effort,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
+                last_query_total_tokens,
+                last_query_input_tokens,
                 prompt_token_estimate,
                 history_items,
                 loaded_item_count,
@@ -1215,8 +1423,13 @@ impl ChatWidget {
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
+                self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 self.rebuild_restored_session_history(
                     history_items,
@@ -1332,6 +1545,11 @@ impl ChatWidget {
     }
 
     fn handle_slash_command(&mut self, command: SlashCommand, argument: String) {
+        if !self.can_change_configuration() && !command.available_during_task() {
+            self.add_busy_configuration_message(command);
+            return;
+        }
+
         match command {
             SlashCommand::Exit => {
                 self.app_event_tx
@@ -1345,6 +1563,8 @@ impl ChatWidget {
                 self.active_assistant_cell = None;
                 self.active_reasoning_cell = None;
                 self.stream_controller = None;
+                self.stream_chunking_policy.reset();
+                self.reasoning_stream_active = false;
                 self.set_status_message("Transcript cleared");
             }
             SlashCommand::Onboard => {
@@ -1389,9 +1609,6 @@ impl ChatWidget {
             SlashCommand::Compact => {
                 self.app_event_tx
                     .send(AppEvent::Command(AppCommand::compact()));
-            }
-            SlashCommand::Thinking => {
-                self.open_thinking_picker();
             }
             SlashCommand::New => {
                 self.app_event_tx
@@ -1711,7 +1928,11 @@ impl ChatWidget {
             TranscriptItemKind::TurnSummary => {
                 // item.title contains model name, item.duration_ms contains seconds
                 self.add_history_entry_without_redraw(Box::new(
-                    history_cell::TurnSummaryCell::new(item.title.clone(), item.duration_ms),
+                    history_cell::TurnSummaryCell::new(
+                        item.title.clone(),
+                        item.duration_ms,
+                        self.active_accent_color(),
+                    ),
                 ));
             }
         }
@@ -1722,21 +1943,38 @@ impl ChatWidget {
         // this call will not re-create the active reasoning/assistant cells
         // with stale content.
         let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
-        let assistant_text = std::mem::take(&mut self.active_assistant_text);
         self.active_reasoning_cell = None;
         self.active_assistant_cell = None;
-        self.stream_controller = None;
-
+        self.reasoning_stream_active = false;
         if !reasoning_text.trim().is_empty() {
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
-        if !assistant_text.trim().is_empty() {
-            self.add_markdown_history_with_status("Assistant", &assistant_text, status);
+        if let Some(controller) = self.stream_controller.as_mut() {
+            if let Some(cell) = controller.finalize() {
+                self.add_history_entry_without_redraw(cell);
+            }
+            self.stream_controller = None;
+            self.stream_chunking_policy.reset();
+        } else {
+            let assistant_text = std::mem::take(&mut self.active_assistant_text);
+            if !assistant_text.trim().is_empty() {
+                self.add_markdown_history_with_status_without_redraw(
+                    "Assistant",
+                    &assistant_text,
+                    status,
+                );
+            }
         }
     }
 
     fn push_assistant_stream_delta(&mut self, text: &str) {
-        self.active_assistant_text.push_str(text);
+        if self.stream_controller.is_none() {
+            self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
+            self.stream_chunking_policy.reset();
+        }
+        if let Some(controller) = self.stream_controller.as_mut() {
+            controller.push(text);
+        }
         self.sync_active_assistant_cell();
         self.frame_requester.schedule_frame();
     }
@@ -1751,7 +1989,20 @@ impl ChatWidget {
     }
 
     fn sync_active_assistant_cell(&mut self) {
-        if !self.active_assistant_text.trim().is_empty() {
+        if let Some(controller) = &self.stream_controller {
+            let lines = controller.live_lines();
+            if lines.iter().any(|line| !Self::is_blank_line(line)) {
+                self.active_assistant_cell =
+                    Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
+                        lines,
+                        Self::pending_dot_prefix(),
+                        "  ",
+                        false,
+                    ));
+            } else {
+                self.active_assistant_cell = None;
+            }
+        } else if !self.active_assistant_text.trim().is_empty() {
             self.active_assistant_cell =
                 Some(self.bulleted_markdown_cell(
                     &self.active_assistant_text,
@@ -1759,6 +2010,56 @@ impl ChatWidget {
                 ));
         } else {
             self.active_assistant_cell = None;
+        }
+    }
+
+    fn run_stream_commit_tick(&mut self) {
+        if self.reasoning_stream_active {
+            return;
+        }
+        self.drain_stream_commit_tick(true);
+    }
+
+    fn flush_stream_commit_ticks(&mut self) {
+        if self.reasoning_stream_active {
+            return;
+        }
+        if let Some(controller) = self.stream_controller.as_mut() {
+            let queue_len = controller.queued_lines();
+            if queue_len == 0 {
+                return;
+            }
+            // Drain all queued lines in one batch so they become a single
+            // history cell rather than multiple cells separated by blank rows.
+            let (cell, _idle) = controller.on_commit_tick_batch(queue_len);
+            if let Some(cell) = cell {
+                self.add_history_entry_without_redraw(cell);
+                self.sync_active_assistant_cell();
+                self.frame_requester.schedule_frame();
+            }
+        }
+    }
+
+    fn drain_stream_commit_tick(&mut self, schedule_followup: bool) {
+        let now = Instant::now();
+        let output = run_commit_tick(
+            &mut self.stream_chunking_policy,
+            self.stream_controller.as_mut(),
+            CommitTickScope::AnyMode,
+            now,
+        );
+
+        if !output.cells.is_empty() {
+            for cell in output.cells {
+                self.add_history_entry_without_redraw(cell);
+            }
+            self.sync_active_assistant_cell();
+            self.frame_requester.schedule_frame();
+        }
+
+        if schedule_followup && self.stream_controller.is_some() && !output.all_idle {
+            self.frame_requester
+                .schedule_frame_in(Duration::from_millis(16));
         }
     }
 
@@ -1835,7 +2136,33 @@ impl ChatWidget {
             /*is_first_run*/ false,
             None,
             accent,
+            self.startup_header_mascot_frame_index,
         );
+    }
+
+    fn advance_startup_header_animation(&mut self) {
+        let now = Instant::now();
+        if self
+            .history
+            .first()
+            .and_then(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::SessionInfoCell>()
+            })
+            .is_none()
+        {
+            return;
+        }
+
+        self.frame_requester
+            .schedule_frame_in(STARTUP_HEADER_ANIMATION_INTERVAL);
+        if now < self.startup_header_next_animation_at {
+            return;
+        }
+
+        self.startup_header_mascot_frame_index = (self.startup_header_mascot_frame_index + 1) % 3;
+        self.startup_header_next_animation_at = now + STARTUP_HEADER_ANIMATION_INTERVAL;
+        self.refresh_header_box();
     }
 
     pub(crate) fn current_model(&self) -> Option<&Model> {
@@ -1848,8 +2175,41 @@ impl ChatWidget {
     }
 
     #[cfg(test)]
+    pub(crate) fn startup_header_mascot_frame_index(&self) -> usize {
+        self.startup_header_mascot_frame_index
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_stream_controller(&self) -> bool {
+        self.stream_controller.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_startup_header_animation_due(&mut self) {
+        self.startup_header_next_animation_at = Instant::now();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_task_elapsed_seconds(&mut self, secs: u64) {
+        self.bottom_pane.set_task_running(true);
+        if let Some(status) = self.bottom_pane.status_widget_mut() {
+            let now = Instant::now();
+            status.pause_timer_at(now);
+            let resume_at = now
+                .checked_sub(std::time::Duration::from_secs(secs))
+                .unwrap_or(now);
+            status.resume_timer_at(resume_at);
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn placeholder_text(&self) -> &str {
         self.bottom_pane.placeholder_text()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status_summary_text(&self) -> String {
+        self.session_summary_text()
     }
 
     pub(crate) fn current_thinking_selection(&self) -> Option<&str> {
@@ -2142,6 +2502,7 @@ impl ChatWidget {
 
     fn open_model_picker(&mut self) {
         self.picker_mode = Some(PickerMode::Model);
+        self.pending_model_selection = None;
         let current_slug = self.session.model.as_ref().map(|model| model.slug.as_str());
         let entries = self
             .saved_model_slugs
@@ -2160,6 +2521,39 @@ impl ChatWidget {
             .collect();
         self.bottom_pane.open_model_picker(entries);
         self.set_status_message("Select a model");
+    }
+
+    fn handle_model_picker_selection(&mut self, slug: String) {
+        let Some(selected_model) = self
+            .available_models
+            .iter()
+            .find(|model| model.slug == slug)
+            .cloned()
+        else {
+            self.apply_model_selection(slug);
+            return;
+        };
+
+        let thinking_selection = selected_model.default_thinking_selection();
+        self.pending_model_selection = Some(PendingModelSelection {
+            slug: selected_model.slug.clone(),
+            thinking_selection: thinking_selection.clone(),
+        });
+        self.session.provider = Some(selected_model.provider);
+        self.session.model = Some(selected_model.clone());
+        self.thinking_selection = thinking_selection;
+        self.refresh_header_box();
+
+        if selected_model
+            .effective_thinking_capability()
+            .options()
+            .is_empty()
+        {
+            self.finalize_pending_model_selection();
+            return;
+        }
+
+        self.open_thinking_picker();
     }
 
     fn open_theme_picker(&mut self) {
@@ -2253,6 +2647,12 @@ impl ChatWidget {
 
     fn apply_thinking_selection(&mut self, value: String) {
         self.thinking_selection = Some(value.clone());
+        if let Some(pending) = self.pending_model_selection.as_mut() {
+            pending.thinking_selection = Some(value);
+            self.finalize_pending_model_selection();
+            return;
+        }
+
         self.refresh_header_box();
         self.app_event_tx
             .send(AppEvent::Command(AppCommand::override_turn_context(
@@ -2263,6 +2663,25 @@ impl ChatWidget {
                 /*approval_policy*/ None,
             )));
         self.set_status_message(format!("Thinking set to {value}"));
+    }
+
+    fn finalize_pending_model_selection(&mut self) {
+        let Some(pending) = self.pending_model_selection.take() else {
+            return;
+        };
+
+        self.picker_mode = None;
+        self.thinking_selection = pending.thinking_selection.clone();
+        self.refresh_header_box();
+        self.app_event_tx
+            .send(AppEvent::Command(AppCommand::override_turn_context(
+                /*cwd*/ None,
+                Some(pending.slug.clone()),
+                Some(self.thinking_selection.clone()),
+                /*sandbox*/ None,
+                /*approval_policy*/ None,
+            )));
+        self.set_status_message(format!("Model set to {}", pending.slug));
     }
 
     fn open_resume_browser(&mut self, sessions: Vec<SessionListEntry>) {
@@ -2325,23 +2744,11 @@ impl ChatWidget {
     pub(crate) fn is_resume_browser_open(&self) -> bool {
         self.resume_browser_loading || self.resume_browser.is_some()
     }
-
-    pub(crate) fn exit_layout_snapshot_handle(&self) -> Arc<Mutex<ExitLayoutSnapshot>> {
-        Arc::clone(&self.exit_layout_snapshot)
-    }
 }
 
 impl Renderable for ChatWidget {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if self.resume_browser_loading {
-            if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
-                *snapshot = ExitLayoutSnapshot {
-                    mode: ExitLayoutMode::SpecialSurface,
-                    frame_area: area,
-                    history_area: Rect::default(),
-                    bottom_pane_area: Rect::default(),
-                };
-            }
             let lines = vec![
                 Line::from("Resume Session".bold()),
                 Line::from("Loading saved sessions...".dim()),
@@ -2356,14 +2763,6 @@ impl Renderable for ChatWidget {
         }
 
         if let Some(browser) = &self.resume_browser {
-            if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
-                *snapshot = ExitLayoutSnapshot {
-                    mode: ExitLayoutMode::SpecialSurface,
-                    frame_area: area,
-                    history_area: Rect::default(),
-                    bottom_pane_area: Rect::default(),
-                };
-            }
             Block::default().style(Style::default()).render(area, buf);
             let title_width = browser
                 .sessions
@@ -2432,14 +2831,6 @@ impl Renderable for ChatWidget {
             .min(area.height.saturating_sub(1).max(3));
         let [history_area, bottom_area] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(bottom_height)]).areas(area);
-        if let Ok(mut snapshot) = self.exit_layout_snapshot.lock() {
-            *snapshot = ExitLayoutSnapshot {
-                mode: ExitLayoutMode::InlineChat,
-                frame_area: area,
-                history_area,
-                bottom_pane_area: bottom_area,
-            };
-        }
 
         let viewport_lines = self.active_viewport_lines(history_area.width);
         if !viewport_lines.is_empty() {

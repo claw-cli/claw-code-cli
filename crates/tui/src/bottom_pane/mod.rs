@@ -20,7 +20,7 @@ mod chat_composer_history;
 mod command_popup;
 mod file_search_popup;
 mod footer;
-mod list_selection_view;
+pub(crate) mod list_selection_view;
 mod onboarding_view;
 mod paste_burst;
 mod pending_thread_approvals;
@@ -55,6 +55,8 @@ use crate::tui::frame_requester::FrameRequester;
 
 pub(crate) const QUIT_SHORTCUT_TIMEOUT: Duration = Duration::from_secs(2);
 
+const STATUS_SEPARATOR: BlankLineSpacer = BlankLineSpacer;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {
     Handled,
@@ -72,6 +74,9 @@ pub(crate) struct MentionBinding {
     pub(crate) mention: String,
     pub(crate) path: String,
 }
+
+#[derive(Debug, Default)]
+struct BlankLineSpacer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct SkillInterfaceMetadata {
@@ -214,6 +219,14 @@ impl OnboardingHandle {
             self.view.cancel();
             self.completed_result = self.view.take_result();
         }
+    }
+}
+
+impl Renderable for BlankLineSpacer {
+    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        1
     }
 }
 
@@ -477,6 +490,10 @@ impl BottomPane {
             themes,
             current_name,
         )));
+    }
+
+    pub(crate) fn open_popup_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.push_view(view);
     }
 
     pub(crate) fn restore_input_from_history(&mut self, text: Option<String>) {
@@ -830,6 +847,7 @@ impl Renderable for BottomPane {
         let mut children: Vec<&dyn Renderable> = Vec::with_capacity(5);
         // Status indicator above the composer while a task is running.
         if let Some(status) = &self.status {
+            children.push(&STATUS_SEPARATOR);
             children.push(status);
         }
         // Avoid double-surfacing the unified-exec summary when the status row is active.
@@ -856,6 +874,7 @@ impl Renderable for BottomPane {
         }
         let mut children: Vec<&dyn Renderable> = Vec::with_capacity(5);
         if let Some(status) = &self.status {
+            children.push(&STATUS_SEPARATOR);
             children.push(status);
         }
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {
@@ -881,6 +900,7 @@ impl Renderable for BottomPane {
         }
         let mut children: Vec<&dyn Renderable> = Vec::with_capacity(5);
         if let Some(status) = &self.status {
+            children.push(&STATUS_SEPARATOR);
             children.push(status);
         }
         if self.status.is_none() && !self.unified_exec_footer.is_empty() {

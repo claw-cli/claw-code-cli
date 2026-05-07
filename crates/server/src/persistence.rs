@@ -355,6 +355,7 @@ impl ReplayState {
                     });
                     let body = duration_secs.map(|s| s.to_string()).unwrap_or_default();
                     self.pending_items.push(ReplayHistoryItem {
+                        turn_id: prev_turn.turn_id,
                         item_id: devo_core::ItemId::new(),
                         seq: self.loaded_item_count,
                         timestamp: ts,
@@ -449,6 +450,7 @@ impl ReplayState {
             });
             let body = duration_secs.map(|s| s.to_string()).unwrap_or_default();
             self.pending_items.push(ReplayHistoryItem {
+                turn_id: last_turn.turn_id,
                 item_id: devo_core::ItemId::new(),
                 seq: self.loaded_item_count,
                 timestamp: ts,
@@ -491,6 +493,7 @@ impl ReplayState {
                 pending_item.turn_item.clone(),
             );
             replayed_persisted_turn_items.push(PersistedTurnItem {
+                turn_id: pending_item.turn_id,
                 item_id: pending_item.item_id,
                 turn_item: pending_item.turn_item,
             });
@@ -521,6 +524,8 @@ impl ReplayState {
             .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
             .sum::<usize>()
             .div_ceil(4);
+        let pending_turn_queue = std::sync::Arc::clone(&core_session.pending_turn_queue);
+        let btw_input_queue = std::sync::Arc::clone(&core_session.btw_input_queue);
 
         let summary = SessionMetadata {
             session_id: record.id,
@@ -544,7 +549,15 @@ impl ReplayState {
                 }),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
+            total_cache_creation_tokens: self.total_cache_creation_tokens,
+            total_cache_read_tokens: self.total_cache_read_tokens,
             prompt_token_estimate: core_session.prompt_token_estimate,
+            last_query_total_tokens: self
+                .latest_turn_metadata
+                .as_ref()
+                .and_then(|turn| turn.usage.as_ref())
+                .map(|usage| usage.input_tokens as usize + usage.output_tokens as usize)
+                .unwrap_or(0),
             status: SessionRuntimeStatus::Idle,
         };
 
@@ -558,13 +571,8 @@ impl ReplayState {
             history_items: replayed_history_items,
             persisted_turn_items: replayed_persisted_turn_items,
             latest_compaction_snapshot: self.latest_compaction_snapshot,
-            pending_turn_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
-            btw_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
-            active_task: None,
+            pending_turn_queue,
+            btw_input_queue,
             deferred_assistant: None,
             deferred_reasoning: None,
             next_item_seq: self.next_item_seq.max(1),
@@ -581,6 +589,7 @@ impl ReplayState {
 
         for turn_item in item.output_items {
             self.pending_items.push(ReplayHistoryItem {
+                turn_id: item.turn_id,
                 item_id,
                 seq,
                 timestamp: record_timestamp,
@@ -595,6 +604,7 @@ impl ReplayState {
 
         for turn_item in item.input_items {
             self.pending_items.push(ReplayHistoryItem {
+                turn_id: item.turn_id,
                 item_id,
                 seq,
                 timestamp: record_timestamp,
@@ -611,6 +621,7 @@ impl ReplayState {
 
 #[derive(Debug, Clone)]
 struct ReplayHistoryItem {
+    turn_id: TurnId,
     item_id: ItemId,
     seq: u64,
     timestamp: chrono::DateTime<Utc>,
@@ -684,7 +695,7 @@ fn prompt_visible_turn_item(item: &TurnItem) -> bool {
     )
 }
 
-fn apply_turn_item(
+pub(crate) fn apply_turn_item(
     messages: &mut Vec<Message>,
     history_items: &mut Vec<crate::SessionHistoryItem>,
     tool_names_by_id: &mut HashMap<String, String>,
@@ -1163,24 +1174,28 @@ mod tests {
 
         let persisted_turn_items = vec![
             PersistedTurnItem {
+                turn_id: TurnId::new(),
                 item_id: ItemId::new(),
                 turn_item: TurnItem::UserMessage(TextItem {
                     text: "older user".to_string(),
                 }),
             },
             PersistedTurnItem {
+                turn_id: TurnId::new(),
                 item_id: summary_item_id,
                 turn_item: TurnItem::ContextCompaction(TextItem {
                     text: "<compaction_summary>summary</compaction_summary>".to_string(),
                 }),
             },
             PersistedTurnItem {
+                turn_id: TurnId::new(),
                 item_id: preserved_item_id,
                 turn_item: TurnItem::UserMessage(TextItem {
                     text: "latest user".to_string(),
                 }),
             },
             PersistedTurnItem {
+                turn_id: TurnId::new(),
                 item_id: later_item_id,
                 turn_item: TurnItem::AgentMessage(TextItem {
                     text: "latest assistant".to_string(),

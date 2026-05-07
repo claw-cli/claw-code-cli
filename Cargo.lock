@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "devo-arg0"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "devo-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "devo-client"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "devo-protocol",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "devo-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "devo-file-search"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "devo-mcp"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "devo-protocol"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "pretty_assertions",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "devo-provider"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "devo-safety"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "regex",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "devo-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "devo-tasks"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "devo-tools"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "devo-tui"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "arboard",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "devo-utils"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "ansi-to-tui",
  "anyhow",

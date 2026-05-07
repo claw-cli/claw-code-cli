@@ -808,6 +808,7 @@ impl ModifierDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_backend::VT100Backend;
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
     use ratatui::style::Style;
@@ -856,5 +857,32 @@ mod tests {
                 .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
             "expected clear-to-end to start after the remaining wide char; commands: {commands:?}"
         );
+    }
+
+    #[test]
+    fn clear_preserves_scrollback_above_viewport() {
+        let width: u16 = 24;
+        let height: u16 = 8;
+        let backend = VT100Backend::new(width, height);
+        let mut terminal = Terminal::with_options(backend).expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 3, width, 3));
+
+        terminal
+            .set_cursor_position(Position { x: 0, y: 1 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"scrollback row").expect("write");
+        terminal
+            .set_cursor_position(Position { x: 0, y: 3 })
+            .expect("cursor position");
+        std::io::Write::write_all(terminal.backend_mut(), b"inline row").expect("write");
+
+        terminal.clear().expect("clear should succeed");
+
+        let rows: Vec<String> = terminal.backend().vt100().screen().rows(0, width).collect();
+        assert!(rows[1].contains("scrollback row"), "rows: {rows:?}");
+        assert_eq!("", rows[3].trim_end());
+        assert_eq!("", rows[4].trim_end());
+        assert_eq!("", rows[5].trim_end());
+        assert_eq!(Rect::new(0, 3, width, 3), terminal.viewport_area);
     }
 }

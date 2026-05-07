@@ -227,8 +227,8 @@ impl StatusIndicatorWidget {
 impl Renderable for StatusIndicatorWidget {
     fn desired_height(&self, width: u16) -> u16 {
         let base = 1 + u16::try_from(self.wrapped_details_lines(width).len()).unwrap_or(0);
-        // Ensure a minimum height so the status row has visual breathing room
-        // above the composer even when there are no details shown.
+        // Keep a minimum height so the status row can still breathe when details
+        // are shown, but leave the blank separator to the parent layout.
         base.max(2)
     }
 
@@ -284,5 +284,33 @@ impl Renderable for StatusIndicatorWidget {
         }
 
         Paragraph::new(Text::from(lines)).render_ref(area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_event_sender::AppEventSender;
+    use crate::tui::frame_requester::FrameRequester;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn status_indicator_reserves_top_padding_row() {
+        let (app_event_tx, _app_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let widget = StatusIndicatorWidget::new(
+            AppEventSender::new(app_event_tx),
+            FrameRequester::test_dummy(),
+            false,
+        );
+
+        assert_eq!(widget.desired_height(80), 2);
+
+        let area = Rect::new(0, 0, 20, 2);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+
+        let top_row: String = (0..area.width).map(|col| buf[(col, 0)].symbol()).collect();
+
+        assert!(top_row.contains("Working"));
     }
 }

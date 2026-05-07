@@ -111,16 +111,37 @@ Requirements:
 - redraws must be explicitly scheduled rather than continuously repainting without state changes
 - the UI must preserve usable terminal scrollback rather than treating the entire session as disposable alternate-screen content
 - terminal restoration must occur on exit and on recoverable teardown paths
-- on exit — regardless of trigger (`/exit`, `Ctrl+C`, SIGKILL, panic) — the shell prompt must appear **directly below the bottom composer status line**, with no extra blank lines and no overlap with the transcript history above
+- on normal user exit (`/exit`, `Ctrl+C`, EOF), the TUI must use a terminal-safe teardown instead of computing a custom shell-prompt row
+- the shell prompt is owned by the shell, not by the TUI; the TUI must clear only its active inline viewport and then restore terminal modes exactly once
 
-Exit position example (the `PS C:\...>` is the shell prompt):
+Terminal-safe teardown model:
 
+```text
+before exit
+  shell scrollback above
+  ─────────────────────────────────────
+  live inline viewport
+  ┌──────────────────────────────────┐
+  │ transcript / composer / status   │
+  └──────────────────────────────────┘
+
+teardown
+  1. leave alt-screen first, if active
+  2. drop any pending, never-rendered history rows
+  3. clear from the viewport origin downward
+  4. restore terminal modes once
+  5. let the shell print the next prompt
+
+after exit
+  shell scrollback remains above
+  cleared inline area remains below
+  shell chooses prompt text and final placement
 ```
-  deepseek-v4-flash high  ↑0 ↓0  ░░░░░░░░░░ 0% (0) 
-PS C:\Users\lenovo\Desktop\devo>
-```
 
-The TUI must ensure the cursor is placed at the row immediately following the last visible status line before restoring the terminal.
+This design intentionally avoids trying to place the shell prompt directly under the last status
+line. That older "precise exit" model was fragile across terminals, especially macOS Terminal.app,
+because extra cursor and mode-reset sequences could trigger blank lines, `%` end-of-line markers,
+or prompt drift.
 
 The terminal subsystem should:
 
@@ -135,7 +156,8 @@ The TUI supports two screen modes toggled by `Ctrl+T`:
 
 **Alternative screen mode** (`Ctrl+T` to enter) — the TUI switches to the terminal's alternate screen buffer. The transcript, composer, and all cells render identically to inline mode. Mouse events are captured so tool output cells can be clicked to expand or collapse. `Ctrl+T` toggles back to inline mode.
 
-On exit, if the TUI is in alternative screen mode, it must switch back to inline mode first, then restore the shell prompt position.
+On exit, if the TUI is in alternative screen mode, it must switch back to inline mode first, then
+run the same terminal-safe teardown used by normal inline exit.
 
 ## Transcript Requirements
 
@@ -246,7 +268,7 @@ Requirements:
   │ thinking:    high                                    │
   │ cwd:         ~\Desktop\devo                          │
   │ turns:       3                                       │
-  │ tokens:      ↑1,234 ↓45,678  ░░░░░░░░░░ 12% (58K)    │
+  │ tokens:      ↑1,234 ↓45,678  ▱▱▱▱▱▱▱▱▱▱ 12% (58K)    │
   ╰──────────────────────────────────────────────────────╯
   ```
 
@@ -484,7 +506,7 @@ PS C:\Users\lenovo\Desktop\devo> .\target\debug\devo                            
                                                                                          │
 ┃ Ask Devo                                                     COMPOSER                 │
                                                                   - ┃ in accent color     │
-  <model-name> <effort>  ↑0 ↓0  ░░░░░░░░░░ 0% (0)               STATUS LINE             │
+  <model-name> <effort>  ↑0 ↓0  ▱▱▱▱▱▱▱▱▱▱ 0% (0)               STATUS LINE             │
                                                                                          │
 PS C:\Users\lenovo\Desktop\devo>                                                        │ shell prompt (post-exit)
 ```
@@ -507,7 +529,17 @@ PS C:\Users\lenovo\Desktop\devo>                                                
 - separated from content above by **three blank lines**
 - one blank line above the input line, one below
 - `┃` at the left edge of the input line in the theme's accent color
-- status line below shows: model name, effort, token usage (`↑` sent / `↓` received), context-window bar with percentage and approximate count
+- status line below shows: model name, effort, cumulative token usage for the session (`↑` total input / `↺` cached input / `↓` total output), a context-window bar, and the last completed query's input usage against the model's effective context window
+
+The status line token counters must obey these rules:
+
+- `↑` is the session's cumulative input token total across all completed queries in the current session
+- `↺` is the session's cumulative cached-input token total across all completed queries in the current session
+- `↓` is the session's cumulative output token total across all completed queries in the current session
+- the context-window bar is based on the last completed query's input token usage, not the cumulative session total
+- the context-window denominator must use the model's effective usable window, not the raw model context window
+- resumed sessions must display the same persisted cumulative totals and last-query context usage that were visible when the session was last active
+- during a live query, streamed usage updates may refresh the cumulative totals before the turn completes, but the final completed-query values must remain authoritative once the turn ends
 
 ### Transcript Cells (populated during a session)
 
@@ -590,14 +622,26 @@ Requirements:
 
 ### Exit Position
 
-Regardless of exit method (`/exit`, `Ctrl+C`, kill, panic), the shell prompt must appear directly below the status line with no extra blank lines and no overlap with transcript history:
+The exit contract is terminal-safe teardown, not prompt-row choreography.
+
+On normal user exit, the TUI must clear its active inline viewport and restore terminal modes, then
+yield to the shell. The shell is responsible for printing the next prompt.
+
+Expected shape:
 
 ```
-  <model-name> <effort>  ↑0 ↓0  ░░░░░░░░░░ 0% (0)
-PS C:\Users\lenovo\Desktop\devo>
+shell scrollback / prior command output
+─────────────────────────────────────
+<cleared former inline TUI area>
+<shell prints prompt here>
 ```
 
-The cursor must be placed at the row immediately following the last visible status line before terminal restoration.
+Requirements:
+
+- the TUI must not attempt to compute or force the shell's final prompt row
+- the TUI must not emit extra cursor-placement or alternate-screen reset sequences during final restore beyond what is needed to restore terminal modes
+- the teardown path should preserve prior scrollback above the inline viewport
+- `/exit` and `Ctrl+C` must use the same teardown model so terminals do not diverge by exit path
 
 ### General Appearance
 
