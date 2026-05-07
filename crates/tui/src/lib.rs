@@ -34,6 +34,7 @@ mod onboarding;
 mod render;
 mod shimmer;
 mod slash_command;
+mod startup_header;
 mod state;
 mod status_indicator_widget;
 mod streaming;

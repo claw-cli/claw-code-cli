@@ -420,6 +420,24 @@ fn key_release_does_not_duplicate_text_input() {
 }
 
 #[test]
+fn startup_header_mascot_animation_advances_on_pre_draw_tick() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    assert_eq!(widget.startup_header_mascot_frame_index(), 0);
+
+    widget.force_startup_header_animation_due();
+    widget.pre_draw_tick();
+
+    assert_eq!(widget.startup_header_mascot_frame_index(), 1);
+}
+
+#[test]
 fn onboarding_view_is_active_on_first_run() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {

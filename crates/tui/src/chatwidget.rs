@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -65,6 +66,7 @@ use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
+use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
 use crate::streaming::controller::StreamController;
 use crate::theme::ThemeSet;
 use crate::tui::frame_requester::FrameRequester;
@@ -252,6 +254,8 @@ pub(crate) struct ChatWidget {
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
     user_cell_history_indices: Vec<usize>,
+    startup_header_mascot_frame_index: usize,
+    startup_header_next_animation_at: Instant,
 }
 
 impl ChatWidget {
@@ -289,6 +293,7 @@ impl ChatWidget {
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
         accent_color: Color,
+        mascot_frame_index: usize,
     ) -> Box<dyn HistoryCell> {
         let model = model.cloned().unwrap_or_else(|| Model {
             slug: "unknown".to_string(),
@@ -299,6 +304,7 @@ impl ChatWidget {
         Box::new(history_cell::new_session_info(
             cwd,
             &model.slug,
+            model.slug.clone(),
             model.display_name.clone(),
             model.thinking_capability.clone(),
             model
@@ -309,6 +315,7 @@ impl ChatWidget {
             startup_tooltip_override,
             /*show_fast_status*/ false,
             accent_color,
+            mascot_frame_index,
         ))
     }
 
@@ -500,6 +507,7 @@ impl ChatWidget {
             is_first_run,
             startup_tooltip_override,
             accent,
+            self.startup_header_mascot_frame_index,
         ));
     }
 
@@ -629,6 +637,7 @@ impl ChatWidget {
             is_first_run,
             startup_tooltip_override,
             initial_accent_color,
+            0,
         )];
 
         // Assemble the full widget state from the initial session, composer, history, and queues.
@@ -671,6 +680,8 @@ impl ChatWidget {
             selection_mode: false,
             selected_user_cell_index: None,
             user_cell_history_indices: Vec::new(),
+            startup_header_mascot_frame_index: 0,
+            startup_header_next_animation_at: Instant::now() + STARTUP_HEADER_ANIMATION_INTERVAL,
         };
 
         // Model onboarding can inject additional startup UI before the first frame is drawn.
@@ -966,6 +977,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn pre_draw_tick(&mut self) {
+        self.advance_startup_header_animation();
         self.bottom_pane.pre_draw_tick();
     }
 
@@ -1949,7 +1961,33 @@ impl ChatWidget {
             /*is_first_run*/ false,
             None,
             accent,
+            self.startup_header_mascot_frame_index,
         );
+    }
+
+    fn advance_startup_header_animation(&mut self) {
+        let now = Instant::now();
+        if self
+            .history
+            .first()
+            .and_then(|cell| {
+                cell.as_any()
+                    .downcast_ref::<history_cell::SessionInfoCell>()
+            })
+            .is_none()
+        {
+            return;
+        }
+
+        self.frame_requester
+            .schedule_frame_in(STARTUP_HEADER_ANIMATION_INTERVAL);
+        if now < self.startup_header_next_animation_at {
+            return;
+        }
+
+        self.startup_header_mascot_frame_index = (self.startup_header_mascot_frame_index + 1) % 3;
+        self.startup_header_next_animation_at = now + STARTUP_HEADER_ANIMATION_INTERVAL;
+        self.refresh_header_box();
     }
 
     pub(crate) fn current_model(&self) -> Option<&Model> {
@@ -1959,6 +1997,16 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn current_cwd(&self) -> &std::path::Path {
         &self.session.cwd
+    }
+
+    #[cfg(test)]
+    pub(crate) fn startup_header_mascot_frame_index(&self) -> usize {
+        self.startup_header_mascot_frame_index
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_startup_header_animation_due(&mut self) {
+        self.startup_header_next_animation_at = Instant::now();
     }
 
     #[cfg(test)]
