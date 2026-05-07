@@ -1732,7 +1732,10 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            context_window_tokens_used: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {
@@ -1764,7 +1767,10 @@ mod tests {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            context_window_tokens_used: 0,
             status: SessionRuntimeStatus::Idle,
         };
         let entry = SessionListEntry {

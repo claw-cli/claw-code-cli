@@ -138,21 +138,41 @@ impl ServerRuntime {
                     .collect();
 
                 {
-                    let mut core_session = runtime_session.core_session.lock().await;
-                    core_session.set_prompt_messages(new_messages);
-                    let compacted_total_input_tokens = core_session.total_input_tokens;
-                    let compacted_total_output_tokens = core_session.total_output_tokens;
-                    let compacted_prompt_token_estimate = core_session
-                        .prompt_source_messages()
-                        .iter()
-                        .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
-                        .sum::<usize>()
-                        .div_ceil(4);
-                    core_session.prompt_token_estimate = compacted_prompt_token_estimate;
-                    drop(core_session);
+                    let (
+                        compacted_total_input_tokens,
+                        compacted_total_output_tokens,
+                        compacted_total_cache_creation_tokens,
+                        compacted_total_cache_read_tokens,
+                        compacted_prompt_token_estimate,
+                    ) = {
+                        let mut core_session = runtime_session.core_session.lock().await;
+                        core_session.set_prompt_messages(new_messages);
+                        let compacted_prompt_token_estimate = core_session
+                            .prompt_source_messages()
+                            .iter()
+                            .map(|message| {
+                                serde_json::to_string(message).map_or(0, |json| json.len())
+                            })
+                            .sum::<usize>()
+                            .div_ceil(4);
+                        core_session.prompt_token_estimate = compacted_prompt_token_estimate;
+                        (
+                            core_session.total_input_tokens,
+                            core_session.total_output_tokens,
+                            core_session.total_cache_creation_tokens,
+                            core_session.total_cache_read_tokens,
+                            compacted_prompt_token_estimate,
+                        )
+                    };
                     runtime_session.summary.total_input_tokens = compacted_total_input_tokens;
                     runtime_session.summary.total_output_tokens = compacted_total_output_tokens;
+                    runtime_session.summary.total_cache_creation_tokens =
+                        compacted_total_cache_creation_tokens;
+                    runtime_session.summary.total_cache_read_tokens =
+                        compacted_total_cache_read_tokens;
                     runtime_session.summary.prompt_token_estimate = compacted_prompt_token_estimate;
+                    runtime_session.summary.context_window_tokens_used =
+                        compacted_prompt_token_estimate;
                 }
 
                 if let Some(turn_id) = runtime_session

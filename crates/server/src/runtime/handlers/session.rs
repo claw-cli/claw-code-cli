@@ -94,7 +94,10 @@ impl ServerRuntime {
             reasoning_effort: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            context_window_tokens_used: 0,
             status: SessionRuntimeStatus::Idle,
         };
         if let Some(record) = &record
@@ -123,7 +126,6 @@ impl ServerRuntime {
                 latest_compaction_snapshot: None,
                 pending_turn_queue,
                 btw_input_queue,
-                active_task: None,
                 deferred_assistant: None,
                 deferred_reasoning: None,
                 next_item_seq: 1,
@@ -689,7 +691,10 @@ impl ServerRuntime {
             reasoning_effort: source.summary.reasoning_effort,
             total_input_tokens: source_core_session.total_input_tokens,
             total_output_tokens: source_core_session.total_output_tokens,
+            total_cache_creation_tokens: source_core_session.total_cache_creation_tokens,
+            total_cache_read_tokens: source_core_session.total_cache_read_tokens,
             prompt_token_estimate: source_core_session.prompt_token_estimate,
+            context_window_tokens_used: source_core_session.prompt_token_estimate,
             status: SessionRuntimeStatus::Idle,
         };
         drop(source_core_session);
@@ -708,7 +713,6 @@ impl ServerRuntime {
             latest_compaction_snapshot: None,
             pending_turn_queue,
             btw_input_queue,
-            active_task: None,
             deferred_assistant: None,
             deferred_reasoning: None,
             next_item_seq: u64::try_from(source.persisted_turn_items.len().saturating_add(1))

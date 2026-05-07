@@ -521,9 +521,11 @@ impl ReplayState {
         core_session.prompt_token_estimate = core_session
             .prompt_source_messages()
             .iter()
-            .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
+                .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
             .sum::<usize>()
             .div_ceil(4);
+        let pending_turn_queue = std::sync::Arc::clone(&core_session.pending_turn_queue);
+        let btw_input_queue = std::sync::Arc::clone(&core_session.btw_input_queue);
 
         let summary = SessionMetadata {
             session_id: record.id,
@@ -547,7 +549,10 @@ impl ReplayState {
                 }),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
+            total_cache_creation_tokens: self.total_cache_creation_tokens,
+            total_cache_read_tokens: self.total_cache_read_tokens,
             prompt_token_estimate: core_session.prompt_token_estimate,
+            context_window_tokens_used: core_session.prompt_token_estimate,
             status: SessionRuntimeStatus::Idle,
         };
 
@@ -561,13 +566,8 @@ impl ReplayState {
             history_items: replayed_history_items,
             persisted_turn_items: replayed_persisted_turn_items,
             latest_compaction_snapshot: self.latest_compaction_snapshot,
-            pending_turn_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
-            btw_input_queue: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            )),
-            active_task: None,
+            pending_turn_queue,
+            btw_input_queue,
             deferred_assistant: None,
             deferred_reasoning: None,
             next_item_seq: self.next_item_seq.max(1),

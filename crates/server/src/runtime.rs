@@ -169,20 +169,14 @@ impl ServerRuntime {
         for (session_id, session_arc) in &sessions {
             let mut session = session_arc.lock().await;
 
-            // TODO: I think the check here is unnecessary, cause the 'ephemeral' session
-            // will not be persisted rollout.
-            // Skip ephemeral sessions
-            if session.summary.ephemeral {
-                continue;
-            }
-
-            // TODO: Should add stats field to describe `total input cached tokens` / `total read cached tokens`, should add stats field to describe `context window usage`.
-            // Restore token stats from SQLite
             match self.deps.db.get_stats(session_id) {
                 Ok(Some(stats)) => {
                     session.summary.total_input_tokens = stats.total_input_tokens;
                     session.summary.total_output_tokens = stats.total_output_tokens;
+                    session.summary.total_cache_creation_tokens = stats.total_cache_creation_tokens;
+                    session.summary.total_cache_read_tokens = stats.total_cache_read_tokens;
                     session.summary.prompt_token_estimate = stats.prompt_token_estimate;
+                    session.summary.context_window_tokens_used = stats.prompt_token_estimate;
                     if let Ok(mut core) = session.core_session.try_lock() {
                         core.total_input_tokens = stats.total_input_tokens;
                         core.total_output_tokens = stats.total_output_tokens;
@@ -201,8 +195,8 @@ impl ServerRuntime {
                     let stats = crate::db::SessionStats {
                         total_input_tokens: session.summary.total_input_tokens,
                         total_output_tokens: session.summary.total_output_tokens,
-                        total_cache_creation_tokens: 0,
-                        total_cache_read_tokens: 0,
+                        total_cache_creation_tokens: session.summary.total_cache_creation_tokens,
+                        total_cache_read_tokens: session.summary.total_cache_read_tokens,
                         last_input_tokens: 0,
                         turn_count: 0,
                         prompt_token_estimate: session.summary.prompt_token_estimate,
@@ -232,7 +226,8 @@ impl ServerRuntime {
             {
                 Ok(items) => {
                     if !items.is_empty() {
-                        let mut queue = session
+                        let core_session = session.core_session.lock().await;
+                        let mut queue = core_session
                             .pending_turn_queue
                             .lock()
                             .expect("pending turn queue mutex should not be poisoned");

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 
 use devo_core::AgentsMdConfig;
 use devo_core::Model;
@@ -47,7 +46,10 @@ pub struct ServerRuntimeDependencies {
     /// Shared built-in tool registry used by turn execution.
     pub(crate) registry: Arc<ToolRegistry>,
     /// Default model applied when no model override is present.
-    pub(crate) default_model: String, // TODO: Should we set `default_model` here? maybe throw error when no model presented is a better way?
+    ///
+    /// This is guaranteed by server bootstrap and used as the fallback model
+    /// when session or turn metadata does not specify one.
+    pub(crate) default_model: String,
     /// Model catalog used to resolve builtin prompt metadata.
     pub(crate) model_catalog: Arc<dyn ModelCatalog>,
     /// Default workspace root used for workspace-scoped skill discovery.
@@ -238,18 +240,10 @@ pub(crate) struct RuntimeSession {
     pub(crate) persisted_turn_items: Vec<PersistedTurnItem>,
     /// Latest compaction snapshot used to rebuild the model-facing prompt view.
     pub(crate) latest_compaction_snapshot: Option<devo_core::CompactionSnapshotLine>,
-    /// TODO: there are `pending_turn_queue` and `btw_input_queue` at `core_session` field,
-    /// now sure why there are duplicate `pending_turn_queue` and `btw_input_queue`.
-    /// Pending turn inputs (from turn/start while a turn is active).
-    /// Preserved across turns; unconsumed items are pushed back when the turn ends.
+    /// Shared handle to the pending-turn queue owned by `core_session`.
     pub(crate) pending_turn_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
-    /// /btw steer inputs scoped to the current turn.
-    /// Drained by the query loop at each iteration and never carried to the next turn.
+    /// Shared handle to the `/btw` queue owned by `core_session`.
     pub(crate) btw_input_queue: Arc<StdMutex<VecDeque<PendingInputItem>>>,
-    /// TODO: Is there allow multiple session now? a session have a query at most. Oh I forget,
-    /// the `active_task` is at RuntimeSession.
-    /// Live query task for the active turn.
-    pub(crate) active_task: Option<JoinHandle<()>>,
     /// Deferred completion info for in-progress assistant text item.
     /// Cleared when the item is completed; used for crash/interrupt recovery.
     pub(crate) deferred_assistant: Option<(devo_core::ItemId, u64, String)>,

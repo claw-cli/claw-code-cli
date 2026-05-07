@@ -16,6 +16,8 @@ impl ServerRuntime {
         display_input: String,
         input: String,
     ) {
+        // Record the user's message immediately so the UI can show it even if
+        // the model call or event stream takes a moment to start.
         self.emit_turn_item(
             session_id,
             turn.turn_id,
@@ -35,6 +37,9 @@ impl ServerRuntime {
         let turn_for_events = turn.clone();
         let event_session_arc = Arc::clone(&session_arc);
         let event_task = tokio::spawn(async move {
+            // This task owns the streamed model output. It turns raw query
+            // callbacks into persisted turn items and keeps enough state to
+            // resume cleanly if the turn is interrupted mid-stream.
             let mut assistant_item_id = None;
             let mut assistant_item_seq = None;
             let mut assistant_text = String::new();
@@ -373,8 +378,12 @@ impl ServerRuntime {
             result,
             session_total_input_tokens,
             session_total_output_tokens,
+            session_total_cache_creation_tokens,
+            session_total_cache_read_tokens,
             session_prompt_token_estimate,
         ) = {
+            // Run the model query only after the event pipeline is ready so
+            // streamed deltas can be consumed and persisted immediately.
             let core_session = {
                 let session = session_arc.lock().await;
                 Arc::clone(&session.core_session)
@@ -400,10 +409,14 @@ impl ServerRuntime {
                 result,
                 core_session.total_input_tokens,
                 core_session.total_output_tokens,
+                core_session.total_cache_creation_tokens,
+                core_session.total_cache_read_tokens,
                 core_session.prompt_token_estimate,
             )
         };
         drop(event_tx);
+        // Wait for the event task to finish draining buffered stream events
+        // before we persist the terminal turn state.
         let latest_usage = event_task.await.ok().flatten();
         self.active_tasks.lock().await.remove(&session_id);
 
@@ -419,20 +432,22 @@ impl ServerRuntime {
             final_turn.usage = latest_usage.clone();
             session.latest_turn = Some(final_turn.clone());
             session.active_turn = None;
-            session.active_task = None;
             session.summary.status = SessionRuntimeStatus::Idle;
             session.summary.updated_at = Utc::now();
             session.summary.total_input_tokens = session_total_input_tokens;
             session.summary.total_output_tokens = session_total_output_tokens;
+            session.summary.total_cache_creation_tokens = session_total_cache_creation_tokens;
+            session.summary.total_cache_read_tokens = session_total_cache_read_tokens;
             session.summary.prompt_token_estimate = session_prompt_token_estimate;
+            session.summary.context_window_tokens_used = session_prompt_token_estimate;
 
             // Persist token stats to SQLite (skip for ephemeral sessions)
             if !session.summary.ephemeral {
                 let stats = SessionStats {
                     total_input_tokens: session_total_input_tokens,
                     total_output_tokens: session_total_output_tokens,
-                    total_cache_creation_tokens: 0,
-                    total_cache_read_tokens: 0,
+                    total_cache_creation_tokens: session_total_cache_creation_tokens,
+                    total_cache_read_tokens: session_total_cache_read_tokens,
                     last_input_tokens: final_turn
                         .usage
                         .as_ref()
@@ -453,15 +468,22 @@ impl ServerRuntime {
             final_turn
         };
 
-        // Clear btw input queue (both in-memory and SQLite)
+        // The turn is finished, so any queued "btw" input no longer applies.
+        // Clear both the in-memory queue and the persisted mirror.
         {
-            let session = session_arc.lock().await;
-            session
-                .btw_input_queue
+            let is_ephemeral = {
+                let session = session_arc.lock().await;
+                session.summary.ephemeral
+            };
+            let btw_input_queue = {
+                let session = session_arc.lock().await;
+                Arc::clone(&session.btw_input_queue)
+            };
+            btw_input_queue
                 .lock()
                 .expect("btw input queue mutex should not be poisoned")
                 .clear();
-            if !session.summary.ephemeral
+            if !is_ephemeral
                 && let Err(err) = self.deps.db.clear_pending(&session_id, QueueType::Btw)
             {
                 tracing::warn!(
@@ -489,6 +511,7 @@ impl ServerRuntime {
         {
             tracing::warn!(session_id = %session_id, error = %error, "failed to persist terminal turn line");
         }
+        // Emit the terminal result before we look at queued follow-up input.
         if let Err(error) = result {
             tracing::warn!(
                 session_id = %session_id,
@@ -560,7 +583,8 @@ impl ServerRuntime {
             }
         };
         let display_input = input_text.clone();
-        // Broadcast remaining queue state so the TUI preview stays in sync.
+        // Update clients before starting the next turn so dequeued input is
+        // removed from any pending queue display.
         self.broadcast_updated_queue(session_id).await;
 
         let (turn_config, resolved_request) = {
@@ -620,8 +644,8 @@ impl ServerRuntime {
             turn: turn.clone(),
         }))
         .await;
-        // Chain the next turn directly (not spawned) so it runs after the
-        // current turn completes, and calls back into this drain logic.
+        // Chain directly instead of spawning so this drain loop can keep
+        // consuming queued input until the queue is empty.
         Box::pin(Arc::clone(&self).execute_turn(
             session_id,
             turn,
@@ -736,9 +760,11 @@ impl ServerRuntime {
             return;
         };
         let (pending_count, pending_texts) = {
-            let session = session_arc.lock().await;
-            let queue = session
-                .pending_turn_queue
+            let pending_turn_queue = {
+                let session = session_arc.lock().await;
+                Arc::clone(&session.pending_turn_queue)
+            };
+            let queue = pending_turn_queue
                 .lock()
                 .expect("pending turn queue mutex should not be poisoned");
             let texts: Vec<String> = queue

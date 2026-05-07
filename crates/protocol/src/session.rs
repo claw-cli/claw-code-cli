@@ -20,8 +20,6 @@ pub enum SessionRuntimeStatus {
     Unloaded,
 }
 
-// TODO: add field `total_cache_read_tokens`
-// TODO: add field to describe the context window usage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub session_id: SessionId,
@@ -36,7 +34,10 @@ pub struct SessionMetadata {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    pub total_cache_creation_tokens: usize,
+    pub total_cache_read_tokens: usize,
     pub prompt_token_estimate: usize,
+    pub context_window_tokens_used: usize,
     pub status: SessionRuntimeStatus,
 }
 
@@ -201,7 +202,10 @@ mod tests {
             reasoning_effort: Some(crate::ReasoningEffort::Medium),
             total_input_tokens: 12,
             total_output_tokens: 34,
+            total_cache_creation_tokens: 5,
+            total_cache_read_tokens: 7,
             prompt_token_estimate: 21,
+            context_window_tokens_used: 21,
             status: SessionRuntimeStatus::Idle,
         };
 
