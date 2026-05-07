@@ -50,7 +50,7 @@ impl ServerRuntime {
             let mut pending_tool_calls: HashMap<String, (ItemId, u64, serde_json::Value)> =
                 HashMap::new();
             let mut latest_usage: Option<TurnUsage> = None;
-            let mut usage_base: Option<(usize, usize)> = None;
+            let mut usage_base: Option<(usize, usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
                 match event {
                     QueryEvent::TextDelta(text) => {
@@ -303,6 +303,7 @@ impl ServerRuntime {
                                 (
                                     session.summary.total_input_tokens,
                                     session.summary.total_output_tokens,
+                                    session.summary.total_cache_read_tokens,
                                 )
                             };
                             usage_base = Some(base);
@@ -323,6 +324,9 @@ impl ServerRuntime {
                                     usage,
                                     total_input_tokens: base.0 + input_tokens,
                                     total_output_tokens: base.1 + output_tokens,
+                                    total_cache_read_tokens: base.2
+                                        + cache_read_input_tokens.unwrap_or(0),
+                                    last_query_input_tokens: input_tokens,
                                 },
                             ))
                             .await;
@@ -351,6 +355,7 @@ impl ServerRuntime {
                                 (
                                     session.summary.total_input_tokens,
                                     session.summary.total_output_tokens,
+                                    session.summary.total_cache_read_tokens,
                                 )
                             };
                             usage_base = Some(base);
@@ -362,6 +367,8 @@ impl ServerRuntime {
                                 base.0 + usage.input_tokens as usize;
                             session.summary.total_output_tokens =
                                 base.1 + usage.output_tokens as usize;
+                            session.summary.total_cache_read_tokens =
+                                base.2 + usage.cache_read_input_tokens.unwrap_or(0) as usize;
                             session.summary.last_query_total_tokens =
                                 usage.input_tokens as usize + usage.output_tokens as usize;
                         }
@@ -373,6 +380,9 @@ impl ServerRuntime {
                                     usage,
                                     total_input_tokens: base.0 + input_tokens,
                                     total_output_tokens: base.1 + output_tokens,
+                                    total_cache_read_tokens: base.2
+                                        + cache_read_input_tokens.unwrap_or(0),
+                                    last_query_input_tokens: input_tokens,
                                 },
                             ))
                             .await;

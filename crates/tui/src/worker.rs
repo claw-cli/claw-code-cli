@@ -336,7 +336,9 @@ async fn run_worker(
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_input_tokens: 0,
         });
     }
 }
@@ -358,7 +360,10 @@ async fn run_worker_inner(
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
     let mut total_output_tokens = 0usize;
+    let mut total_cache_read_tokens = 0usize;
     let mut last_query_total_tokens = 0usize;
+    let mut last_query_input_tokens = 0usize;
+    let mut saw_usage_update_for_turn = false;
     let mut latest_completed_agent_message: Option<String> = None;
     let mut input_history_cursor: Option<usize> = None;
 
@@ -401,7 +406,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -507,7 +514,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                             Err(_) => {
@@ -516,7 +525,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -540,7 +551,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                             Err(_) => {
@@ -549,7 +562,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -561,7 +576,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         };
@@ -571,7 +588,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         }
@@ -596,7 +615,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -613,6 +634,8 @@ async fn run_worker_inner(
                             thinking: thinking_selection.clone(),
                             reasoning_effort: None,
                             last_query_total_tokens,
+                            last_query_input_tokens,
+                            total_cache_read_tokens,
                         });
                     }
                     Some(OperationCommand::SwitchSession(next_session_id)) => {
@@ -637,9 +660,16 @@ async fn run_worker_inner(
                                     reasoning_effort: result.session.reasoning_effort,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    total_cache_read_tokens: result.session.total_cache_read_tokens,
                                     last_query_total_tokens: result
                                         .session
                                         .last_query_total_tokens,
+                                    last_query_input_tokens: result
+                                        .latest_turn
+                                        .as_ref()
+                                        .and_then(|turn| turn.usage.as_ref())
+                                        .map(|usage| usage.input_tokens as usize)
+                                        .unwrap_or(0),
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
@@ -662,7 +692,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -674,7 +706,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         };
@@ -700,7 +734,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -712,7 +748,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         };
@@ -736,9 +774,16 @@ async fn run_worker_inner(
                                     reasoning_effort: result.session.reasoning_effort,
                                     total_input_tokens: result.session.total_input_tokens,
                                     total_output_tokens: result.session.total_output_tokens,
+                                    total_cache_read_tokens: result.session.total_cache_read_tokens,
                                     last_query_total_tokens: result
                                         .session
                                         .last_query_total_tokens,
+                                    last_query_input_tokens: result
+                                        .latest_turn
+                                        .as_ref()
+                                        .and_then(|turn| turn.usage.as_ref())
+                                        .map(|usage| usage.input_tokens as usize)
+                                        .unwrap_or(0),
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
                                     loaded_item_count: result.loaded_item_count,
@@ -757,7 +802,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -769,7 +816,9 @@ async fn run_worker_inner(
                                 turn_count,
                                 total_input_tokens,
                                 total_output_tokens,
+                                total_cache_read_tokens,
                                 prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
                             });
                             continue;
                         };
@@ -804,9 +853,16 @@ async fn run_worker_inner(
                                             reasoning_effort: resumed.session.reasoning_effort,
                                             total_input_tokens: resumed.session.total_input_tokens,
                                             total_output_tokens: resumed.session.total_output_tokens,
+                                            total_cache_read_tokens: resumed.session.total_cache_read_tokens,
                                             last_query_total_tokens: resumed
                                                 .session
                                                 .last_query_total_tokens,
+                                            last_query_input_tokens: resumed
+                                                .latest_turn
+                                                .as_ref()
+                                                .and_then(|turn| turn.usage.as_ref())
+                                                .map(|usage| usage.input_tokens as usize)
+                                                .unwrap_or(0),
                                             prompt_token_estimate: resumed.session.prompt_token_estimate,
                                             history_items: project_history_items(&resumed.history_items),
                                             loaded_item_count: resumed.loaded_item_count,
@@ -825,7 +881,9 @@ async fn run_worker_inner(
                                             turn_count,
                                             total_input_tokens,
                                             total_output_tokens,
+                                            total_cache_read_tokens,
                                             prompt_token_estimate: total_input_tokens,
+                                            last_query_input_tokens,
                                         });
                                     }
                                 }
@@ -836,7 +894,9 @@ async fn run_worker_inner(
                                     turn_count,
                                     total_input_tokens,
                                     total_output_tokens,
+                                    total_cache_read_tokens,
                                     prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
                                 });
                             }
                         }
@@ -851,13 +911,15 @@ async fn run_worker_inner(
                                 })
                                 .await
                             {
-                                let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                    message: error.to_string(),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    prompt_token_estimate: total_input_tokens,
-                                });
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
                             }
                     }
                     Some(OperationCommand::SteerTurn {
@@ -878,16 +940,18 @@ async fn run_worker_inner(
                                         turn_id: result.turn_id,
                                     });
                                 }
-                                Err(error) => {
-                                    let _ = event_tx.send(WorkerEvent::TurnFailed {
-                                        message: error.to_string(),
-                                        turn_count,
-                                        total_input_tokens,
-                                        total_output_tokens,
-                                        prompt_token_estimate: total_input_tokens,
-                                    });
-                                }
+                            Err(error) => {
+                                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                    message: error.to_string(),
+                                    turn_count,
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_read_tokens,
+                                    prompt_token_estimate: total_input_tokens,
+                                    last_query_input_tokens,
+                                });
                             }
+                        }
                         }
                     }
                     Some(OperationCommand::BrowseInputHistory(direction)) => {
@@ -941,7 +1005,9 @@ async fn run_worker_inner(
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_cache_read_tokens,
                                         prompt_token_estimate: total_input_tokens,
+                                        last_query_input_tokens,
                                     });
                                     None
                                 }
@@ -963,6 +1029,7 @@ async fn run_worker_inner(
                             "turn/started" => {
                                 if let ServerEvent::TurnStarted(payload) = event {
                                     active_turn_id = Some(payload.turn.turn_id);
+                                    saw_usage_update_for_turn = false;
                                     model = payload.turn.model.clone();
                                     thinking_selection = payload.turn.thinking.clone();
                                     let _ = event_tx.send(WorkerEvent::TurnStarted {
@@ -1031,46 +1098,56 @@ async fn run_worker_inner(
                                     active_turn_id = None;
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
-                                    // TODO: Should include cahed input tokens.
                                     if completed {
                                         turn_count += 1;
                                         if let Some(usage) = &payload.turn.usage {
-                                            total_input_tokens = usage.input_tokens as usize;
-                                            total_output_tokens = usage.output_tokens as usize;
+                                            last_query_input_tokens = usage.input_tokens as usize;
                                             last_query_total_tokens = usage.input_tokens as usize
                                                 + usage.output_tokens as usize;
+                                            if !saw_usage_update_for_turn {
+                                                total_input_tokens += usage.input_tokens as usize;
+                                                total_output_tokens += usage.output_tokens as usize;
+                                                total_cache_read_tokens += usage
+                                                    .cache_read_input_tokens
+                                                    .unwrap_or(0) as usize;
+                                            }
                                         }
-                                let _ = event_tx.send(WorkerEvent::TurnFinished {
-                                    stop_reason: format!("{:?}", payload.turn.status),
-                                    turn_count,
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    last_query_total_tokens,
-                                    prompt_token_estimate: payload
-                                        .turn
-                                        .usage
-                                        .as_ref()
-                                        .map(|usage| usage.input_tokens as usize)
-                                        .unwrap_or(total_input_tokens),
-                                });
-                                latest_completed_agent_message = None;
+                                    }
+                                    let _ = event_tx.send(WorkerEvent::TurnFinished {
+                                        stop_reason: format!("{:?}", payload.turn.status),
+                                        turn_count,
+                                        total_input_tokens,
+                                        total_output_tokens,
+                                        total_cache_read_tokens,
+                                        last_query_total_tokens,
+                                        last_query_input_tokens,
+                                        prompt_token_estimate: payload
+                                            .turn
+                                            .usage
+                                            .as_ref()
+                                            .map(|usage| usage.input_tokens as usize)
+                                            .unwrap_or(total_input_tokens),
+                                    });
+                                    latest_completed_agent_message = None;
+                                }
                             }
-                        }
-                            }
-                            // TODO: Should include cached input tokens.
                             "turn/usage/updated" => {
                                 if let ServerEvent::TurnUsageUpdated(payload) = event {
+                                    saw_usage_update_for_turn = true;
                                     total_input_tokens = payload.total_input_tokens;
                                     total_output_tokens = payload.total_output_tokens;
+                                    total_cache_read_tokens = payload.total_cache_read_tokens;
+                                    last_query_input_tokens = payload.last_query_input_tokens;
                                     let _ = event_tx.send(WorkerEvent::UsageUpdated {
                                         total_input_tokens: payload.total_input_tokens,
                                         total_output_tokens: payload.total_output_tokens,
+                                        total_cache_read_tokens: payload.total_cache_read_tokens,
                                         last_query_total_tokens: payload.usage.input_tokens as usize
                                             + payload.usage.output_tokens as usize,
+                                        last_query_input_tokens: payload.last_query_input_tokens,
                                     });
                                 }
                             }
-                            // TODO: Should include cached input tokens.
                             "turn/failed" => {
                                 if let ServerEvent::TurnFailed(TurnEventPayload { turn, .. }) = event {
                                     active_turn_id = None;
@@ -1078,19 +1155,33 @@ async fn run_worker_inner(
                                         .take()
                                         .unwrap_or_else(|| format!("turn failed with status {:?}", turn.status));
                                     if let Some(usage) = &turn.usage {
-                                        total_input_tokens = usage.input_tokens as usize;
-                                        total_output_tokens = usage.output_tokens as usize;
+                                        last_query_input_tokens = usage.input_tokens as usize;
+                                        last_query_total_tokens = usage.input_tokens as usize
+                                            + usage.output_tokens as usize;
+                                        if !saw_usage_update_for_turn {
+                                            total_input_tokens += usage.input_tokens as usize;
+                                            total_output_tokens += usage.output_tokens as usize;
+                                            total_cache_read_tokens += usage
+                                                .cache_read_input_tokens
+                                                .unwrap_or(0) as usize;
+                                        }
                                     }
                                     let _ = event_tx.send(WorkerEvent::TurnFailed {
                                         message,
                                         turn_count,
                                         total_input_tokens,
                                         total_output_tokens,
+                                        total_cache_read_tokens,
                                         prompt_token_estimate: turn
                                             .usage
                                             .as_ref()
                                             .map(|usage| usage.input_tokens as usize)
                                             .unwrap_or(total_input_tokens),
+                                        last_query_input_tokens: turn
+                                            .usage
+                                            .as_ref()
+                                            .map(|usage| usage.input_tokens as usize)
+                                            .unwrap_or(last_query_input_tokens),
                                     });
                                 }
                             }

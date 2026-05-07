@@ -96,8 +96,12 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Total cached input tokens accumulated in the session.
+        total_cache_read_tokens: usize,
         /// Last completed query token usage, measured as input plus output tokens.
         last_query_total_tokens: usize,
+        /// Input tokens consumed by the current or last completed query.
+        last_query_input_tokens: usize,
     },
     /// The current turn completed successfully.
     TurnFinished {
@@ -109,8 +113,12 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Total cached input tokens accumulated in the session.
+        total_cache_read_tokens: usize,
         /// Last completed turn token usage, measured as input plus output tokens.
         last_query_total_tokens: usize,
+        /// Input tokens consumed by the last completed query.
+        last_query_input_tokens: usize,
         /// Estimated prompt tokens for the just-completed request.
         prompt_token_estimate: usize,
     },
@@ -124,8 +132,12 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated in the session.
         total_output_tokens: usize,
+        /// Total cached input tokens accumulated in the session.
+        total_cache_read_tokens: usize,
         /// Estimated prompt tokens for the last attempted request.
         prompt_token_estimate: usize,
+        /// Input tokens consumed by the last attempted query.
+        last_query_input_tokens: usize,
     },
     /// Provider validation succeeded during onboarding.
     ProviderValidationSucceeded {
@@ -159,6 +171,10 @@ pub(crate) enum WorkerEvent {
         reasoning_effort: Option<ReasoningEffort>,
         /// Last completed turn token usage for the fresh session.
         last_query_total_tokens: usize,
+        /// Last completed query input tokens for the fresh session.
+        last_query_input_tokens: usize,
+        /// Total cached input tokens accumulated in the fresh session.
+        total_cache_read_tokens: usize,
     },
     /// The active session changed.
     SessionSwitched {
@@ -178,8 +194,12 @@ pub(crate) enum WorkerEvent {
         total_input_tokens: usize,
         /// Total output tokens accumulated for the resumed session.
         total_output_tokens: usize,
+        /// Total cached input tokens accumulated for the resumed session.
+        total_cache_read_tokens: usize,
         /// Last completed turn token usage, measured as input plus output tokens.
         last_query_total_tokens: usize,
+        /// Input tokens consumed by the last completed query.
+        last_query_input_tokens: usize,
         /// Estimated prompt tokens currently visible to the model.
         prompt_token_estimate: usize,
         /// Replay-friendly transcript items loaded from the resumed session.

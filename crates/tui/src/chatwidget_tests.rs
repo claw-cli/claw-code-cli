@@ -502,7 +502,9 @@ fn streamed_lines_stay_in_live_viewport_until_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -534,7 +536,9 @@ fn committed_history_drains_to_scrollback_lines() {
         turn_count: 1,
         total_input_tokens: 10,
         total_output_tokens: 20,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 30,
+        last_query_input_tokens: 10,
         prompt_token_estimate: 10,
     });
 
@@ -637,7 +641,9 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: vec![
             crate::events::TranscriptItem::new(
@@ -703,7 +709,9 @@ fn turn_finished_does_not_add_completion_status_line_to_history() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -734,7 +742,9 @@ fn completed_turn_summary_keeps_duration_for_text_turns() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -854,7 +864,9 @@ fn committed_assistant_markdown_does_not_double_wrap() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -907,7 +919,9 @@ fn reasoning_text_commits_to_history_when_turn_finishes() {
         turn_count: 1,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
     });
 
@@ -934,7 +948,9 @@ fn restored_reasoning_text_is_visible_in_transcript() {
         reasoning_effort: None,
         total_input_tokens: 0,
         total_output_tokens: 0,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
         prompt_token_estimate: 0,
         history_items: vec![crate::events::TranscriptItem::new(
             crate::events::TranscriptItemKind::Reasoning,
@@ -1091,7 +1107,9 @@ fn session_switch_updates_session_identity_projection() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1127,7 +1145,9 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         reasoning_effort: None,
         total_input_tokens: 12,
         total_output_tokens: 18,
+        total_cache_read_tokens: 4,
         last_query_total_tokens: 42,
+        last_query_input_tokens: 42,
         prompt_token_estimate: 12,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1135,8 +1155,10 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     });
 
     let idle_summary = widget.status_summary_text();
-    assert!(idle_summary.contains("(42)"));
-    assert!(!idle_summary.contains("(12)"));
+    assert!(idle_summary.contains("↑12"));
+    assert!(idle_summary.contains("↺4 33%"));
+    assert!(idle_summary.contains("↓18"));
+    assert!(idle_summary.contains("42/190k"));
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
         model: "test-model".to_string(),
@@ -1147,23 +1169,31 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
     widget.handle_worker_event(crate::events::WorkerEvent::UsageUpdated {
         total_input_tokens: 7,
         total_output_tokens: 2,
+        total_cache_read_tokens: 6,
         last_query_total_tokens: 9,
+        last_query_input_tokens: 7,
     });
 
     let busy_summary = widget.status_summary_text();
-    assert!(busy_summary.contains("(9)"));
+    assert!(busy_summary.contains("↑7"));
+    assert!(busy_summary.contains("↺6 86%"));
+    assert!(busy_summary.contains("7/190k"));
 
     widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
         stop_reason: "stop".to_string(),
         turn_count: 2,
         total_input_tokens: 19,
         total_output_tokens: 20,
+        total_cache_read_tokens: 6,
         last_query_total_tokens: 9,
+        last_query_input_tokens: 7,
         prompt_token_estimate: 7,
     });
 
     let finished_summary = widget.status_summary_text();
-    assert!(finished_summary.contains("(9)"));
+    assert!(finished_summary.contains("↑19"));
+    assert!(finished_summary.contains("↺6 32%"));
+    assert!(finished_summary.contains("7/190k"));
 }
 
 #[test]
@@ -1186,7 +1216,9 @@ fn new_session_prepared_resets_session_identity_projection() {
         reasoning_effort: None,
         total_input_tokens: 3,
         total_output_tokens: 5,
+        total_cache_read_tokens: 0,
         last_query_total_tokens: 8,
+        last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
         loaded_item_count: 0,
@@ -1198,6 +1230,8 @@ fn new_session_prepared_resets_session_identity_projection() {
         thinking: None,
         reasoning_effort: None,
         last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        total_cache_read_tokens: 0,
     });
 
     assert_eq!(widget.current_cwd(), initial_cwd.as_path());

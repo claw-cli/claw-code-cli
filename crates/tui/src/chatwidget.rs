@@ -247,7 +247,9 @@ pub(crate) struct ChatWidget {
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_cache_read_tokens: usize,
     prompt_token_estimate: usize,
+    last_query_input_tokens: usize,
     last_query_total_tokens: usize,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
@@ -430,12 +432,19 @@ impl ChatWidget {
         }
     }
 
-    fn context_budget(&self) -> Option<(usize, usize, usize)> {
+    fn context_usage(&self) -> Option<(usize, usize, usize)> {
         let model = self.session.model.as_ref()?;
-        let total = model.context_window as usize;
-        let usable = total.saturating_mul(model.effective_context_window_percent() as usize) / 100;
-        let used = self.last_query_total_tokens.min(usable);
-        Some((used, usable, total))
+        let total = (model
+            .context_window
+            .saturating_mul(model.effective_context_window_percent() as u32)
+            / 100) as usize;
+        let used = self.last_query_input_tokens.min(total);
+        let percent = if total == 0 {
+            0
+        } else {
+            used.saturating_mul(100) / total
+        };
+        Some((used, total, percent))
     }
 
     fn format_compact_token_count(value: usize) -> String {
@@ -459,7 +468,15 @@ impl ChatWidget {
             .chain(std::iter::repeat_n('░', empty))
             .collect();
         let pct = (ratio * 100.0).round() as usize;
-        format!("{bar} {pct}% ({})", Self::format_compact_token_count(used))
+        format!("{bar} {pct}%")
+    }
+
+    fn percent_of(numerator: usize, denominator: usize) -> usize {
+        if denominator == 0 {
+            0
+        } else {
+            (numerator.saturating_mul(100) + denominator / 2) / denominator
+        }
     }
 
     fn session_summary_text(&self) -> String {
@@ -470,17 +487,32 @@ impl ChatWidget {
             .map(|model| model.slug.as_str())
             .unwrap_or("unknown");
         let thinking = self.thinking_selection.as_deref().unwrap_or("default");
+        let cached_input_percent =
+            Self::percent_of(self.total_cache_read_tokens, self.total_input_tokens);
         let context = self
-            .context_budget()
-            .map_or_else(String::new, |(used, usable, _total)| {
-                Self::render_progress_bar(used, usable, 10)
+            .context_usage()
+            .map_or_else(String::new, |(used, total, _percent)| {
+                format!(
+                    "{} {}/{}",
+                    Self::render_progress_bar(used, total, 10),
+                    Self::format_compact_token_count(used),
+                    Self::format_compact_token_count(total)
+                )
             });
 
         let mut parts: Vec<String> = Vec::new();
         parts.push(format!("{model} {thinking}"));
         parts.push(format!(
-            "\u{2191}{} \u{2193}{}",
-            Self::format_compact_token_count(self.total_input_tokens),
+            "↑{}",
+            Self::format_compact_token_count(self.total_input_tokens)
+        ));
+        parts.push(format!(
+            "↺{} {}%",
+            Self::format_compact_token_count(self.total_cache_read_tokens),
+            cached_input_percent
+        ));
+        parts.push(format!(
+            "↓{}",
             Self::format_compact_token_count(self.total_output_tokens)
         ));
         if !context.is_empty() {
@@ -674,7 +706,9 @@ impl ChatWidget {
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
             prompt_token_estimate: 0,
+            last_query_input_tokens: 0,
             last_query_total_tokens: 0,
             queued_count: 0,
             active_turn_id: None,
@@ -1186,11 +1220,15 @@ impl ChatWidget {
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
                 last_query_total_tokens,
+                last_query_input_tokens,
             } => {
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
                 self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = total_input_tokens;
                 self.frame_requester.schedule_frame();
             }
@@ -1199,7 +1237,9 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
                 last_query_total_tokens,
+                last_query_input_tokens,
                 prompt_token_estimate,
             } => {
                 self.commit_active_streams(DotStatus::Completed);
@@ -1209,7 +1249,9 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
                 self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 let model_name = self
                     .session
@@ -1239,7 +1281,9 @@ impl ChatWidget {
                 turn_count,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
                 prompt_token_estimate,
+                last_query_input_tokens,
             } => {
                 self.resume_browser_loading = false;
                 self.commit_active_streams(DotStatus::Failed);
@@ -1249,6 +1293,8 @@ impl ChatWidget {
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 let model_name = self
                     .session
@@ -1303,6 +1349,8 @@ impl ChatWidget {
                 thinking,
                 reasoning_effort,
                 last_query_total_tokens,
+                last_query_input_tokens,
+                total_cache_read_tokens,
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
@@ -1320,7 +1368,9 @@ impl ChatWidget {
                 self.turn_count = 0;
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
+                self.total_cache_read_tokens = total_cache_read_tokens;
                 self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = 0;
                 self.set_status_message("New session ready; send a prompt to start it");
             }
@@ -1333,7 +1383,9 @@ impl ChatWidget {
                 reasoning_effort,
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_read_tokens,
                 last_query_total_tokens,
+                last_query_input_tokens,
                 prompt_token_estimate,
                 history_items,
                 loaded_item_count,
@@ -1355,7 +1407,9 @@ impl ChatWidget {
                 self.stream_controller = None;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
+                self.total_cache_read_tokens = total_cache_read_tokens;
                 self.last_query_total_tokens = last_query_total_tokens;
+                self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
                 self.rebuild_restored_session_history(
                     history_items,

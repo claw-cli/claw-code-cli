@@ -64,6 +64,8 @@ pub struct TurnUsageUpdatedPayload {
     pub usage: TurnUsage,
     pub total_input_tokens: usize,
     pub total_output_tokens: usize,
+    pub total_cache_read_tokens: usize,
+    pub last_query_input_tokens: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
