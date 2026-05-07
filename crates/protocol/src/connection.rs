@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +39,7 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
 }
 
+// TODO: The `ServerCapabilities` should be removed, cause we don't need it anymore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCapabilities {
     pub session_resume: bool,

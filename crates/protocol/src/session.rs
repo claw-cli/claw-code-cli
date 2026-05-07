@@ -20,6 +20,8 @@ pub enum SessionRuntimeStatus {
     Unloaded,
 }
 
+// TODO: add field `total_cache_read_tokens`
+// TODO: add field to describe the context window usage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMetadata {
     pub session_id: SessionId,
