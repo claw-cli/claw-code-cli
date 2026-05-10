@@ -14,6 +14,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 
+mod approval_overlay;
 pub(crate) mod bottom_pane_view;
 mod chat_composer;
 mod chat_composer_history;
@@ -34,6 +35,8 @@ pub(crate) mod textarea;
 mod theme_picker;
 mod unified_exec_footer;
 
+pub(crate) use approval_overlay::ApprovalOverlay;
+pub(crate) use approval_overlay::ApprovalOverlayRequest;
 pub(crate) use chat_composer::ChatComposer;
 use chat_composer::ChatComposerConfig;
 use chat_composer::InputResult as ComposerInputResult;

@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use devo_core::Model;
 use devo_core::ModelCatalog;
+use devo_core::PermissionPreset;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderWireApi;
 use devo_core::ReasoningEffort;
@@ -21,6 +22,9 @@ use devo_provider::ModelProviderSDK;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
 use devo_provider::openai::OpenAIResponsesProvider;
+use devo_server::ApprovalDecisionPayload;
+use devo_server::ApprovalRequestPayload;
+use devo_server::ApprovalRespondParams;
 use devo_server::InputItem;
 use devo_server::ItemEnvelope;
 use devo_server::ItemEventPayload;
@@ -56,6 +60,7 @@ struct EnsureSessionOutcome {
     model: Option<String>,
     thinking: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    created: bool,
 }
 
 /// Immutable runtime configuration used to construct the background server client worker.
@@ -68,13 +73,18 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) server_log_level: Option<String>,
     /// Initial thinking mode used for new turns.
     pub(crate) thinking_selection: Option<String>,
+    /// Permission preset to apply to the server session when it exists.
+    pub(crate) permission_preset: PermissionPreset,
 }
 
 /// TODO: Should we extract the OperationCommand to the `protocol` crate? Since it can be shareable.
 /// Commands accepted by the background query worker.
 enum OperationCommand {
     /// Submit a new user prompt to the session.
-    SubmitPrompt(String),
+    SubmitPrompt {
+        prompt: String,
+        approval_policy: Option<String>,
+    },
     /// Update the model used for future turns.
     /// TODO: Model should be bind at Session Metadata, not turn, indicate to the model utilized to generate
     /// at next turn. However, we can still bind a model at turn, to indicate what model is utlized generated.
@@ -124,6 +134,16 @@ enum OperationCommand {
         input: Vec<InputItem>,
         expected_turn_id: TurnId,
     },
+    ApprovalRespond {
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        decision: devo_server::ApprovalDecisionValue,
+        scope: devo_server::ApprovalScopeValue,
+    },
+    UpdatePermissions {
+        preset: devo_protocol::PermissionPreset,
+    },
     /// Browse persisted input history via the server/runtime session state.
     BrowseInputHistory(InputHistoryDirection),
     /// Stop the worker loop.
@@ -154,9 +174,16 @@ impl QueryWorkerHandle {
     }
 
     /// Submits one prompt to the worker.
-    pub(crate) fn submit_prompt(&self, prompt: String) -> Result<()> {
+    pub(crate) fn submit_prompt(
+        &self,
+        prompt: String,
+        approval_policy: Option<String>,
+    ) -> Result<()> {
         self.command_tx
-            .send(OperationCommand::SubmitPrompt(prompt))
+            .send(OperationCommand::SubmitPrompt {
+                prompt,
+                approval_policy,
+            })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -281,6 +308,31 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    pub(crate) fn approval_respond(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        decision: devo_server::ApprovalDecisionValue,
+        scope: devo_server::ApprovalScopeValue,
+    ) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ApprovalRespond {
+                session_id,
+                turn_id,
+                approval_id,
+                decision,
+                scope,
+            })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn update_permissions(&self, preset: devo_protocol::PermissionPreset) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::UpdatePermissions { preset })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     pub(crate) fn browse_input_history(&self, direction: InputHistoryDirection) -> Result<()> {
         self.command_tx
             .send(OperationCommand::BrowseInputHistory(direction))
@@ -356,6 +408,7 @@ async fn run_worker_inner(
     let mut session_cwd = config.cwd.clone();
     let mut model = config.model;
     let mut thinking_selection = config.thinking_selection;
+    let mut permission_preset = config.permission_preset;
     let mut active_turn_id: Option<TurnId> = None;
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
@@ -371,7 +424,10 @@ async fn run_worker_inner(
         tokio::select! {
             maybe_command = command_rx.recv() => {
                 match maybe_command {
-                    Some(OperationCommand::SubmitPrompt(prompt)) => {
+                    Some(OperationCommand::SubmitPrompt {
+                        prompt,
+                        approval_policy,
+                    }) => {
                         let session_start = ensure_session_started(
                             &mut client,
                             &config.cwd,
@@ -387,13 +443,21 @@ async fn run_worker_inner(
                             .clone()
                             .or(thinking_selection);
                         let active_session_id = session_start.session_id;
+                        if session_start.created {
+                            apply_session_permissions(
+                                &mut client,
+                                active_session_id,
+                                permission_preset,
+                            )
+                            .await?;
+                        }
                         let start_result = client.turn_start(TurnStartParams {
                             session_id: active_session_id,
                             input: vec![InputItem::Text { text: prompt }],
                             model: Some(model.clone()),
                             thinking: thinking_selection.clone(),
                             sandbox: None,
-                            approval_policy: None,
+                            approval_policy,
                             cwd: None,
                         }).await;
                         match start_result {
@@ -954,6 +1018,53 @@ async fn run_worker_inner(
                         }
                         }
                     }
+                    Some(OperationCommand::ApprovalRespond {
+                        session_id,
+                        turn_id,
+                        approval_id,
+                        decision,
+                        scope,
+                    }) => {
+                        if let Err(error) = client
+                            .approval_respond(ApprovalRespondParams {
+                                session_id,
+                                turn_id,
+                                approval_id: approval_id.into(),
+                                decision,
+                                scope,
+                            })
+                            .await
+                        {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                        }
+                    }
+                    Some(OperationCommand::UpdatePermissions { preset }) => {
+                        permission_preset = preset;
+                        let Some(active_session_id) = session_id else {
+                            continue;
+                        };
+                        if let Err(error) =
+                            apply_session_permissions(&mut client, active_session_id, preset).await
+                        {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                        }
+                    }
                     Some(OperationCommand::BrowseInputHistory(direction)) => {
                         let text = if let Some(active_session_id) = session_id {
                             match client
@@ -1248,6 +1359,7 @@ async fn ensure_session_started(
             model: Some(model.to_string()),
             thinking: None,
             reasoning_effort: None,
+            created: false,
         });
     }
 
@@ -1265,7 +1377,22 @@ async fn ensure_session_started(
         model: session.session.model,
         thinking: session.session.thinking,
         reasoning_effort: session.session.reasoning_effort,
+        created: true,
     })
+}
+
+async fn apply_session_permissions(
+    client: &mut StdioServerClient,
+    session_id: SessionId,
+    preset: PermissionPreset,
+) -> Result<()> {
+    client
+        .session_permissions_update(devo_server::SessionPermissionsUpdateParams {
+            session_id,
+            preset,
+        })
+        .await?;
+    Ok(())
 }
 
 async fn spawn_client(cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
@@ -1391,6 +1518,44 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 preview: render_json_value_text(&payload.content),
                 is_error: payload.is_error,
                 truncated: false,
+            });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::ApprovalRequest,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<ApprovalRequestPayload>(payload) else {
+                return;
+            };
+            let Some(turn_id) = payload.request.turn_id else {
+                return;
+            };
+            let _ = event_tx.send(WorkerEvent::ApprovalRequest {
+                session_id: payload.request.session_id,
+                turn_id,
+                approval_id: payload.approval_id.to_string(),
+                action_summary: payload.action_summary,
+                justification: payload.justification,
+                resource: payload.resource,
+                available_scopes: payload.available_scopes,
+                path: payload.path,
+                host: payload.host,
+                target: payload.target,
+            });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::ApprovalDecision,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<ApprovalDecisionPayload>(payload) else {
+                return;
+            };
+            let _ = event_tx.send(WorkerEvent::ApprovalDecision {
+                approval_id: payload.approval_id.to_string(),
+                decision: payload.decision,
+                scope: payload.scope,
             });
         }
         _ => {}

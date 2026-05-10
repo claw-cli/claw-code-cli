@@ -920,7 +920,7 @@ hello
             &cwd,
             "test-session",
             json!({
-                "patchText": "*** Begin Patch
+            "patchText": "*** Begin Patch
 *** Add File: add.txt
 +hello
 *** Update File: update.txt
@@ -934,10 +934,10 @@ hello
 -before
 +after
 *** End Patch"
-                }),
-            )
-            .await
-            .expect("execute apply_patch");
+            }),
+        )
+        .await
+        .expect("execute apply_patch");
 
         assert!(!output.is_error);
         assert!(
@@ -977,5 +977,4 @@ hello
         assert_eq!(files[3]["additions"], 1);
         assert_eq!(files[3]["deletions"], 1);
     }
-
 }

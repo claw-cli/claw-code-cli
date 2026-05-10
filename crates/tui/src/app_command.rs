@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use devo_protocol::ApprovalDecisionValue;
+use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
 use devo_protocol::SessionId;
 use devo_protocol::TurnId;
@@ -42,6 +44,16 @@ pub(crate) enum AppCommand {
         input: Vec<InputItem>,
         expected_turn_id: TurnId,
     },
+    ApprovalRespond {
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        decision: ApprovalDecisionValue,
+        scope: ApprovalScopeValue,
+    },
+    UpdatePermissions {
+        preset: devo_protocol::PermissionPreset,
+    },
     BrowseInputHistory {
         direction: InputHistoryDirection,
     },
@@ -76,6 +88,14 @@ pub(crate) enum AppCommandView<'a> {
     },
     SteerTurn {
         input: &'a [InputItem],
+    },
+    ApprovalRespond {
+        approval_id: &'a str,
+        decision: &'a ApprovalDecisionValue,
+        scope: &'a ApprovalScopeValue,
+    },
+    UpdatePermissions {
+        preset: devo_protocol::PermissionPreset,
     },
     OverrideTurnContext {
         cwd: &'a Option<PathBuf>,
@@ -193,6 +213,8 @@ impl AppCommand {
             Self::UserTurn { .. } => "user_turn",
             Self::OverrideTurnContext { .. } => "override_turn_context",
             Self::SteerTurn { .. } => "steer_turn",
+            Self::ApprovalRespond { .. } => "approval_respond",
+            Self::UpdatePermissions { .. } => "update_permissions",
             Self::BrowseInputHistory { .. } => "browse_input_history",
             Self::SwitchSession { .. } => "switch_session",
             Self::RollbackToUserTurn { .. } => "rollback_to_user_turn",
@@ -236,6 +258,19 @@ impl AppCommand {
                 approval_policy,
             },
             Self::SteerTurn { input, .. } => AppCommandView::SteerTurn { input },
+            Self::ApprovalRespond {
+                approval_id,
+                decision,
+                scope,
+                ..
+            } => AppCommandView::ApprovalRespond {
+                approval_id,
+                decision,
+                scope,
+            },
+            Self::UpdatePermissions { preset, .. } => {
+                AppCommandView::UpdatePermissions { preset: *preset }
+            }
             Self::BrowseInputHistory { direction } => AppCommandView::BrowseInputHistory {
                 direction: *direction,
             },

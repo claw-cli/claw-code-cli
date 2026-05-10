@@ -577,6 +577,9 @@ impl ReplayState {
             deferred_reasoning: None,
             next_item_seq: self.next_item_seq.max(1),
             first_user_input: None,
+            pending_approvals: std::collections::HashMap::new(),
+            session_approval_cache: crate::execution::ApprovalGrantCache::default(),
+            turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })
     }
 

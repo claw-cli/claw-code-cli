@@ -156,6 +156,21 @@ pub struct ApprovalRequestItem {
     pub action_summary: String,
     /// The justification shown to the user.
     pub justification: String,
+    /// The resource kind this approval gates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// Scope choices offered to the user.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_scopes: Vec<String>,
+    /// Optional path related to the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Optional host related to the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Optional command, URL, query, or other target string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// Stores one approval decision as a persisted item payload.

@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use devo_safety::PermissionMode;
+use devo_safety::PermissionPreset;
+use devo_safety::RuntimePermissionProfile;
 
 use devo_protocol::PendingInputItem;
 use devo_protocol::TurnKind;
@@ -21,14 +23,19 @@ use crate::state::turn::TurnState;
 pub struct SessionConfig {
     pub token_budget: TokenBudget,
     pub permission_mode: PermissionMode,
+    pub permission_profile: RuntimePermissionProfile,
     pub agents_md: AgentsMdConfig,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let permission_profile =
+            RuntimePermissionProfile::from_preset(PermissionPreset::Default, cwd);
         Self {
             token_budget: TokenBudget::default(),
-            permission_mode: PermissionMode::AutoApprove,
+            permission_mode: permission_profile.permission_mode(),
+            permission_profile,
             agents_md: AgentsMdConfig::default(),
         }
     }

@@ -1,11 +1,15 @@
 use anyhow::Context;
 use anyhow::Result;
+use devo_core::AppConfigLoader;
+use devo_core::FileSystemAppConfigLoader;
 use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderConfigFile;
 use devo_core::ResolvedProviderSettings;
 use devo_core::load_config;
+use devo_core::project_config_key;
 use devo_core::resolve_provider_settings;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ProviderWireApi;
 use devo_tui::InitialTuiSession;
 use devo_tui::InteractiveTuiConfig;
@@ -24,6 +28,13 @@ pub(crate) async fn run_agent(force_onboarding: bool, log_level: Option<&str>) -
     let config_home = find_devo_home().context("could not determine devo home directory")?;
     let model_catalog = PresetModelCatalog::load_from_config(&config_home, Some(&cwd))?;
     let stored_config = load_config().unwrap_or_default();
+    let app_config = FileSystemAppConfigLoader::new(config_home.clone()).load(Some(&cwd))?;
+    let project_key = project_config_key(&cwd);
+    let permission_preset = app_config
+        .projects
+        .get(&project_key)
+        .and_then(|config| config.permission_preset)
+        .unwrap_or(PermissionPreset::Default);
     let (onboarding_mode, resolved) =
         resolve_initial_provider_settings(force_onboarding, &stored_config, &model_catalog)?;
 
@@ -47,6 +58,7 @@ pub(crate) async fn run_agent(force_onboarding: bool, log_level: Option<&str>) -
             model,
             provider: wire_api,
             thinking_selection: model_thinking_selection,
+            permission_preset,
             // TODO: why do we need cwd here, maybe remove it ?
             cwd,
         },

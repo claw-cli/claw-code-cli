@@ -1272,8 +1272,8 @@ mod tests {
             supports_parallel: false,
         });
         let registry = Arc::new(builder.build());
-        let deny_checker = PermissionChecker::new(|name| {
-            let n = name.to_string();
+        let deny_checker = PermissionChecker::new(|request| {
+            let n = request.tool_name;
             Box::pin(async move { Err(format!("{n} denied")) })
         });
         let runtime = ToolRuntime::new(Arc::clone(&registry), deny_checker);

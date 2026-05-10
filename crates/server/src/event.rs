@@ -1,7 +1,7 @@
 pub use devo_protocol::{
-    ApprovalRequestPayload, EventContext, ItemDeltaKind, ItemDeltaPayload, ItemEnvelope,
-    ItemEventPayload, ItemKind, PendingServerRequestContext, RequestUserInputPayload, ServerEvent,
-    ServerRequestKind, ServerRequestResolvedPayload, SessionCompactionFailedPayload,
+    ApprovalDecisionPayload, ApprovalRequestPayload, EventContext, ItemDeltaKind, ItemDeltaPayload,
+    ItemEnvelope, ItemEventPayload, ItemKind, PendingServerRequestContext, RequestUserInputPayload,
+    ServerEvent, ServerRequestKind, ServerRequestResolvedPayload, SessionCompactionFailedPayload,
     SessionEventPayload, SessionStatusChangedPayload, ToolCallPayload, ToolResultPayload,
     TurnEventPayload, TurnUsageUpdatedPayload,
 };

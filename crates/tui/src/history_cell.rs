@@ -823,6 +823,32 @@ pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryC
     Box::new(PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  "))
 }
 
+pub fn new_permission_request_cell(title: String, body: String) -> Box<dyn HistoryCell> {
+    let mut lines = vec![Line::from(vec![
+        "Permission required: ".yellow().bold(),
+        Span::from(title),
+    ])];
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        lines.push(Line::from(line.to_string()).dim());
+    }
+    lines.push(Line::from(vec![
+        "Press ".dim(),
+        "y".bold(),
+        " once, ".dim(),
+        "s".bold(),
+        " session, ".dim(),
+        "n".bold(),
+        " deny, ".dim(),
+        "Esc".bold(),
+        " cancel".dim(),
+    ]));
+    Box::new(PlainHistoryCell::new(prefix_lines(
+        lines,
+        "? ".yellow(),
+        "  ".into(),
+    )))
+}
+
 /// Cyan history cell line showing the current review status.
 pub(crate) fn new_review_status_line(message: String) -> PlainHistoryCell {
     PlainHistoryCell {

@@ -292,6 +292,34 @@ Rules:
 
 ## Approval Methods
 
+### `session/permissions/update`
+
+Request fields:
+
+- `sessionId`
+- `preset`
+
+Preset values:
+
+- `read-only`
+- `default`
+- `auto-review`
+- `full-access`
+
+Response fields:
+
+- `sessionId`
+- `preset`
+- `reviewer`
+
+Rules:
+
+- The selected preset updates the live session permission profile used by subsequent tool executions.
+- Updating the preset clears turn-scoped and session-scoped approval caches so grants from a previous mode cannot silently widen the new mode.
+- `auto-review` uses the same base execution policy as `default`, but approval requests that still require escalation are first routed through the automatic reviewer.
+- The automatic reviewer may approve or deny clear cases. Invalid, failed, or uncertain reviewer output must fall back to `approval/respond`.
+- The current implementation updates runtime session state; durable cross-process persistence of the selected preset is a later persistence concern.
+
 ### `approval/respond`
 
 Request fields:
@@ -316,6 +344,7 @@ Scope values:
 - `path_prefix`
 - `host`
 - `tool`
+- `command_prefix`
 
 ## Optional Event Subscription Method
 

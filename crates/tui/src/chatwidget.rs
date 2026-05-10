@@ -44,6 +44,8 @@ use devo_protocol::TurnId;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::ApprovalOverlay;
+use crate::bottom_pane::ApprovalOverlayRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::InputResult;
@@ -82,6 +84,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) initial_session: TuiSessionState,
     pub(crate) initial_thinking_selection: Option<String>,
+    pub(crate) initial_permission_preset: devo_protocol::PermissionPreset,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
@@ -214,6 +217,69 @@ struct PendingModelSelection {
     thinking_selection: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingApprovalRequest {
+    session_id: devo_protocol::SessionId,
+    turn_id: TurnId,
+    approval_id: String,
+    action_summary: String,
+}
+
+fn permission_preset_items(current: devo_protocol::PermissionPreset) -> Vec<SelectionItem> {
+    [
+        (
+            devo_protocol::PermissionPreset::ReadOnly,
+            "Read Only",
+            "Devo can read files in the current workspace. Approval is required to edit files, run commands, or access the internet.",
+        ),
+        (
+            devo_protocol::PermissionPreset::Default,
+            "Default",
+            "Devo can read and edit files in the current workspace, and run commands. Approval is required to access the internet or edit other files.",
+        ),
+        (
+            devo_protocol::PermissionPreset::AutoReview,
+            "Auto-review",
+            "Same workspace-write permissions as Default, but eligible approvals are routed through the auto-reviewer before interrupting you.",
+        ),
+        (
+            devo_protocol::PermissionPreset::FullAccess,
+            "Full Access",
+            "Devo can edit files outside this workspace and access the internet without asking for approval. Exercise caution when using.",
+        ),
+    ]
+    .into_iter()
+    .map(|(preset, label, description)| {
+        let name = if preset == current {
+            format!("{label} (current)")
+        } else {
+            label.to_string()
+        };
+        SelectionItem {
+            name,
+            description: Some(description.to_string()),
+            is_current: preset == current,
+            dismiss_on_select: true,
+            actions: vec![Box::new(move |app_event_tx| {
+                app_event_tx.send(AppEvent::Command(AppCommand::UpdatePermissions {
+                    preset,
+                }));
+            })],
+            ..Default::default()
+        }
+    })
+    .collect()
+}
+
+fn permission_preset_label(preset: devo_protocol::PermissionPreset) -> &'static str {
+    match preset {
+        devo_protocol::PermissionPreset::ReadOnly => "Read Only",
+        devo_protocol::PermissionPreset::Default => "Default",
+        devo_protocol::PermissionPreset::AutoReview => "Auto-review",
+        devo_protocol::PermissionPreset::FullAccess => "Full Access",
+    }
+}
+
 pub(crate) struct ChatWidget {
     // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
@@ -259,6 +325,8 @@ pub(crate) struct ChatWidget {
     last_query_total_tokens: usize,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
+    pending_approval: Option<PendingApprovalRequest>,
+    permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
@@ -280,6 +348,7 @@ impl ChatWidget {
             SlashCommand::Compact => "session",
             SlashCommand::New => "session",
             SlashCommand::Resume => "session",
+            SlashCommand::Permissions => "permissions",
             SlashCommand::Diff => "diff",
             SlashCommand::Exit | SlashCommand::Status | SlashCommand::Clear | SlashCommand::Btw => {
                 return;
@@ -623,6 +692,7 @@ impl ChatWidget {
             app_event_tx,
             initial_session,
             initial_thinking_selection,
+            initial_permission_preset,
             initial_user_message,
             enhanced_keys_supported,
             is_first_run,
@@ -720,6 +790,8 @@ impl ChatWidget {
             last_query_total_tokens: 0,
             queued_count: 0,
             active_turn_id: None,
+            pending_approval: None,
+            permission_preset: initial_permission_preset,
             busy: false,
             selection_mode: false,
             selected_user_cell_index: None,
@@ -770,7 +842,7 @@ impl ChatWidget {
                             self.session.model.as_ref().map(|m| m.slug.clone()),
                             self.thinking_selection.clone(),
                             /*sandbox*/ None,
-                            /*approval_policy*/ None,
+                            Some("on-request".to_string()),
                         )));
                     self.set_status_message("Message queued");
                 } else {
@@ -1065,10 +1137,15 @@ impl ChatWidget {
                 }
                 self.set_status_message(format!("Command queued: {}", command.kind()));
             }
+            AppEvent::RunSlashCommand { command } => {
+                if let Ok(command) = command.parse::<SlashCommand>() {
+                    self.handle_slash_command(command, String::new());
+                }
+                self.frame_requester.schedule_frame();
+            }
             AppEvent::Exit(_)
             | AppEvent::OpenSlashCommandPopup
             | AppEvent::ClosePopup
-            | AppEvent::RunSlashCommand { .. }
             | AppEvent::OpenModelPicker
             | AppEvent::OpenThinkingPicker
             | AppEvent::OpenThemePicker
@@ -1232,7 +1309,59 @@ impl ChatWidget {
                     "Tool completed"
                 });
             }
-            // TODO: The token usage should include `total_input_cahed_tokens` or `total_read_cached_tokens`
+            WorkerEvent::ApprovalRequest {
+                session_id,
+                turn_id,
+                approval_id,
+                action_summary,
+                justification,
+                resource,
+                available_scopes,
+                path,
+                host,
+                target,
+            } => {
+                self.commit_active_streams(DotStatus::Completed);
+                self.pending_approval = Some(PendingApprovalRequest {
+                    session_id,
+                    turn_id,
+                    approval_id: approval_id.clone(),
+                    action_summary: action_summary.clone(),
+                });
+                self.bottom_pane
+                    .open_popup_view(Box::new(ApprovalOverlay::new(
+                        ApprovalOverlayRequest {
+                            session_id,
+                            turn_id,
+                            approval_id,
+                            action_summary,
+                            justification,
+                            resource,
+                            available_scopes,
+                            path,
+                            host,
+                            target,
+                        },
+                        self.app_event_tx.clone(),
+                        self.active_accent_color(),
+                    )));
+                self.busy = true;
+                self.bottom_pane.set_task_running(false);
+                self.set_status_message("Approval required");
+            }
+            WorkerEvent::ApprovalDecision {
+                approval_id: _,
+                decision,
+                scope,
+            } => {
+                self.pending_approval = None;
+                let symbol = if decision == "approve" { "✔" } else { "✗" };
+                self.add_to_history(history_cell::new_info_event(
+                    format!("{symbol} Permission request {decision} ({scope})"),
+                    None,
+                ));
+                self.bottom_pane.set_task_running(self.busy);
+            }
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,
@@ -1261,6 +1390,7 @@ impl ChatWidget {
                 self.commit_active_streams(DotStatus::Completed);
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
+                self.pending_approval = None;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1305,6 +1435,7 @@ impl ChatWidget {
                 self.commit_active_streams(DotStatus::Failed);
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
+                self.pending_approval = None;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1539,7 +1670,7 @@ impl ChatWidget {
                 self.session.model.as_ref().map(|model| model.slug.clone()),
                 self.thinking_selection.clone(),
                 /*sandbox*/ None,
-                /*approval_policy*/ None,
+                Some("on-request".to_string()),
             )));
         self.set_status_message("Submitted locally");
     }
@@ -1595,6 +1726,9 @@ impl ChatWidget {
                 ]);
                 self.add_to_history(PlainHistoryCell::new(lines));
                 self.set_status_message("Session status shown");
+            }
+            SlashCommand::Permissions => {
+                self.open_permissions_picker();
             }
             SlashCommand::Theme => {
                 self.open_theme_picker();
@@ -1919,6 +2053,7 @@ impl ChatWidget {
             TranscriptItemKind::Error => self.add_history_entry_without_redraw(Box::new(
                 history_cell::new_error_event_with_hint(item.body, Some(item.title)),
             )),
+            TranscriptItemKind::Approval => {}
             TranscriptItemKind::System => {
                 self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
                     item.title,
@@ -2560,6 +2695,32 @@ impl ChatWidget {
         self.bottom_pane
             .open_theme_picker(&self.theme_set.themes, self.active_theme_name.clone());
         self.set_status_message("Select a theme");
+    }
+
+    fn open_permissions_picker(&mut self) {
+        let current = self.permission_preset;
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    title: Some("Update Model Permissions".to_string()),
+                    footer_hint: Some(Line::from("Press enter to confirm or esc to go back")),
+                    items: permission_preset_items(current),
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.set_status_message("Select permissions");
+    }
+
+    pub(crate) fn note_permissions_updated(&mut self, preset: devo_protocol::PermissionPreset) {
+        self.permission_preset = preset;
+        let label = permission_preset_label(preset);
+        self.add_to_history(history_cell::new_info_event(
+            format!("Permissions updated to {label}"),
+            None,
+        ));
+        self.set_status_message(format!("Permissions updated to {label}"));
     }
 
     fn apply_theme_selection(&mut self, name: String) {

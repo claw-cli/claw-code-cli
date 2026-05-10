@@ -130,6 +130,9 @@ impl ServerRuntime {
                 deferred_reasoning: None,
                 next_item_seq: 1,
                 first_user_input: None,
+                pending_approvals: std::collections::HashMap::new(),
+                session_approval_cache: crate::execution::ApprovalGrantCache::default(),
+                turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
             }
             .shared(),
         );
@@ -262,6 +265,53 @@ impl ServerRuntime {
             },
         })
         .expect("serialize session/metadata/update response")
+    }
+
+    pub(crate) async fn handle_session_permissions_update(
+        &self,
+        request_id: serde_json::Value,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let params: SessionPermissionsUpdateParams = match serde_json::from_value(params) {
+            Ok(params) => params,
+            Err(error) => {
+                return self.error_response(
+                    request_id,
+                    ProtocolErrorCode::InvalidParams,
+                    format!("invalid session/permissions/update params: {error}"),
+                );
+            }
+        };
+        let Some(session_arc) = self.sessions.lock().await.get(&params.session_id).cloned() else {
+            return self.error_response(
+                request_id,
+                ProtocolErrorCode::SessionNotFound,
+                "session does not exist",
+            );
+        };
+
+        let profile = {
+            let mut session = session_arc.lock().await;
+            let profile = safety_profile_from_protocol(params.preset, session.summary.cwd.clone());
+            {
+                let mut core_session = session.core_session.lock().await;
+                core_session.config.permission_mode = profile.permission_mode();
+                core_session.config.permission_profile = profile.clone();
+            }
+            session.session_approval_cache = crate::execution::ApprovalGrantCache::default();
+            session.turn_approval_cache = crate::execution::ApprovalGrantCache::default();
+            profile
+        };
+
+        serde_json::to_value(SuccessResponse {
+            id: request_id,
+            result: SessionPermissionsUpdateResult {
+                session_id: params.session_id,
+                preset: params.preset,
+                reviewer: protocol_reviewer_from_safety(profile.reviewer),
+            },
+        })
+        .expect("serialize session/permissions/update response")
     }
 
     pub(crate) async fn handle_session_title_update(
@@ -722,6 +772,9 @@ impl ServerRuntime {
             next_item_seq: u64::try_from(source.persisted_turn_items.len().saturating_add(1))
                 .unwrap_or(u64::MAX),
             first_user_input: source.first_user_input.clone(),
+            pending_approvals: std::collections::HashMap::new(),
+            session_approval_cache: crate::execution::ApprovalGrantCache::default(),
+            turn_approval_cache: crate::execution::ApprovalGrantCache::default(),
         })
     }
 }

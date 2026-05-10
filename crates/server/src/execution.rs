@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -5,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 
 use devo_core::AgentsMdConfig;
 use devo_core::Model;
@@ -21,6 +24,7 @@ use devo_core::TurnConfig;
 use devo_core::TurnId;
 use devo_core::default_base_instructions;
 use devo_core::normalize_canonical_path;
+use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::PendingInputItem;
 use devo_provider::ModelProviderSDK;
 use devo_tools::ToolRegistry;
@@ -37,6 +41,23 @@ pub(crate) struct PersistedTurnItem {
     pub(crate) turn_id: TurnId,
     pub(crate) item_id: devo_core::ItemId,
     pub(crate) turn_item: devo_core::TurnItem,
+}
+
+pub(crate) struct PendingApproval {
+    pub(crate) turn_id: TurnId,
+    pub(crate) tool_name: String,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) host: Option<String>,
+    pub(crate) command_prefix: Option<Vec<String>>,
+    pub(crate) tx: oneshot::Sender<ApprovalDecisionValue>,
+}
+
+#[derive(Default)]
+pub(crate) struct ApprovalGrantCache {
+    pub(crate) tools: HashSet<String>,
+    pub(crate) hosts: HashSet<String>,
+    pub(crate) path_prefixes: HashSet<PathBuf>,
+    pub(crate) command_prefixes: HashSet<Vec<String>>,
 }
 
 /// Shared server-owned runtime dependencies used by live turn execution.
@@ -93,8 +114,14 @@ impl ServerRuntimeDependencies {
 
     /// Creates an initial core session state for a newly created server session.
     pub(crate) fn new_session_state(&self, session_id: SessionId, cwd: PathBuf) -> SessionState {
+        let permission_profile = devo_safety::RuntimePermissionProfile::from_preset(
+            devo_safety::PermissionPreset::Default,
+            cwd.clone(),
+        );
         let mut state = SessionState::new(
             SessionConfig {
+                permission_mode: permission_profile.permission_mode(),
+                permission_profile,
                 agents_md: self.agents_md.clone(),
                 ..SessionConfig::default()
             },
@@ -253,6 +280,12 @@ pub(crate) struct RuntimeSession {
     pub(crate) next_item_seq: u64,
     /// First user input captured from the session's first turn, used for title generation.
     pub(crate) first_user_input: Option<String>,
+    /// Active approval requests waiting for client decisions.
+    pub(crate) pending_approvals: HashMap<String, PendingApproval>,
+    /// Session-scoped approvals granted through approval/respond.
+    pub(crate) session_approval_cache: ApprovalGrantCache,
+    /// Turn-scoped approvals granted through approval/respond.
+    pub(crate) turn_approval_cache: ApprovalGrantCache,
 }
 
 impl RuntimeSession {

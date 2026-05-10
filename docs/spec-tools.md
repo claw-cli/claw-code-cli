@@ -256,6 +256,8 @@ Rules:
 - `timeout_ms` must be clamped to an app-configured maximum
 - environment overrides are additive and must be filtered by the safety layer
 - escalation request fields are metadata for approval and execution policy, not free authorization
+- command-prefix approvals are only offered for simple commands that can be parsed into a stable executable/subcommand prefix
+- commands containing shell control operators, redirection, command substitution, environment-variable substitution, wildcard patterns, or other ambiguous shell features must not be cached by command prefix; they may still be approved for a narrower once/turn/session/tool scope
 
 ### Execution Contract
 

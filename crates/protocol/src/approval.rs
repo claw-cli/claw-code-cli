@@ -32,6 +32,7 @@ pub enum ApprovalScopeValue {
     PathPrefix,
     Host,
     Tool,
+    CommandPrefix,
 }
 
 /// Describes the payload for `events/subscribe`.

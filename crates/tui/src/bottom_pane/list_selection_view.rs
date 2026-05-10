@@ -373,14 +373,6 @@ impl ListSelectionView {
                     let is_selected = self.state.selected_idx == Some(visible_idx);
                     let prefix = if is_selected { '›' } else { ' ' };
                     let name = item.name.as_str();
-                    let marker = if item.is_current {
-                        " (current)"
-                    } else if item.is_default {
-                        " (default)"
-                    } else {
-                        ""
-                    };
-                    let name_with_marker = format!("{name}{marker}");
                     let is_disabled = item.is_disabled || item.disabled_reason.is_some();
                     let n = visible_idx + 1;
                     let wrap_prefix = if self.is_searchable {
@@ -402,7 +394,7 @@ impl ListSelectionView {
                         .or_else(|| item.description.clone());
                     let wrap_indent = description.is_none().then_some(wrap_prefix_width);
                     GenericDisplayRow {
-                        name: name_with_marker,
+                        name: name.to_string(),
                         name_prefix_spans,
                         display_shortcut: item.display_shortcut,
                         match_indices: None,

@@ -90,6 +90,23 @@ pub(crate) enum WorkerEvent {
         /// Whether the preview was truncated for display.
         truncated: bool,
     },
+    ApprovalRequest {
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        action_summary: String,
+        justification: String,
+        resource: Option<String>,
+        available_scopes: Vec<String>,
+        path: Option<String>,
+        host: Option<String>,
+        target: Option<String>,
+    },
+    ApprovalDecision {
+        approval_id: String,
+        decision: String,
+        scope: String,
+    },
     /// Live usage update for the active turn.
     UsageUpdated {
         /// Total input tokens accumulated in the session.
@@ -328,6 +345,7 @@ pub(crate) enum TranscriptItemKind {
     ToolResult,
     /// Failed tool result or runtime error.
     Error,
+    Approval,
     /// Local UI/system note that is not model-authored content.
     System,
     /// Turn summary with model name and duration.

@@ -4,10 +4,15 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use devo_protocol::ApprovalDecisionValue;
+use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
 use devo_protocol::Model;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ReasoningEffort;
+use devo_protocol::SessionId;
 use devo_protocol::ThinkingCapability;
+use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
 use tokio::sync::mpsc;
 
@@ -40,6 +45,7 @@ fn widget_with_model_and_thinking(
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_thinking_selection,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -62,6 +68,7 @@ fn onboarding_widget_with_model(
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -136,6 +143,191 @@ fn resume_command_opens_loading_browser_immediately() {
         rows.iter()
             .any(|row| row.contains("Loading saved sessions"))
     );
+}
+
+#[test]
+fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ApprovalRequest {
+        session_id,
+        turn_id,
+        approval_id: "approval-call-1".to_string(),
+        action_summary: "write src/main.rs".to_string(),
+        justification: "Tool execution requires approval.".to_string(),
+        resource: Some("FileWrite".to_string()),
+        available_scopes: vec!["once".to_string(), "session".to_string()],
+        path: Some("src/main.rs".to_string()),
+        host: None,
+        target: None,
+    });
+
+    let scrollback = widget.drain_scrollback_lines(80);
+    assert!(!scrollback_contains_text(
+        &scrollback,
+        "Permission required"
+    ));
+
+    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(rendered.contains("Permission approval required"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Approve for session"));
+    assert!(rendered.contains("Deny"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("approval response event");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::ApprovalRespond {
+            session_id,
+            turn_id,
+            approval_id: "approval-call-1".to_string(),
+            decision: ApprovalDecisionValue::Approve,
+            scope: ApprovalScopeValue::Once,
+        })
+    );
+}
+
+#[test]
+fn approval_request_bottom_pane_menu_denies_with_n_shortcut() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ApprovalRequest {
+        session_id,
+        turn_id,
+        approval_id: "approval-call-2".to_string(),
+        action_summary: "run shell command".to_string(),
+        justification: "Tool execution requires approval.".to_string(),
+        resource: Some("ShellExec".to_string()),
+        available_scopes: vec!["once".to_string()],
+        path: None,
+        host: None,
+        target: Some("cargo test".to_string()),
+    });
+
+    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(rendered.contains("Permission approval required"));
+    assert!(rendered.contains("run shell command"));
+    assert!(rendered.contains("Deny"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("approval response event");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::ApprovalRespond {
+            session_id,
+            turn_id,
+            approval_id: "approval-call-2".to_string(),
+            decision: ApprovalDecisionValue::Deny,
+            scope: ApprovalScopeValue::Once,
+        })
+    );
+}
+
+#[test]
+fn submitted_prompt_requests_on_request_approval_policy() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("please edit a file".to_string());
+
+    let event = app_event_rx.try_recv().expect("user turn event");
+    let AppEvent::Command(AppCommand::UserTurn {
+        approval_policy, ..
+    }) = event
+    else {
+        panic!("expected user turn command");
+    };
+    assert_eq!(approval_policy, Some("on-request".to_string()));
+}
+
+#[test]
+fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "permissions".to_string(),
+    });
+
+    let rendered = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(rendered.contains("Update Model Permissions"));
+    assert!(rendered.contains("Read Only"));
+    assert!(rendered.contains("Default (current)"));
+    assert!(rendered.contains("Auto-review"));
+    assert!(rendered.contains("Full Access"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("permissions update event");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::UpdatePermissions {
+            preset: devo_protocol::PermissionPreset::ReadOnly,
+        })
+    );
+}
+
+#[test]
+fn permissions_command_marks_initial_project_preset_current() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_thinking_selection: None,
+        initial_permission_preset: PermissionPreset::FullAccess,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_model_slugs: Vec::new(),
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    });
+
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "permissions".to_string(),
+    });
+
+    let rendered = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(rendered.contains("Full Access (current)"));
 }
 
 #[test]
@@ -1084,6 +1276,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1342,6 +1535,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1410,6 +1604,7 @@ fn model_selection_with_thinking_support_waits_for_second_step() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1463,6 +1658,7 @@ fn model_selection_without_thinking_support_finishes_immediately() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(base_model)),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,

@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use devo_core::provider_id_for_endpoint;
 use devo_core::provider_name_for_endpoint;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ProviderWireApi;
 use devo_utils::find_devo_home;
 use toml::Value;
@@ -121,6 +122,34 @@ pub(crate) fn save_theme_selection(name: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn save_project_permission_preset(
+    project_key: &str,
+    preset: PermissionPreset,
+) -> Result<()> {
+    let path = find_devo_home()
+        .context("could not determine user config path")?
+        .join("config.toml");
+    let mut root = if path.exists() {
+        let data = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        data.parse::<Value>()
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        Value::Table(Default::default())
+    };
+    root = merge_project_permission_preset(root, project_key, preset)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let rendered = toml::to_string_pretty(&root)?;
+
+    std::fs::write(&path, rendered)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
 pub(crate) fn load_theme_selection() -> Option<String> {
     let path = find_devo_home().ok()?.join("config.toml");
     let data = std::fs::read_to_string(&path).ok()?;
@@ -130,12 +159,48 @@ pub(crate) fn load_theme_selection() -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn merge_project_permission_preset(
+    mut root: Value,
+    project_key: &str,
+    preset: PermissionPreset,
+) -> Result<Value> {
+    let table = root
+        .as_table_mut()
+        .context("config root must be a TOML table")?;
+    let projects = table
+        .entry("projects".to_string())
+        .or_insert_with(|| Value::Table(Default::default()));
+    let projects_table = projects
+        .as_table_mut()
+        .context("projects must be a TOML table")?;
+    let project = projects_table
+        .entry(project_key.to_string())
+        .or_insert_with(|| Value::Table(Default::default()));
+    let project_table = project
+        .as_table_mut()
+        .context("project permission entry must be a TOML table")?;
+    project_table.insert(
+        "permission_preset".to_string(),
+        Value::String(permission_preset_to_config_value(preset).to_string()),
+    );
+    Ok(root)
+}
+
 fn merge_theme_selection(mut root: Value, name: &str) -> Result<Value> {
     let table = root
         .as_table_mut()
         .context("config root must be a TOML table")?;
     table.insert("theme".to_string(), Value::String(name.to_string()));
     Ok(root)
+}
+
+fn permission_preset_to_config_value(preset: PermissionPreset) -> &'static str {
+    match preset {
+        PermissionPreset::ReadOnly => "read-only",
+        PermissionPreset::Default => "default",
+        PermissionPreset::AutoReview => "auto-review",
+        PermissionPreset::FullAccess => "full-access",
+    }
 }
 
 #[allow(dead_code)]
@@ -616,6 +681,64 @@ model = "gpt-5.4"
                 .as_table()
                 .and_then(|table| table.get("model_thinking_selection")),
             None
+        );
+    }
+
+    #[test]
+    fn merge_project_permission_preset_preserves_unrelated_config() {
+        let root: Value = r#"
+model = "gpt-5.4"
+
+[projects.old]
+permission_preset = "default"
+custom = "keep"
+"#
+        .parse()
+        .expect("parse");
+
+        let merged =
+            merge_project_permission_preset(root, "C:\\repo", PermissionPreset::FullAccess)
+                .expect("merge");
+
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("model"))
+                .and_then(Value::as_str),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("projects"))
+                .and_then(Value::as_table)
+                .and_then(|projects| projects.get("old"))
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("permission_preset"))
+                .and_then(Value::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("projects"))
+                .and_then(Value::as_table)
+                .and_then(|projects| projects.get("old"))
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("custom"))
+                .and_then(Value::as_str),
+            Some("keep")
+        );
+        assert_eq!(
+            merged
+                .as_table()
+                .and_then(|table| table.get("projects"))
+                .and_then(Value::as_table)
+                .and_then(|projects| projects.get("C:\\repo"))
+                .and_then(Value::as_table)
+                .and_then(|project| project.get("permission_preset"))
+                .and_then(Value::as_str),
+            Some("full-access")
         );
     }
 }

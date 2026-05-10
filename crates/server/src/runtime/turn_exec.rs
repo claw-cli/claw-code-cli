@@ -16,6 +16,10 @@ impl ServerRuntime {
         display_input: String,
         input: String,
     ) {
+        if let Some(session_arc) = self.sessions.lock().await.get(&session_id).cloned() {
+            session_arc.lock().await.turn_approval_cache =
+                crate::execution::ApprovalGrantCache::default();
+        }
         // Record the user's message immediately so the UI can show it even if
         // the model call or event stream takes a moment to start.
         self.emit_turn_item(
@@ -450,7 +454,20 @@ impl ServerRuntime {
                 let _ = event_callback_tx.send(event);
             });
             let registry = Arc::clone(&self.deps.registry);
-            let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+            let permission_profile = core_session.config.permission_profile.clone();
+            let runtime = ToolRuntime::new_with_context(
+                Arc::clone(&registry),
+                self.build_permission_checker(
+                    session_id,
+                    turn_for_events.turn_id,
+                    permission_profile,
+                ),
+                ToolRuntimeContext {
+                    session_id: session_id.to_string(),
+                    turn_id: Some(turn_for_events.turn_id.to_string()),
+                    cwd: core_session.cwd.clone(),
+                },
+            );
             let result = query(
                 &mut core_session,
                 &turn_config,
