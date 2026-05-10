@@ -38,6 +38,17 @@ pub struct ToolResultPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandExecutionPayload {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemEventPayload {
     pub context: EventContext,
     pub item: ItemEnvelope,

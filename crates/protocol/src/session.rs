@@ -84,6 +84,7 @@ pub enum SessionHistoryItemKind {
     Reasoning,
     ToolCall,
     ToolResult,
+    CommandExecution,
     Error,
     TurnSummary,
 }

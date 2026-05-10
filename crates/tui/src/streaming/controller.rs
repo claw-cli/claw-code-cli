@@ -1,8 +1,9 @@
 use crate::history_cell::HistoryCell;
 use crate::history_cell::{self};
+use ratatui::style::Color;
 use ratatui::style::Style;
-use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::text::Span;
 use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
@@ -125,7 +126,10 @@ impl StreamController {
         let initial_prefix = if self.header_emitted {
             "  ".into()
         } else {
-            Line::from("• ".cyan())
+            Line::from(vec![
+                Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+                " ".into(),
+            ])
         };
         let is_stream_continuation = self.header_emitted;
         self.header_emitted = true;

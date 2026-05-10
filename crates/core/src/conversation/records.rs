@@ -134,7 +134,17 @@ pub struct ToolProgressItem {
     pub message: String,
 }
 
-/// Stores one terminal tool result as a persisted item payload.
+/// Stores one tool result as a persisted item payload.
+///
+/// This is the generic result type used for all tools *except* `exec_command` and
+/// `write_stdin`.  Those two tools use [`CommandExecutionItem`] instead, because
+/// they carry extra data (the display command, the original model input for
+/// prompt replay) that does not apply to other tools.
+///
+/// The two types exist side by side — rather than a single type with optional
+/// command fields — so that downstream code can match on the [`TurnItem`] enum
+/// and immediately know whether it is dealing with a terminal command or a
+/// generic tool result, without inspecting optional fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResultItem {
     /// The tool call this result belongs to.
@@ -142,6 +152,40 @@ pub struct ToolResultItem {
     /// The runtime tool name when it is available at result time.
     pub tool_name: Option<String>,
     /// The normalized structured output returned by the tool.
+    pub output: serde_json::Value,
+    /// Whether the result represents an error outcome.
+    pub is_error: bool,
+}
+
+/// Stores one unified command execution as a persisted item payload.
+///
+/// This is a specialised result type for `exec_command` and `write_stdin`.
+/// It exists as a separate [`TurnItem`] variant (rather than reusing
+/// [`ToolResultItem`]) for two reasons:
+///
+/// 1. **Display** — the `command` field holds the human-readable shell command
+///    (e.g. `"nc 127.0.0.1 4444"`) so the UI can render it as a terminal
+///    interaction instead of a generic tool result.
+///
+/// 2. **Prompt replay** — the `input` field preserves the exact model-supplied
+///    JSON input that triggered the command.  During compaction and context
+///    reconstruction the runtime needs this to rebuild a faithful prompt,
+///    and it is not stored on [`ToolCallItem`] in a form that survives
+///    compaction cleanly.
+///
+/// Every other tool uses [`ToolResultItem`] instead.  See the doc comment on
+/// that struct for the trade-off rationale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandExecutionItem {
+    /// The tool call this command execution belongs to.
+    pub tool_call_id: String,
+    /// The runtime tool name, usually `exec_command` or `write_stdin`.
+    pub tool_name: String,
+    /// The display command or terminal interaction text.
+    pub command: String,
+    /// Original model input for prompt replay.
+    pub input: serde_json::Value,
+    /// Normalized tool output returned by the command.
     pub output: serde_json::Value,
     /// Whether the result represents an error outcome.
     pub is_error: bool,
@@ -203,8 +247,12 @@ pub enum TurnItem {
     ToolCall(ToolCallItem),
     /// A tool-progress item.
     ToolProgress(ToolProgressItem),
-    /// A terminal tool-result item.
+    /// A terminal tool-result item (every tool *except* exec_command / write_stdin).
     ToolResult(ToolResultItem),
+    /// A unified command execution item (only exec_command and write_stdin).
+    /// Carries extra fields for display (the human-readable command) and prompt
+    /// replay (the original model input).  See [`CommandExecutionItem`].
+    CommandExecution(CommandExecutionItem),
     /// An approval-request item.
     ApprovalRequest(ApprovalRequestItem),
     /// An approval-decision item.

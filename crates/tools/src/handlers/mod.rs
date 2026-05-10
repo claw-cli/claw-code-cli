@@ -51,6 +51,7 @@ pub fn build_registry_from_plan(config: &ToolPlanConfig) -> crate::registry::Too
     }
 
     let process_store = Arc::new(ProcessStore::new());
+    builder.set_unified_exec_store(Arc::clone(&process_store));
 
     for (kind, name) in plan.handlers {
         let handler: Arc<dyn ToolHandler> = match kind {

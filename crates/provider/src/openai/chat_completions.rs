@@ -1192,6 +1192,7 @@ mod tests {
                     "properties": { "city": { "type": "string" } },
                     "required": ["city"]
                 }),
+                output_schema: None,
             }]),
             sampling: SamplingControls {
                 temperature: Some(0.2),

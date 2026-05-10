@@ -1,7 +1,9 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
 
+use rand::Rng;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -10,38 +12,51 @@ use super::{MAX_PROCESSES, WARNING_PROCESSES};
 
 struct ProcessEntry {
     process: Arc<UnifiedExecProcess>,
-    created_at: std::time::Instant,
+    last_used: std::time::Instant,
 }
+
+#[derive(Clone, Copy)]
+struct ProcessPruneMeta {
+    process_id: i32,
+    last_used: std::time::Instant,
+    exited: bool,
+}
+
+const PROTECTED_RECENT_PROCESSES: usize = 8;
 
 pub struct ProcessStore {
     processes: RwLock<HashMap<i32, ProcessEntry>>,
-    next_id: AtomicI32,
+    reserved_process_ids: RwLock<HashSet<i32>>,
 }
 
 impl ProcessStore {
     pub fn new() -> Self {
         ProcessStore {
             processes: RwLock::new(HashMap::new()),
-            next_id: AtomicI32::new(1000),
+            reserved_process_ids: RwLock::new(HashSet::new()),
         }
     }
 
     pub async fn allocate(&self, process: Arc<UnifiedExecProcess>) -> i32 {
+        let Some(id) = self.reserve_process_id().await else {
+            process.terminate();
+            return 0;
+        };
+        self.insert_reserved(id, process).await;
+        id
+    }
+
+    pub async fn reserve_process_id(&self) -> Option<i32> {
+        let mut reserved = self.reserved_process_ids.write().await;
         let mut map = self.processes.write().await;
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         if map.len() >= MAX_PROCESSES {
-            self.prune_locked(&mut map);
+            self.prune_process_if_needed(&mut map);
         }
 
         if map.len() >= MAX_PROCESSES {
-            warn!("max unified exec processes ({MAX_PROCESSES}) reached, removing oldest");
-            if let Some(oldest) = map.iter().min_by_key(|(_, e)| e.created_at) {
-                let oldest_id = *oldest.0;
-                if let Some(entry) = map.remove(&oldest_id) {
-                    entry.process.terminate();
-                }
-            }
+            warn!("max unified exec processes ({MAX_PROCESSES}) reached; cannot allocate process");
+            return None;
         }
 
         if map.len() >= WARNING_PROCESSES {
@@ -52,25 +67,59 @@ impl ProcessStore {
             );
         }
 
+        let id = loop {
+            let candidate = rand::rng().random_range(1_000..100_000);
+            if !map.contains_key(&candidate) && !reserved.contains(&candidate) {
+                break candidate;
+            }
+        };
+        reserved.insert(id);
+        Some(id)
+    }
+
+    pub async fn insert_reserved(&self, id: i32, process: Arc<UnifiedExecProcess>) {
+        self.reserved_process_ids.write().await.remove(&id);
+        let mut map = self.processes.write().await;
         map.insert(
             id,
             ProcessEntry {
                 process,
-                created_at: std::time::Instant::now(),
+                last_used: std::time::Instant::now(),
             },
         );
-        id
+    }
+
+    pub async fn release_reserved(&self, id: i32) {
+        self.reserved_process_ids.write().await.remove(&id);
     }
 
     pub async fn get(&self, id: i32) -> Option<Arc<UnifiedExecProcess>> {
-        let map = self.processes.read().await;
-        map.get(&id).map(|entry| Arc::clone(&entry.process))
+        let mut map = self.processes.write().await;
+        map.get_mut(&id).map(|entry| {
+            entry.last_used = std::time::Instant::now();
+            Arc::clone(&entry.process)
+        })
     }
 
     pub async fn remove(&self, id: i32) {
+        self.reserved_process_ids.write().await.remove(&id);
         let mut map = self.processes.write().await;
         if let Some(entry) = map.remove(&id) {
             entry.process.terminate();
+        }
+    }
+
+    pub async fn terminate_all(&self) {
+        self.reserved_process_ids.write().await.clear();
+        let processes = {
+            let mut map = self.processes.write().await;
+            map.drain()
+                .map(|(_id, entry)| entry.process)
+                .collect::<Vec<_>>()
+        };
+
+        for process in processes {
+            process.terminate();
         }
     }
 
@@ -99,6 +148,53 @@ impl ProcessStore {
             }
         }
     }
+
+    fn prune_process_if_needed(&self, map: &mut HashMap<i32, ProcessEntry>) {
+        if map.len() < MAX_PROCESSES {
+            return;
+        }
+        let meta = map
+            .iter()
+            .map(|(process_id, entry)| ProcessPruneMeta {
+                process_id: *process_id,
+                last_used: entry.last_used,
+                exited: !entry.process.is_running(),
+            })
+            .collect::<Vec<_>>();
+        if let Some(process_id) = process_id_to_prune_from_meta(&meta)
+            && let Some(entry) = map.remove(&process_id)
+        {
+            entry.process.terminate();
+        }
+    }
+}
+
+fn process_id_to_prune_from_meta(meta: &[ProcessPruneMeta]) -> Option<i32> {
+    if meta.is_empty() {
+        return None;
+    }
+
+    let mut by_recency = meta.to_vec();
+    by_recency.sort_by_key(|entry| Reverse(entry.last_used));
+    let protected = by_recency
+        .iter()
+        .take(PROTECTED_RECENT_PROCESSES)
+        .map(|entry| entry.process_id)
+        .collect::<HashSet<_>>();
+
+    let mut lru = meta.to_vec();
+    lru.sort_by_key(|entry| entry.last_used);
+
+    if let Some(entry) = lru
+        .iter()
+        .find(|entry| !protected.contains(&entry.process_id) && entry.exited)
+    {
+        return Some(entry.process_id);
+    }
+
+    lru.into_iter()
+        .find(|entry| !protected.contains(&entry.process_id))
+        .map(|entry| entry.process_id)
 }
 
 impl Default for ProcessStore {
@@ -111,11 +207,20 @@ impl Default for ProcessStore {
 mod tests {
     use super::*;
     use crate::unified_exec::process::UnifiedExecProcess;
+    use pretty_assertions::assert_eq;
     use std::path::Path;
+    use std::time::Duration;
 
     fn spawn_echo() -> UnifiedExecProcess {
-        let (proc, _rx) = UnifiedExecProcess::spawn(1, "echo test", Path::new("."), None, false)
-            .expect("spawn should succeed");
+        let (proc, _rx) = UnifiedExecProcess::spawn(
+            1,
+            "echo test",
+            Path::new("."),
+            /*shell*/ None,
+            /*login*/ false,
+            /*tty*/ false,
+        )
+        .expect("spawn should succeed");
         proc
     }
 
@@ -129,12 +234,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn store_reserved_insert_preserves_process_id() {
+        let store = ProcessStore::new();
+        let id = store.reserve_process_id().await.expect("reserve id");
+        let (proc, _rx) = UnifiedExecProcess::spawn(
+            id,
+            "echo test",
+            Path::new("."),
+            /*shell*/ None,
+            /*login*/ false,
+            /*tty*/ false,
+        )
+        .expect("spawn should succeed");
+
+        store.insert_reserved(id, Arc::new(proc)).await;
+        let proc = store.get(id).await.expect("stored process");
+
+        assert_eq!(proc.process_id(), id);
+    }
+
+    #[tokio::test]
     async fn store_remove_terminates() {
         let store = ProcessStore::new();
         let proc = spawn_echo();
         let id = store.allocate(Arc::new(proc)).await;
         store.remove(id).await;
         assert!(store.get(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn store_terminate_all_drains_processes_and_reservations() {
+        let store = ProcessStore::new();
+        let reserved_id = store.reserve_process_id().await.expect("reserve id");
+        let proc = Arc::new(spawn_echo());
+        let id = store.allocate(Arc::clone(&proc)).await;
+
+        store.terminate_all().await;
+
+        assert_eq!(store.len().await, 0);
+        assert!(store.get(id).await.is_none());
+        assert!(!proc.is_running());
+        assert!(store.reserve_process_id().await.is_some());
+        store.release_reserved(reserved_id).await;
     }
 
     #[tokio::test]
@@ -202,5 +343,33 @@ mod tests {
         // Process may have exited, but at minimum len should not increase
         assert_eq!(count_before, count_after);
         assert!(count_before >= 1);
+    }
+
+    #[test]
+    fn process_prune_prefers_exited_lru_outside_protected_recent_set() {
+        let now = std::time::Instant::now();
+        let meta = (0..MAX_PROCESSES)
+            .map(|index| ProcessPruneMeta {
+                process_id: index as i32,
+                last_used: now + Duration::from_millis(index as u64),
+                exited: index == 10 || index == 20,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(process_id_to_prune_from_meta(&meta), Some(10));
+    }
+
+    #[test]
+    fn process_prune_protects_recent_exited_processes() {
+        let now = std::time::Instant::now();
+        let meta = (0..MAX_PROCESSES)
+            .map(|index| ProcessPruneMeta {
+                process_id: index as i32,
+                last_used: now + Duration::from_millis(index as u64),
+                exited: index == MAX_PROCESSES - 1,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(process_id_to_prune_from_meta(&meta), Some(0));
     }
 }

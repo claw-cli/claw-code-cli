@@ -82,6 +82,8 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// A content block within a message sent to the model.
@@ -802,6 +804,7 @@ mod tests {
             name: "bash".into(),
             description: "run commands".into(),
             input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+            output_schema: None,
         };
         let json = serde_json::to_string(&def).unwrap();
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();

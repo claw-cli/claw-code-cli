@@ -116,11 +116,12 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
     tracing::info!(db_path = %db_path.display(), "opening database");
     let db = Arc::new(Database::open(db_path)?);
 
+    let registry = Arc::new(registry);
     let runtime = ServerRuntime::new(
         resolver.user_config_dir(),
         ServerRuntimeDependencies::new(
             provider.provider,
-            Arc::new(registry),
+            Arc::clone(&registry),
             provider.default_model,
             model_catalog,
             skill_workspace_root,
@@ -143,6 +144,8 @@ pub async fn run_server_process(args: ServerProcessArgs) -> Result<()> {
             tracing::info!("server shutdown requested");
         }
     }
+    tracing::info!("terminating unified exec processes");
+    registry.terminate_unified_exec_processes().await;
     tracing::info!("completing deferred items for active turns");
     runtime.shutdown().await;
     Ok(())

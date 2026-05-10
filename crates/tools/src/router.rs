@@ -228,6 +228,7 @@ impl ToolRuntime {
             host,
             target,
             command_prefix,
+            requests_escalation: requests_explicit_escalation(&call.input),
         })
     }
 }
@@ -278,6 +279,7 @@ pub struct ToolPermissionRequest {
     pub host: Option<String>,
     pub target: Option<String>,
     pub command_prefix: Option<Vec<String>>,
+    pub requests_escalation: bool,
 }
 
 fn resource_kind_for_tool(tool_name: &str, tags: &[ToolCapabilityTag]) -> ResourceKind {
@@ -377,6 +379,12 @@ fn command_prefix_for_tool_input(
     tool_name: &str,
     input: &serde_json::Value,
 ) -> Option<Vec<String>> {
+    if tool_name == "exec_command"
+        && let Some(prefix_rule) = input.get("prefix_rule").and_then(prefix_rule_from_value)
+    {
+        return Some(prefix_rule);
+    }
+
     let command = match tool_name {
         "bash" | "shell_command" => input
             .get("command")
@@ -389,6 +397,24 @@ fn command_prefix_for_tool_input(
         _ => None,
     }?;
     command_prefix(command)
+}
+
+fn prefix_rule_from_value(value: &serde_json::Value) -> Option<Vec<String>> {
+    let prefix = value
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>()?;
+    (!prefix.is_empty()).then(|| prefix.into_iter().map(str::to_string).collect())
+}
+
+fn requests_explicit_escalation(input: &serde_json::Value) -> bool {
+    matches!(
+        input
+            .get("sandbox_permissions")
+            .and_then(serde_json::Value::as_str),
+        Some("require_escalated" | "with_additional_permissions")
+    ) || input.get("additional_permissions").is_some()
 }
 
 fn command_prefix(command: &str) -> Option<Vec<String>> {
@@ -728,6 +754,33 @@ mod tests {
         assert_eq!(command_prefix("cargo fmt && cargo test"), None);
     }
 
+    #[test]
+    fn exec_command_prefix_rule_overrides_derived_prefix() {
+        assert_eq!(
+            command_prefix_for_tool_input(
+                "exec_command",
+                &serde_json::json!({
+                    "cmd": "git add -A",
+                    "prefix_rule": ["cargo", "test"]
+                })
+            ),
+            Some(vec!["cargo".to_string(), "test".to_string()])
+        );
+    }
+
+    #[test]
+    fn explicit_sandbox_permissions_request_escalation() {
+        assert!(requests_explicit_escalation(&serde_json::json!({
+            "sandbox_permissions": "require_escalated"
+        })));
+        assert!(requests_explicit_escalation(&serde_json::json!({
+            "additional_permissions": {"network": true}
+        })));
+        assert!(!requests_explicit_escalation(&serde_json::json!({
+            "sandbox_permissions": "use_default"
+        })));
+    }
+
     fn test_permission_request(tool_name: &str) -> ToolPermissionRequest {
         ToolPermissionRequest {
             tool_call_id: "call".into(),
@@ -743,6 +796,7 @@ mod tests {
             host: None,
             target: None,
             command_prefix: None,
+            requests_escalation: false,
         }
     }
 

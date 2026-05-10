@@ -15,6 +15,7 @@ use chrono::SecondsFormat;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
+use devo_core::CommandExecutionItem;
 use devo_core::CompactionSnapshotLine;
 use devo_core::ContentBlock;
 use devo_core::ItemId;
@@ -691,6 +692,7 @@ fn prompt_visible_turn_item(item: &TurnItem) -> bool {
             | TurnItem::Reasoning(_)
             | TurnItem::ToolCall(_)
             | TurnItem::ToolResult(_)
+            | TurnItem::CommandExecution(_)
             | TurnItem::Plan(_)
             | TurnItem::WebSearch(_)
             | TurnItem::ImageGeneration(_)
@@ -728,6 +730,24 @@ pub(crate) fn apply_turn_item(
             output,
             is_error,
         }),
+        TurnItem::CommandExecution(CommandExecutionItem {
+            tool_call_id,
+            tool_name,
+            command,
+            input,
+            output,
+            is_error,
+        }) => {
+            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
+            TurnItem::CommandExecution(CommandExecutionItem {
+                tool_call_id,
+                tool_name,
+                command,
+                input,
+                output,
+                is_error,
+            })
+        }
         other => other,
     };
 
@@ -805,6 +825,46 @@ pub(crate) fn apply_turn_item(
                 }
             }
         }
+        TurnItem::CommandExecution(CommandExecutionItem {
+            tool_call_id,
+            tool_name,
+            input,
+            output,
+            is_error,
+            ..
+        }) => {
+            match messages.last_mut() {
+                Some(message) if message.role == Role::Assistant => {
+                    message.content.push(ContentBlock::ToolUse {
+                        id: tool_call_id.clone(),
+                        name: tool_name,
+                        input,
+                    });
+                }
+                _ => {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: tool_call_id.clone(),
+                            name: tool_name,
+                            input,
+                        }],
+                    });
+                }
+            }
+            let content = match output {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            };
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: tool_call_id,
+                    content,
+                    is_error,
+                }],
+            });
+        }
         TurnItem::Plan(TextItem { text })
         | TurnItem::WebSearch(TextItem { text })
         | TurnItem::ImageGeneration(TextItem { text })
@@ -859,6 +919,24 @@ fn apply_prompt_turn_item(
             output,
             is_error,
         }),
+        TurnItem::CommandExecution(CommandExecutionItem {
+            tool_call_id,
+            tool_name,
+            command,
+            input,
+            output,
+            is_error,
+        }) => {
+            tool_names_by_id.insert(tool_call_id.clone(), tool_name.clone());
+            TurnItem::CommandExecution(CommandExecutionItem {
+                tool_call_id,
+                tool_name,
+                command,
+                input,
+                output,
+                is_error,
+            })
+        }
         other => other,
     };
 
@@ -932,6 +1010,46 @@ fn apply_prompt_turn_item(
                     });
                 }
             }
+        }
+        TurnItem::CommandExecution(CommandExecutionItem {
+            tool_call_id,
+            tool_name,
+            input,
+            output,
+            is_error,
+            ..
+        }) => {
+            match messages.last_mut() {
+                Some(message) if message.role == Role::Assistant => {
+                    message.content.push(ContentBlock::ToolUse {
+                        id: tool_call_id.clone(),
+                        name: tool_name,
+                        input,
+                    });
+                }
+                _ => {
+                    messages.push(Message {
+                        role: Role::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: tool_call_id.clone(),
+                            name: tool_name,
+                            input,
+                        }],
+                    });
+                }
+            }
+            let content = match output {
+                serde_json::Value::String(text) => text,
+                other => other.to_string(),
+            };
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: tool_call_id,
+                    content,
+                    is_error,
+                }],
+            });
         }
         TurnItem::Reasoning(TextItem { text }) => match messages.last_mut() {
             Some(message) if message.role == Role::Assistant => {

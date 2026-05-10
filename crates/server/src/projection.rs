@@ -1,6 +1,6 @@
 use devo_core::{
-    ContentBlock, Message, SessionRecord, TextItem, ToolCallItem, ToolResultItem, TurnItem,
-    TurnRecord,
+    CommandExecutionItem, ContentBlock, Message, SessionRecord, TextItem, ToolCallItem,
+    ToolResultItem, TurnItem, TurnRecord,
 };
 
 use crate::session::{
@@ -147,6 +147,25 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
                 SessionHistoryItemKind::ToolResult
             },
             summarize_tool_result(tool_name.as_deref(), *is_error),
+            match output {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            },
+        )),
+        TurnItem::CommandExecution(CommandExecutionItem {
+            tool_call_id,
+            command,
+            output,
+            is_error,
+            ..
+        }) => Some(SessionHistoryItem::new(
+            Some(tool_call_id.clone()),
+            if *is_error {
+                SessionHistoryItemKind::Error
+            } else {
+                SessionHistoryItemKind::CommandExecution
+            },
+            command.clone(),
             match output {
                 serde_json::Value::String(text) => text.clone(),
                 other => other.to_string(),

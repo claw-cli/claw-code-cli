@@ -524,7 +524,7 @@ fn submit_text_emits_user_turn_with_model_and_thinking() {
             model: Some("test-model".to_string()),
             thinking: Some("disabled".to_string()),
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -557,7 +557,7 @@ fn typed_character_submits_after_paste_burst_flush() {
             model: Some("test-model".to_string()),
             thinking: None,
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -606,7 +606,7 @@ fn key_release_does_not_duplicate_text_input() {
             model: Some("test-model".to_string()),
             thinking: None,
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -1215,10 +1215,12 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         "thinking".to_string(),
     ));
 
+    // Reasoning is now committed to scrollback on ReasoningCompleted,
+    // no longer visible in the live viewport.
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
-        after.contains("thinking"),
-        "reasoning text should remain visible after completion:\n{after}"
+        !after.contains("thinking"),
+        "reasoning text should commit to scrollback, not remain in viewport:\n{after}"
     );
 
     let committed_after_reasoning_complete =
@@ -1228,6 +1230,10 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         .flat_map(|line| line.line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
+    assert!(
+        committed_after_text.contains("thinking"),
+        "reasoning text should be in scrollback after ReasoningCompleted: {committed_after_reasoning_complete:?}"
+    );
     assert!(
         committed_after_text.contains("final answer line 1"),
         "assistant output should flush once reasoning completes: {committed_after_reasoning_complete:?}"
@@ -1575,7 +1581,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             model: Some("second-model".to_string()),
             thinking: Some("high".to_string()),
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }

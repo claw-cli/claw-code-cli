@@ -139,6 +139,7 @@ mod tests {
             host: None,
             target: Some("git add -A".to_string()),
             command_prefix: Some(vec!["git".to_string(), "add".to_string()]),
+            requests_escalation: false,
         };
 
         let model_request = build_approval_review_request("model".to_string(), &request);

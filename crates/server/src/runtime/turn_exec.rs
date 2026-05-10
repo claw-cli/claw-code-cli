@@ -5,6 +5,102 @@ use tokio::sync::mpsc;
 
 use super::*;
 
+struct PendingToolCall {
+    item_id: ItemId,
+    item_seq: u64,
+    input: serde_json::Value,
+    is_command_execution: bool,
+    command: String,
+}
+
+fn is_unified_exec_tool(name: &str) -> bool {
+    matches!(name, "exec_command" | "write_stdin")
+}
+
+fn command_display_from_input(tool_name: &str, input: &serde_json::Value) -> String {
+    match tool_name {
+        "exec_command" => input
+            .get("cmd")
+            .or_else(|| input.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        "write_stdin" => {
+            let session_id = input
+                .get("session_id")
+                .and_then(serde_json::Value::as_i64)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let chars = input
+                .get("chars")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if chars.is_empty() {
+                format!("poll session {session_id}")
+            } else {
+                format!("write_stdin session {session_id}")
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+fn command_execution_item_id_for_progress(
+    pending_tool_calls: &HashMap<String, PendingToolCall>,
+    tool_use_id: &str,
+) -> Option<ItemId> {
+    pending_tool_calls
+        .get(tool_use_id)
+        .filter(|pending| pending.is_command_execution)
+        .map(|pending| pending.item_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn command_progress_uses_command_execution_item_id() {
+        let command_item_id = ItemId::new();
+        let tool_item_id = ItemId::new();
+        let mut pending_tool_calls = HashMap::new();
+        pending_tool_calls.insert(
+            "exec".to_string(),
+            PendingToolCall {
+                item_id: command_item_id,
+                item_seq: 1,
+                input: serde_json::json!({}),
+                is_command_execution: true,
+                command: "cargo test".to_string(),
+            },
+        );
+        pending_tool_calls.insert(
+            "read".to_string(),
+            PendingToolCall {
+                item_id: tool_item_id,
+                item_seq: 2,
+                input: serde_json::json!({}),
+                is_command_execution: false,
+                command: String::new(),
+            },
+        );
+
+        assert_eq!(
+            command_execution_item_id_for_progress(&pending_tool_calls, "exec"),
+            Some(command_item_id)
+        );
+        assert_eq!(
+            command_execution_item_id_for_progress(&pending_tool_calls, "read"),
+            None
+        );
+        assert_eq!(
+            command_execution_item_id_for_progress(&pending_tool_calls, "missing"),
+            None
+        );
+    }
+}
+
 impl ServerRuntime {
     /// Execute one turn end-to-end, including streaming query events,
     /// persisting turn state, and draining queued follow-up inputs.
@@ -51,8 +147,7 @@ impl ServerRuntime {
             let mut reasoning_item_seq = None;
             let mut reasoning_text = String::new();
             let mut tool_names_by_id = HashMap::new();
-            let mut pending_tool_calls: HashMap<String, (ItemId, u64, serde_json::Value)> =
-                HashMap::new();
+            let mut pending_tool_calls: HashMap<String, PendingToolCall> = HashMap::new();
             let mut latest_usage: Option<TurnUsage> = None;
             let mut usage_base: Option<(usize, usize, usize)> = None;
             while let Some(event) = event_rx.recv().await {
@@ -187,20 +282,48 @@ impl ServerRuntime {
                                 .await;
                             reasoning_text.clear();
                         }
+                        let is_command_execution = is_unified_exec_tool(&name);
+                        let command = command_display_from_input(&name, &input);
+                        let item_kind = if is_command_execution {
+                            ItemKind::CommandExecution
+                        } else {
+                            ItemKind::ToolCall
+                        };
+                        let started_payload = if is_command_execution {
+                            serde_json::to_value(CommandExecutionPayload {
+                                tool_call_id: id.clone(),
+                                tool_name: name.clone(),
+                                command: command.clone(),
+                                output: None,
+                                is_error: false,
+                            })
+                            .expect("serialize command execution payload")
+                        } else {
+                            serde_json::to_value(ToolCallPayload {
+                                tool_call_id: id.clone(),
+                                tool_name: name.clone(),
+                                parameters: input.clone(),
+                            })
+                            .expect("serialize tool call payload")
+                        };
                         let (item_id, item_seq) = runtime
                             .start_item(
                                 session_id,
                                 turn_for_events.turn_id,
-                                ItemKind::ToolCall,
-                                serde_json::to_value(ToolCallPayload {
-                                    tool_call_id: id.clone(),
-                                    tool_name: name.clone(),
-                                    parameters: input.clone(),
-                                })
-                                .expect("serialize tool call payload"),
+                                item_kind,
+                                started_payload,
                             )
                             .await;
-                        pending_tool_calls.insert(id, (item_id, item_seq, input));
+                        pending_tool_calls.insert(
+                            id,
+                            PendingToolCall {
+                                item_id,
+                                item_seq,
+                                input,
+                                is_command_execution,
+                                command,
+                            },
+                        );
                     }
                     QueryEvent::ToolResult {
                         tool_use_id,
@@ -211,26 +334,56 @@ impl ServerRuntime {
                         let tool_name = tool_names_by_id.get(&tool_use_id).cloned();
                         // First complete the pending ToolCall item so its item/completed
                         // arrives before the ToolResult item/completed.
-                        if let Some((item_id, item_seq, tool_input)) =
-                            pending_tool_calls.remove(&tool_use_id)
-                        {
+                        if let Some(pending) = pending_tool_calls.remove(&tool_use_id) {
+                            if pending.is_command_execution {
+                                let tool_name = tool_name.clone().unwrap_or_default();
+                                let output = serde_json::Value::String(content.clone());
+                                let completed_payload =
+                                    serde_json::to_value(CommandExecutionPayload {
+                                        tool_call_id: tool_use_id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        command: pending.command.clone(),
+                                        output: Some(output.clone()),
+                                        is_error,
+                                    })
+                                    .expect("serialize command execution payload");
+                                runtime
+                                    .complete_item(
+                                        session_id,
+                                        turn_for_events.turn_id,
+                                        pending.item_id,
+                                        pending.item_seq,
+                                        ItemKind::CommandExecution,
+                                        TurnItem::CommandExecution(CommandExecutionItem {
+                                            tool_call_id: tool_use_id.clone(),
+                                            tool_name,
+                                            command: pending.command,
+                                            input: pending.input,
+                                            output,
+                                            is_error,
+                                        }),
+                                        completed_payload,
+                                    )
+                                    .await;
+                                continue;
+                            }
                             let completed_payload = serde_json::to_value(ToolCallPayload {
                                 tool_call_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone().unwrap_or_default(),
-                                parameters: tool_input.clone(),
+                                parameters: pending.input.clone(),
                             })
                             .expect("serialize tool call payload");
                             runtime
                                 .complete_item(
                                     session_id,
                                     turn_for_events.turn_id,
-                                    item_id,
-                                    item_seq,
+                                    pending.item_id,
+                                    pending.item_seq,
                                     ItemKind::ToolCall,
                                     TurnItem::ToolCall(ToolCallItem {
                                         tool_call_id: tool_use_id.clone(),
                                         tool_name: tool_name.clone().unwrap_or_default(),
-                                        input: tool_input,
+                                        input: pending.input,
                                     }),
                                     completed_payload,
                                 )
@@ -262,6 +415,10 @@ impl ServerRuntime {
                         tool_use_id,
                         content,
                     } => {
+                        let item_id = command_execution_item_id_for_progress(
+                            &pending_tool_calls,
+                            &tool_use_id,
+                        );
                         let _ = runtime
                             .broadcast_event(ServerEvent::ItemDelta {
                                 delta_kind: ItemDeltaKind::CommandExecutionOutputDelta,
@@ -269,7 +426,7 @@ impl ServerRuntime {
                                     context: EventContext {
                                         session_id,
                                         turn_id: Some(turn_for_events.turn_id),
-                                        item_id: None,
+                                        item_id,
                                         seq: 0,
                                     },
                                     delta: serde_json::json!({
@@ -454,12 +611,14 @@ impl ServerRuntime {
                 let _ = event_callback_tx.send(event);
             });
             let registry = Arc::clone(&self.deps.registry);
+            let permission_mode = core_session.config.permission_mode;
             let permission_profile = core_session.config.permission_profile.clone();
             let runtime = ToolRuntime::new_with_context(
                 Arc::clone(&registry),
                 self.build_permission_checker(
                     session_id,
                     turn_for_events.turn_id,
+                    permission_mode,
                     permission_profile,
                 ),
                 ToolRuntimeContext {

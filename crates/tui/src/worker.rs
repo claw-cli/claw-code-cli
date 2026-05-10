@@ -25,6 +25,7 @@ use devo_provider::openai::OpenAIResponsesProvider;
 use devo_server::ApprovalDecisionPayload;
 use devo_server::ApprovalRequestPayload;
 use devo_server::ApprovalRespondParams;
+use devo_server::CommandExecutionPayload;
 use devo_server::InputItem;
 use devo_server::ItemEnvelope;
 use devo_server::ItemEventPayload;
@@ -1153,16 +1154,37 @@ async fn run_worker_inner(
                                 latest_completed_agent_message = None;
                             }
                             "item/started" => {
-                                if let ServerEvent::ItemStarted(payload) = event
-                                    && matches!(payload.item.item_kind, ItemKind::ToolCall)
-                                        && let Ok(payload) = serde_json::from_value::<ToolCallPayload>(payload.item.payload) {
-                                            let summary = summarize_tool_call(&payload);
-                                            let _ = event_tx.send(WorkerEvent::ToolCall {
-                                                tool_use_id: payload.tool_call_id,
-                                                summary,
-                                            });
+                                if let ServerEvent::ItemStarted(payload) = event {
+                                    match payload.item.item_kind {
+                                        ItemKind::CommandExecution => {
+                                            if let Ok(payload) =
+                                                serde_json::from_value::<CommandExecutionPayload>(
+                                                    payload.item.payload,
+                                                )
+                                            {
+                                                let _ = event_tx.send(WorkerEvent::ToolCall {
+                                                    tool_use_id: payload.tool_call_id,
+                                                    summary: payload.command,
+                                                });
+                                            }
                                         }
+                                        ItemKind::ToolCall => {
+                                            if let Ok(payload) =
+                                                serde_json::from_value::<ToolCallPayload>(
+                                                    payload.item.payload,
+                                                )
+                                            {
+                                                let summary = summarize_tool_call(&payload);
+                                                let _ = event_tx.send(WorkerEvent::ToolCall {
+                                                    tool_use_id: payload.tool_call_id,
+                                                    summary,
+                                                });
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
+                            }
                             "item/agentMessage/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
                                     let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
@@ -1521,6 +1543,26 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             });
         }
         ItemEnvelope {
+            item_kind: ItemKind::CommandExecution,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<CommandExecutionPayload>(payload) else {
+                return;
+            };
+            let _ = event_tx.send(WorkerEvent::ToolResult {
+                tool_use_id: payload.tool_call_id,
+                title: payload.command,
+                preview: payload
+                    .output
+                    .as_ref()
+                    .map(render_json_value_text)
+                    .unwrap_or_default(),
+                is_error: payload.is_error,
+                truncated: false,
+            });
+        }
+        ItemEnvelope {
             item_kind: ItemKind::ApprovalRequest,
             payload,
             ..
@@ -1615,12 +1657,16 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
             SessionHistoryItemKind::Reasoning => TranscriptItemKind::Reasoning,
             SessionHistoryItemKind::ToolCall => TranscriptItemKind::ToolCall,
             SessionHistoryItemKind::ToolResult => TranscriptItemKind::ToolResult,
+            SessionHistoryItemKind::CommandExecution => TranscriptItemKind::ToolResult,
             SessionHistoryItemKind::Error => TranscriptItemKind::Error,
             SessionHistoryItemKind::TurnSummary => TranscriptItemKind::TurnSummary,
         };
         let mut transcript_item = match item.kind {
             SessionHistoryItemKind::ToolCall => TranscriptItem::tool_call(item.title.clone()),
             SessionHistoryItemKind::ToolResult => {
+                TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
+            }
+            SessionHistoryItemKind::CommandExecution => {
                 TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
             }
             SessionHistoryItemKind::Error => {
@@ -2144,6 +2190,22 @@ mod tests {
                 TranscriptItem::restored_tool_result("Ran read a", "A"),
                 TranscriptItem::restored_tool_result("Ran read b", "B"),
             ]
+        );
+    }
+
+    #[test]
+    fn project_history_restores_command_execution_items() {
+        let items = vec![SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: SessionHistoryItemKind::CommandExecution,
+            title: "cargo test".to_string(),
+            body: "ok".to_string(),
+            duration_ms: None,
+        }];
+
+        assert_eq!(
+            project_history_items(&items),
+            vec![TranscriptItem::restored_tool_result("cargo test", "ok")]
         );
     }
 

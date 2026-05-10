@@ -307,6 +307,7 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     stream_chunking_policy: AdaptiveChunkingPolicy,
     reasoning_stream_active: bool,
+    active_reasoning_status: DotStatus,
     available_models: Vec<Model>,
     saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
@@ -416,6 +417,18 @@ impl ChatWidget {
     fn pending_dot_prefix() -> Line<'static> {
         Line::from(vec![
             Span::styled("▌", Style::default().fg(Color::Rgb(110, 200, 255))),
+            " ".into(),
+        ])
+    }
+
+    fn reasoning_dot_prefix(status: DotStatus) -> Line<'static> {
+        let color = match status {
+            DotStatus::Pending => Color::Rgb(210, 150, 60),
+            DotStatus::Completed => Color::Rgb(120, 220, 160),
+            DotStatus::Failed => Color::Rgb(255, 100, 100),
+        };
+        Line::from(vec![
+            Span::styled("▌", Style::default().fg(color)),
             " ".into(),
         ])
     }
@@ -671,6 +684,7 @@ impl ChatWidget {
         self.active_assistant_cell = None;
         self.active_reasoning_cell = None;
         self.stream_controller = None;
+        self.active_reasoning_status = DotStatus::Pending;
         self.bottom_pane.clear_composer();
         self.set_status_message("Resuming session");
     }
@@ -772,6 +786,7 @@ impl ChatWidget {
             stream_controller: None,
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
             reasoning_stream_active: false,
+            active_reasoning_status: DotStatus::Pending,
             available_models,
             saved_model_slugs,
             onboarding_step: None,
@@ -1194,6 +1209,7 @@ impl ChatWidget {
                 self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
                 self.stream_chunking_policy.reset();
                 self.reasoning_stream_active = false;
+                self.active_reasoning_status = DotStatus::Pending;
                 self.bottom_pane.set_task_running(true);
             }
             WorkerEvent::TextDelta(text) => {
@@ -1203,6 +1219,7 @@ impl ChatWidget {
             WorkerEvent::ReasoningDelta(text) => {
                 self.reasoning_stream_active = true;
                 self.active_reasoning_text.push_str(&text);
+                self.active_reasoning_status = DotStatus::Pending;
                 self.sync_active_reasoning_cell();
                 self.set_status_message("Thinking");
             }
@@ -1217,8 +1234,8 @@ impl ChatWidget {
                 if self.busy {
                     self.active_reasoning_text = text;
                 }
-                self.sync_active_reasoning_cell();
-                self.reasoning_stream_active = false;
+                self.active_reasoning_status = DotStatus::Completed;
+                self.commit_reasoning(DotStatus::Completed);
                 self.flush_stream_commit_ticks();
                 self.set_status_message("Thinking");
             }
@@ -1265,7 +1282,6 @@ impl ChatWidget {
                 is_error,
                 truncated,
             } => {
-                self.commit_active_streams(DotStatus::Completed);
                 // Remove from pending viewport entries — it will be committed to history below.
                 if let Some(pos) = self
                     .pending_tool_calls
@@ -1511,6 +1527,7 @@ impl ChatWidget {
                 self.stream_controller = None;
                 self.stream_chunking_policy.reset();
                 self.reasoning_stream_active = false;
+                self.active_reasoning_status = DotStatus::Pending;
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.busy = false;
@@ -1556,6 +1573,7 @@ impl ChatWidget {
                 self.stream_controller = None;
                 self.stream_chunking_policy.reset();
                 self.reasoning_stream_active = false;
+                self.active_reasoning_status = DotStatus::Pending;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.total_cache_read_tokens = total_cache_read_tokens;
@@ -1696,6 +1714,7 @@ impl ChatWidget {
                 self.stream_controller = None;
                 self.stream_chunking_policy.reset();
                 self.reasoning_stream_active = false;
+                self.active_reasoning_status = DotStatus::Pending;
                 self.set_status_message("Transcript cleared");
             }
             SlashCommand::Onboard => {
@@ -2031,8 +2050,8 @@ impl ChatWidget {
             TranscriptItemKind::ToolCall => {
                 self.add_history_entry_without_redraw(Box::new(
                     history_cell::AgentMessageCell::new_with_prefix(
-                        vec![Self::ran_tool_line(&item.title)],
-                        Self::tool_dot_prefix(),
+                        vec![Self::running_tool_line(&item.title)],
+                        self.dot_prefix(DotStatus::Pending),
                         "  ",
                         false,
                     ),
@@ -2073,17 +2092,17 @@ impl ChatWidget {
         }
     }
 
-    fn commit_active_streams(&mut self, status: DotStatus) {
-        // Take the text first so any buffered delta events that arrive after
-        // this call will not re-create the active reasoning/assistant cells
-        // with stale content.
+    fn commit_reasoning(&mut self, status: DotStatus) {
+        self.active_reasoning_status = DotStatus::Pending;
         let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
         self.active_reasoning_cell = None;
-        self.active_assistant_cell = None;
         self.reasoning_stream_active = false;
         if !reasoning_text.trim().is_empty() {
             self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
         }
+    }
+
+    fn commit_assistant(&mut self, status: DotStatus) {
         if let Some(controller) = self.stream_controller.as_mut() {
             if let Some(cell) = controller.finalize() {
                 self.add_history_entry_without_redraw(cell);
@@ -2092,6 +2111,7 @@ impl ChatWidget {
             self.stream_chunking_policy.reset();
         } else {
             let assistant_text = std::mem::take(&mut self.active_assistant_text);
+            self.active_assistant_cell = None;
             if !assistant_text.trim().is_empty() {
                 self.add_markdown_history_with_status_without_redraw(
                     "Assistant",
@@ -2100,6 +2120,11 @@ impl ChatWidget {
                 );
             }
         }
+    }
+
+    fn commit_active_streams(&mut self, status: DotStatus) {
+        self.commit_reasoning(status);
+        self.commit_assistant(status);
     }
 
     fn push_assistant_stream_delta(&mut self, text: &str) {
@@ -2218,7 +2243,7 @@ impl ChatWidget {
             self.active_reasoning_cell =
                 Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
                     lines,
-                    Self::pending_dot_prefix(),
+                    Self::reasoning_dot_prefix(self.active_reasoning_status),
                     "  ",
                     false,
                 ));
@@ -2556,9 +2581,6 @@ impl ChatWidget {
 
     fn active_viewport_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        if let Some(active_cell) = &self.active_cell {
-            Self::extend_lines_with_separator(&mut lines, active_cell.display_lines(width));
-        }
         if let Some(reasoning_cell) = &self.active_reasoning_cell {
             Self::extend_lines_with_separator(&mut lines, reasoning_cell.display_lines(width));
         }

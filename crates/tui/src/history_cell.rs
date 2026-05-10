@@ -54,7 +54,7 @@ use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(crate) const AI_REPLY_WRAP_WIDTH: usize = 80;
+pub(crate) const AI_REPLY_WRAP_WIDTH: usize = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScrollbackWrapPolicy {
@@ -394,7 +394,7 @@ impl ReasoningSummaryCell {
         adaptive_wrap_lines(
             &summary_lines,
             RtOptions::new(width as usize)
-                .initial_indent("• ".dim().into())
+                .initial_indent("▌ ".dim().into())
                 .subsequent_indent("  ".into()),
         )
     }
@@ -432,7 +432,7 @@ impl AgentMessageCell {
         Self {
             lines,
             initial_prefix: if is_first_line {
-                "• ".dim().into()
+                "▌ ".dim().into()
             } else {
                 "  ".into()
             },
@@ -573,9 +573,9 @@ impl HistoryCell for UnifiedExecInteractionCell {
         let waited_only = self.stdin.is_empty();
 
         let mut header_spans = if waited_only {
-            vec!["• Waited for background terminal".bold()]
+            vec!["▌ ".cyan(), "Waited for background terminal".bold()]
         } else {
-            vec!["↳ ".dim(), "Interacted with background terminal".bold()]
+            vec!["▌ ".cyan(), "Interacted with background terminal".bold()]
         };
         if let Some(command) = &self.command_display
             && !command.is_empty()
@@ -593,11 +593,8 @@ impl HistoryCell for UnifiedExecInteractionCell {
             return out;
         }
 
-        let input_lines: Vec<Line<'static>> = self
-            .stdin
-            .lines()
-            .map(|line| Line::from(line.to_string()))
-            .collect();
+        let input_lines: Vec<Line<'static>> =
+            self.stdin.lines().map(render_terminal_input).collect();
 
         let input_wrapped = adaptive_wrap_lines(
             input_lines,
@@ -615,6 +612,13 @@ pub(crate) fn new_unified_exec_interaction(
     stdin: String,
 ) -> UnifiedExecInteractionCell {
     UnifiedExecInteractionCell::new(command_display, stdin)
+}
+
+fn render_terminal_input(input: &str) -> Line<'static> {
+    if input.is_empty() {
+        return Line::from("⏎".dim());
+    }
+    Line::from(input.to_string())
 }
 
 #[derive(Debug)]
@@ -647,11 +651,11 @@ impl HistoryCell for UnifiedExecProcessesCell {
         out.push("".into());
 
         if self.processes.is_empty() {
-            out.push("  • No background terminals running.".italic().into());
+            out.push("  ▌ No background terminals running.".italic().into());
             return out;
         }
 
-        let prefix = "  • ";
+        let prefix = "  ▌ ";
         let prefix_width = UnicodeWidthStr::width(prefix);
         let truncation_suffix = " [...]";
         let truncation_suffix_width = UnicodeWidthStr::width(truncation_suffix);
@@ -1264,7 +1268,7 @@ impl HistoryCell for DeprecationNoticeCell {
 }
 
 pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHistoryCell {
-    let mut line = vec!["• ".dim(), message.into()];
+    let mut line = vec!["▌ ".dim(), message.into()];
     if let Some(hint) = hint {
         line.push(" ".into());
         line.push(hint.dark_gray());
@@ -1392,7 +1396,7 @@ pub(crate) fn new_view_image_tool_call(path: PathBuf, cwd: &Path) -> PlainHistor
     let display_path = display_path_for(&path, cwd);
 
     let lines: Vec<Line<'static>> = vec![
-        vec!["• ".dim(), "Viewed Image".bold()].into(),
+        vec!["▌ ".dim(), "Viewed Image".bold()].into(),
         vec!["  └ ".dim(), display_path.dim()].into(),
     ];
 
@@ -1407,7 +1411,7 @@ pub(crate) fn new_image_generation_call(
     let detail = revised_prompt.unwrap_or_else(|| call_id.clone());
 
     let mut lines: Vec<Line<'static>> = vec![
-        vec!["• ".dim(), "Generated Image:".bold()].into(),
+        vec!["▌ ".dim(), "Generated Image:".bold()].into(),
         vec!["  └ ".dim(), detail.dim()].into(),
     ];
     if let Some(saved_path) = saved_path {
@@ -1485,7 +1489,7 @@ impl HistoryCell for FinalMessageSeparator {
             return vec![Line::from_iter(["─".repeat(width as usize).dim()])];
         }
 
-        let label = format!("─ {} ─", label_parts.join(" • "));
+        let label = format!("─ {} ─", label_parts.join(" ▌ "));
         let (label, _suffix, label_width) = take_prefix_by_width(&label, width as usize);
         vec![
             Line::from_iter([

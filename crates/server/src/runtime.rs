@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use devo_core::ApprovalDecisionItem;
 use devo_core::ApprovalRequestItem;
+use devo_core::CommandExecutionItem;
 use devo_core::ItemId;
 use devo_core::Message;
 use devo_core::QueryEvent;
@@ -47,6 +48,7 @@ use crate::ApprovalRequestPayload;
 use crate::ApprovalRespondParams;
 use crate::ApprovalScopeValue;
 use crate::ClientTransportKind;
+use crate::CommandExecutionPayload;
 use crate::ConnectionState;
 use crate::ErrorResponse;
 use crate::EventContext;
@@ -595,6 +597,7 @@ impl ServerRuntime {
         self: &Arc<Self>,
         session_id: SessionId,
         turn_id: TurnId,
+        permission_mode: PermissionMode,
         permission_profile: devo_safety::RuntimePermissionProfile,
     ) -> PermissionChecker {
         let runtime = Arc::clone(self);
@@ -603,7 +606,13 @@ impl ServerRuntime {
             let permission_profile = permission_profile.clone();
             Box::pin(async move {
                 runtime
-                    .authorize_tool_request(session_id, turn_id, permission_profile, request)
+                    .authorize_tool_request(
+                        session_id,
+                        turn_id,
+                        permission_mode,
+                        permission_profile,
+                        request,
+                    )
                     .await
             })
         })
@@ -613,9 +622,13 @@ impl ServerRuntime {
         &self,
         session_id: SessionId,
         turn_id: TurnId,
+        permission_mode: PermissionMode,
         permission_profile: devo_safety::RuntimePermissionProfile,
         request: ToolPermissionRequest,
     ) -> Result<(), String> {
+        if let Some(result) = permission_mode_authorization(permission_mode) {
+            return result;
+        }
         if self.approval_cache_allows(session_id, &request).await {
             return Ok(());
         }
@@ -770,6 +783,9 @@ impl ServerRuntime {
     ) -> PolicyAuthorization {
         if profile.auto_approve {
             return PolicyAuthorization::Allow;
+        }
+        if request_forces_approval(request) {
+            return PolicyAuthorization::Ask;
         }
         match request.resource {
             devo_safety::ResourceKind::Network => {
@@ -1460,6 +1476,18 @@ fn cache_allows(
     })
 }
 
+fn request_forces_approval(request: &ToolPermissionRequest) -> bool {
+    request.requests_escalation
+}
+
+fn permission_mode_authorization(mode: PermissionMode) -> Option<Result<(), String>> {
+    match mode {
+        PermissionMode::AutoApprove => Some(Ok(())),
+        PermissionMode::Deny => Some(Err("approval policy is deny".to_string())),
+        PermissionMode::Interactive => None,
+    }
+}
+
 fn permission_mode_from_approval_policy(policy: &str) -> Option<PermissionMode> {
     match policy {
         "on-request" | "interactive" | "ask" => Some(PermissionMode::Interactive),
@@ -1534,6 +1562,30 @@ mod permission_policy_tests {
         );
     }
 
+    #[test]
+    fn explicit_escalation_forces_approval() {
+        let mut request = test_permission_request("exec_command");
+        request.requests_escalation = true;
+
+        assert!(request_forces_approval(&request));
+    }
+
+    #[test]
+    fn permission_mode_overrides_authorization_policy() {
+        assert_eq!(
+            permission_mode_authorization(PermissionMode::AutoApprove),
+            Some(Ok(()))
+        );
+        assert_eq!(
+            permission_mode_authorization(PermissionMode::Deny),
+            Some(Err("approval policy is deny".to_string()))
+        );
+        assert_eq!(
+            permission_mode_authorization(PermissionMode::Interactive),
+            None
+        );
+    }
+
     fn test_permission_request(tool_name: &str) -> ToolPermissionRequest {
         ToolPermissionRequest {
             tool_call_id: "call".into(),
@@ -1549,6 +1601,7 @@ mod permission_policy_tests {
             host: None,
             target: None,
             command_prefix: None,
+            requests_escalation: false,
         }
     }
 }
