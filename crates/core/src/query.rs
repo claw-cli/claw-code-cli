@@ -933,7 +933,7 @@ mod tests {
     use devo_protocol::StreamEvent;
     use devo_protocol::Usage;
     use devo_provider::ModelProviderSDK;
-    use devo_safety::legacy_permissions::PermissionMode;
+    use devo_safety::PermissionMode;
     use devo_tools::ToolRegistry;
     use devo_tools::ToolRuntime;
     use devo_tools::errors::ToolExecutionError;

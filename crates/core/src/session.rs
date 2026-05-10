@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use devo_safety::legacy_permissions::PermissionMode;
+use devo_safety::PermissionMode;
 
 use devo_protocol::PendingInputItem;
 use devo_protocol::TurnKind;

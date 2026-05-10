@@ -1,5 +1,3 @@
-pub mod legacy_permissions;
-
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +6,17 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+
+/// Controls how tool permission requests are handled by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionMode {
+    /// Approve every request without asking.
+    AutoApprove,
+    /// Ask the user for confirmation on each request.
+    Interactive,
+    /// Deny all requests that require permission.
+    Deny,
+}
 
 /// The fixed placeholder inserted when a secret is redacted from model-visible text.
 pub const REDACTED_SECRET_PLACEHOLDER: &str = "[REDACTED_SECRET]";

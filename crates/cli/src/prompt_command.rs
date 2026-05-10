@@ -19,7 +19,6 @@ pub(crate) async fn run_prompt(
     use devo_core::SessionConfig;
     use devo_core::SessionState;
     use devo_core::default_base_instructions;
-    use devo_tools::ToolRegistry;
     use devo_tools::ToolRuntime;
 
     let cwd = std::env::current_dir()?;
@@ -48,8 +47,7 @@ pub(crate) async fn run_prompt(
     session_state.push_message(devo_core::Message::user(input.to_string()));
 
     let registry = {
-        let mut reg = ToolRegistry::new();
-        devo_tools::register_builtin_tools(&mut reg);
+        let reg = devo_tools::create_default_tool_registry();
         std::sync::Arc::new(reg)
     };
     let runtime = ToolRuntime::new_without_permissions(std::sync::Arc::clone(&registry));
