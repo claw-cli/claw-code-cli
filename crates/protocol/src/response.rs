@@ -76,6 +76,8 @@ pub enum StreamEvent {
     ReasoningStart { index: usize },
     /// Incremental reasoning delta.
     ReasoningDelta { index: usize, text: String },
+    /// End of a reasoning block.
+    ReasoningDone { index: usize },
     /// A tool call started.
     ToolCallStart {
         index: usize,

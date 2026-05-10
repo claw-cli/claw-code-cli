@@ -1,285 +1,350 @@
+//! Streams markdown deltas while retaining source for later transcript reflow.
+//!
+//! Streaming has two outputs with different lifetimes. The live viewport needs incremental
+//! `HistoryCell`s so the user sees progress, while finalized transcript history needs raw markdown
+//! source so it can be rendered again after a terminal resize. These controllers keep those outputs
+//! tied together: newline-complete source is rendered into queued live cells, and finalization
+//! returns the accumulated source to the app for consolidation.
+//!
+//! Width changes are handled by re-rendering from source and rebuilding only the not-yet-emitted
+//! queue. Already emitted rows stay emitted until the app-level transcript reflow rebuilds the full
+//! scrollback from finalized cells.
+
 use crate::history_cell::HistoryCell;
 use crate::history_cell::{self};
-use ratatui::style::Color;
-use ratatui::style::Style;
+use crate::markdown::append_markdown;
 use ratatui::text::Line;
-use ratatui::text::Span;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
 use super::StreamState;
 
-/// Controller that manages newline-gated streaming, header emission, and
-/// commit animation across streams.
-pub(crate) struct StreamController {
+/// Shared source-retaining stream state for assistant output.
+///
+/// `raw_source` is the markdown source that has crossed a newline boundary and can be rendered
+/// deterministically. `rendered_lines` is the current-width render of that source. `enqueued_len`
+/// tracks how much of that render has been offered to the commit queue, while `emitted_len` tracks
+/// how much has actually reached history cells. Keeping those counters separate lets width changes
+/// rebuild pending output without duplicating lines that are already visible.
+struct StreamCore {
     state: StreamState,
-    finishing_after_drain: bool,
-    header_emitted: bool,
-    content_style: Style,
+    width: Option<usize>,
+    raw_source: String,
+    rendered_lines: Vec<Line<'static>>,
+    enqueued_len: usize,
+    emitted_len: usize,
+    cwd: PathBuf,
 }
 
-impl StreamController {
-    /// Create a controller whose markdown renderer shortens local file links relative to `cwd`.
-    ///
-    /// The controller snapshots the path into stream state so later commit ticks and finalization
-    /// render against the same session cwd that was active when streaming started.
-    pub(crate) fn new(width: Option<usize>, cwd: &Path) -> Self {
-        Self::new_with_style(width, cwd, Style::default())
-    }
-
-    pub(crate) fn new_with_style(width: Option<usize>, cwd: &Path, content_style: Style) -> Self {
+impl StreamCore {
+    fn new(width: Option<usize>, cwd: &Path) -> Self {
         Self {
             state: StreamState::new(width, cwd),
-            finishing_after_drain: false,
-            header_emitted: false,
-            content_style,
+            width,
+            raw_source: String::with_capacity(1024),
+            rendered_lines: Vec::with_capacity(64),
+            enqueued_len: 0,
+            emitted_len: 0,
+            cwd: cwd.to_path_buf(),
         }
     }
 
-    /// Push a delta; if it contains a newline, commit completed lines and start animation.
-    pub(crate) fn push(&mut self, delta: &str) -> bool {
-        let state = &mut self.state;
+    fn push_delta(&mut self, delta: &str) -> bool {
         if !delta.is_empty() {
-            state.has_seen_delta = true;
+            self.state.has_seen_delta = true;
         }
-        state.collector.push_delta(delta);
-        if delta.contains('\n') {
-            let newly_completed = state.collector.commit_complete_lines();
-            if !newly_completed.is_empty() {
-                state.enqueue(newly_completed);
-                return true;
-            }
+        self.state.collector.push_delta(delta);
+
+        if delta.contains('\n')
+            && let Some(committed_source) = self.state.collector.commit_complete_source()
+        {
+            self.raw_source.push_str(&committed_source);
+            self.recompute_render();
+            return self.sync_queue_to_render();
         }
+
         false
     }
 
-    /// Finalize the active stream. Drain and emit now.
-    pub(crate) fn finalize(&mut self) -> Option<Box<dyn HistoryCell>> {
-        // Finalize collector first.
-        let remaining = {
-            let state = &mut self.state;
-            state.collector.finalize_and_drain()
-        };
-        // Collect all output first to avoid emitting headers when there is no content.
-        let mut out_lines = Vec::new();
-        {
-            let state = &mut self.state;
-            if !remaining.is_empty() {
-                state.enqueue(remaining);
-            }
-            let step = state.drain_all();
-            out_lines.extend(step);
+    fn finalize_remaining(&mut self) -> Vec<Line<'static>> {
+        let remainder_source = self.state.collector.finalize_and_drain_source();
+        if !remainder_source.is_empty() {
+            self.raw_source.push_str(&remainder_source);
         }
 
-        // Cleanup
-        self.state.clear();
-        self.finishing_after_drain = false;
-        self.emit(out_lines)
+        let mut rendered = Vec::new();
+        append_markdown(
+            &self.raw_source,
+            self.width,
+            Some(self.cwd.as_path()),
+            &mut rendered,
+        );
+        if self.emitted_len >= rendered.len() {
+            Vec::new()
+        } else {
+            rendered[self.emitted_len..].to_vec()
+        }
     }
 
-    /// Step animation: commit at most one queued line and handle end-of-drain cleanup.
-    pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
+    fn tick(&mut self) -> Vec<Line<'static>> {
         let step = self.state.step();
-        (self.emit(step), self.state.is_idle())
+        self.emitted_len += step.len();
+        step
     }
 
-    /// Step animation: commit at most `max_lines` queued lines.
+    fn tick_batch(&mut self, max_lines: usize) -> Vec<Line<'static>> {
+        if max_lines == 0 {
+            return Vec::new();
+        }
+        let step = self.state.drain_n(max_lines);
+        self.emitted_len += step.len();
+        step
+    }
+
+    fn queued_lines(&self) -> usize {
+        self.state.queued_len()
+    }
+
+    fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
+        self.state.oldest_queued_age(now)
+    }
+
+    fn is_idle(&self) -> bool {
+        self.state.is_idle()
+    }
+
+    fn set_width(&mut self, width: Option<usize>) {
+        if self.width == width {
+            return;
+        }
+
+        let had_pending_queue = self.state.queued_len() > 0;
+        self.width = width;
+        self.state.collector.set_width(width);
+        if self.raw_source.is_empty() {
+            return;
+        }
+
+        self.recompute_render();
+        self.emitted_len = self.emitted_len.min(self.rendered_lines.len());
+        if had_pending_queue
+            && self.emitted_len == self.rendered_lines.len()
+            && self.emitted_len > 0
+        {
+            // If wrapped remainder compresses into fewer lines at the new width,
+            // keep at least one line un-emitted so pre-resize pending content is
+            // not skipped permanently.
+            self.emitted_len -= 1;
+        }
+
+        self.state.clear_queue();
+        if self.emitted_len > 0 && !had_pending_queue {
+            self.enqueued_len = self.rendered_lines.len();
+            return;
+        }
+        self.rebuild_queue_from_render();
+    }
+
+    fn clear_queue(&mut self) {
+        self.state.clear_queue();
+        self.enqueued_len = self.emitted_len;
+    }
+
+    fn reset(&mut self) {
+        self.state.clear();
+        self.raw_source.clear();
+        self.rendered_lines.clear();
+        self.enqueued_len = 0;
+        self.emitted_len = 0;
+    }
+
+    fn live_source(&self) -> String {
+        let mut source = self.raw_source.clone();
+        source.push_str(self.state.collector.uncommitted_source());
+        source
+    }
+
+    fn recompute_render(&mut self) {
+        self.rendered_lines.clear();
+        append_markdown(
+            &self.raw_source,
+            self.width,
+            Some(self.cwd.as_path()),
+            &mut self.rendered_lines,
+        );
+    }
+
+    /// Append newly rendered lines to the live queue without replaying already queued rows.
     ///
-    /// This is intended for adaptive catch-up drains. Callers should keep `max_lines` bounded; a
-    /// very large value can collapse perceived animation into a single jump.
+    /// Width changes can make the rendered line count smaller than the previous queue boundary; in
+    /// that case the only safe option is rebuilding the queue from `emitted_len`, because slicing
+    /// from the stale `enqueued_len` would skip pending source.
+    fn sync_queue_to_render(&mut self) -> bool {
+        let target_len = self.rendered_lines.len().max(self.emitted_len);
+        if target_len < self.enqueued_len {
+            self.rebuild_queue_from_render();
+            return self.state.queued_len() > 0;
+        }
+
+        if target_len == self.enqueued_len {
+            return false;
+        }
+
+        self.state
+            .enqueue(self.rendered_lines[self.enqueued_len..target_len].to_vec());
+        self.enqueued_len = target_len;
+        true
+    }
+
+    /// Rebuild the pending live queue from the current render and current emitted position.
+    ///
+    /// This is used when resize invalidates queued wrapping. It must never enqueue rows before
+    /// `emitted_len`, because those rows have already been inserted into terminal history.
+    fn rebuild_queue_from_render(&mut self) {
+        self.state.clear_queue();
+        let target_len = self.rendered_lines.len().max(self.emitted_len);
+        if self.emitted_len < target_len {
+            self.state
+                .enqueue(self.rendered_lines[self.emitted_len..target_len].to_vec());
+        }
+        self.enqueued_len = target_len;
+    }
+}
+
+/// Controls newline-gated streaming for assistant messages.
+///
+/// The controller emits transient `AgentMessageCell`s for live display and returns raw markdown
+/// source on `finalize` so the app can replace those transient cells with a source-backed
+/// `AgentMarkdownCell`. Callers should use `set_width` on terminal resize; rebuilding the queue
+/// from already emitted cells would duplicate output instead of preserving the stream position.
+pub(crate) struct StreamController {
+    core: StreamCore,
+    header_emitted: bool,
+}
+
+impl StreamController {
+    /// Create a stream controller that renders markdown relative to the given width and cwd.
+    ///
+    /// `width` is the content width available to markdown rendering, not necessarily the full
+    /// terminal width. Passing a stale width after resize will keep queued live output wrapped for
+    /// the old viewport until app-level reflow repairs the finalized transcript.
+    pub(crate) fn new(width: Option<usize>, cwd: &Path) -> Self {
+        Self {
+            core: StreamCore::new(width, cwd),
+            header_emitted: false,
+        }
+    }
+
+    /// Push a raw model delta and return whether it produced queued complete lines.
+    ///
+    /// Deltas are committed only through newline boundaries. A `false` return can still mean source
+    /// was buffered; it only means no newly renderable complete line is ready for live emission.
+    pub(crate) fn push(&mut self, delta: &str) -> bool {
+        self.core.push_delta(delta)
+    }
+
+    /// Finish the stream and return the final transient cell plus accumulated markdown source.
+    pub(crate) fn finalize(&mut self) -> (Option<Box<dyn HistoryCell>>, Option<String>) {
+        let remaining = self.core.finalize_remaining();
+        if self.core.raw_source.is_empty() {
+            self.core.reset();
+            return (None, None);
+        }
+
+        let source = std::mem::take(&mut self.core.raw_source);
+        let out = self.emit(remaining);
+        self.core.reset();
+        (out, Some(source))
+    }
+
+    pub(crate) fn on_commit_tick(&mut self) -> (Option<Box<dyn HistoryCell>>, bool) {
+        let step = self.core.tick();
+        (self.emit(step), self.core.is_idle())
+    }
+
     pub(crate) fn on_commit_tick_batch(
         &mut self,
         max_lines: usize,
     ) -> (Option<Box<dyn HistoryCell>>, bool) {
-        let step = self.state.drain_n(max_lines.max(1));
-        (self.emit(step), self.state.is_idle())
+        let step = self.core.tick_batch(max_lines);
+        (self.emit(step), self.core.is_idle())
     }
 
-    /// Returns the current number of queued lines waiting to be displayed.
     pub(crate) fn queued_lines(&self) -> usize {
-        self.state.queued_len()
+        self.core.queued_lines()
     }
 
-    /// Returns the age of the oldest queued line.
     pub(crate) fn oldest_queued_age(&self, now: Instant) -> Option<Duration> {
-        self.state.oldest_queued_age(now)
+        self.core.oldest_queued_age(now)
     }
 
-    /// Render the current uncommitted tail that should remain in the live viewport.
-    pub(crate) fn pending_lines(&self) -> Vec<Line<'static>> {
-        patch_lines_style(self.state.collector.pending_lines(), self.content_style)
+    pub(crate) fn clear_queue(&mut self) {
+        self.core.clear_queue();
     }
 
-    /// Render all lines currently visible in the live viewport, including queued committed lines.
+    pub(crate) fn set_width(&mut self, width: Option<usize>) {
+        self.core.set_width(width);
+    }
+
     pub(crate) fn live_lines(&self) -> Vec<Line<'static>> {
-        let mut lines = patch_lines_style(self.state.queued_lines(), self.content_style);
-        lines.extend(self.pending_lines());
-        lines
+        let source = self.core.live_source();
+        if source.is_empty() {
+            return Vec::new();
+        }
+        let mut rendered = Vec::new();
+        append_markdown(
+            &source,
+            self.core.width,
+            Some(self.core.cwd.as_path()),
+            &mut rendered,
+        );
+        history_cell::collapse_consecutive_blank_lines(rendered)
     }
 
     fn emit(&mut self, lines: Vec<Line<'static>>) -> Option<Box<dyn HistoryCell>> {
         if lines.is_empty() {
             return None;
         }
-        let lines = patch_lines_style(lines, self.content_style);
-        let initial_prefix = if self.header_emitted {
-            "  ".into()
-        } else {
-            Line::from(vec![
-                Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
-                " ".into(),
-            ])
-        };
-        let is_stream_continuation = self.header_emitted;
-        self.header_emitted = true;
-        Some(Box::new(
-            history_cell::AgentMessageCell::new_ai_response_with_prefix(
-                lines,
-                initial_prefix,
-                "  ",
-                is_stream_continuation,
-            ),
-        ))
+        Some(Box::new(history_cell::AgentMessageCell::new(lines, {
+            let header_emitted = self.header_emitted;
+            self.header_emitted = true;
+            !header_emitted
+        })))
     }
-}
-
-fn patch_lines_style(mut lines: Vec<Line<'static>>, style: Style) -> Vec<Line<'static>> {
-    if style == Style::default() {
-        return lines;
-    }
-
-    for line in &mut lines {
-        line.spans = line
-            .spans
-            .drain(..)
-            .map(|span| span.patch_style(style))
-            .collect();
-    }
-
-    lines
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
-    use std::path::PathBuf;
+    use pretty_assertions::assert_eq;
 
     fn test_cwd() -> PathBuf {
-        // These tests only need a stable absolute cwd; using temp_dir() avoids baking Unix- or
-        // Windows-specific root semantics into the fixtures.
         std::env::temp_dir()
     }
 
-    fn lines_to_plain_strings(lines: &[ratatui::text::Line<'_>]) -> Vec<String> {
+    fn stream_controller(width: Option<usize>) -> StreamController {
+        StreamController::new(width, &test_cwd())
+    }
+
+    fn lines_to_plain_strings(lines: &[Line<'_>]) -> Vec<String> {
         lines
             .iter()
-            .map(|l| {
-                l.spans
+            .map(|line| {
+                line.spans
                     .iter()
-                    .map(|s| s.content.clone())
-                    .collect::<Vec<_>>()
-                    .join("")
+                    .map(|span| span.content.clone())
+                    .collect::<String>()
             })
             .collect()
     }
 
-    #[test]
-    fn first_committed_stream_chunk_uses_blue_dot_prefix() {
-        let mut ctrl = StreamController::new(Some(80), &test_cwd());
-
-        ctrl.push("hello\n");
-        let (cell, _idle) = ctrl.on_commit_tick();
-
-        let cell = cell.expect("expected committed cell");
-        let rendered = cell.display_lines(80);
-        let first_line = rendered.first().expect("expected rendered line");
-        let first_span = first_line.spans.first().expect("expected prefix span");
-
-        assert_eq!(first_span.content.as_ref(), "• ");
-        assert_eq!(first_span.style.fg, Some(Color::Cyan));
-    }
-
-    #[tokio::test]
-    async fn controller_loose_vs_tight_with_commit_ticks_matches_full() {
-        let mut ctrl = StreamController::new(/*width*/ None, &test_cwd());
+    fn collect_streamed_lines(deltas: &[&str], width: Option<usize>) -> Vec<String> {
+        let mut ctrl = stream_controller(width);
         let mut lines = Vec::new();
-
-        // Exact deltas from the session log (section: Loose vs. tight list items)
-        let deltas = vec![
-            "\n\n",
-            "Loose",
-            " vs",
-            ".",
-            " tight",
-            " list",
-            " items",
-            ":\n",
-            "1",
-            ".",
-            " Tight",
-            " item",
-            "\n",
-            "2",
-            ".",
-            " Another",
-            " tight",
-            " item",
-            "\n\n",
-            "1",
-            ".",
-            " Loose",
-            " item",
-            " with",
-            " its",
-            " own",
-            " paragraph",
-            ".\n\n",
-            "  ",
-            " This",
-            " paragraph",
-            " belongs",
-            " to",
-            " the",
-            " same",
-            " list",
-            " item",
-            ".\n\n",
-            "2",
-            ".",
-            " Second",
-            " loose",
-            " item",
-            " with",
-            " a",
-            " nested",
-            " list",
-            " after",
-            " a",
-            " blank",
-            " line",
-            ".\n\n",
-            "  ",
-            " -",
-            " Nested",
-            " bullet",
-            " under",
-            " a",
-            " loose",
-            " item",
-            "\n",
-            "  ",
-            " -",
-            " Another",
-            " nested",
-            " bullet",
-            "\n\n",
-        ];
-
-        // Simulate streaming with a commit tick attempt after each delta.
-        for d in deltas.iter() {
-            ctrl.push(d);
+        for delta in deltas {
+            ctrl.push(delta);
             while let (Some(cell), idle) = ctrl.on_commit_tick() {
                 lines.extend(cell.transcript_lines(u16::MAX));
                 if idle {
@@ -287,47 +352,122 @@ mod tests {
                 }
             }
         }
-        // Finalize and flush remaining lines now.
-        if let Some(cell) = ctrl.finalize() {
+        if let (Some(cell), _source) = ctrl.finalize() {
             lines.extend(cell.transcript_lines(u16::MAX));
         }
-
-        let streamed: Vec<_> = lines_to_plain_strings(&lines)
+        lines_to_plain_strings(&lines)
             .into_iter()
-            // skip • and 2-space indentation
-            .map(|s| s.chars().skip(2).collect::<String>())
-            .collect();
+            .map(|line| line.chars().skip(2).collect::<String>())
+            .collect()
+    }
 
-        // Full render of the same source
-        let source: String = deltas.iter().copied().collect();
-        let mut rendered: Vec<ratatui::text::Line<'static>> = Vec::new();
-        let test_cwd = test_cwd();
-        crate::markdown::append_markdown(
-            &source,
-            /*width*/ None,
-            Some(test_cwd.as_path()),
-            &mut rendered,
+    #[test]
+    fn controller_set_width_rebuilds_queued_lines() {
+        let mut ctrl = stream_controller(Some(120));
+        let delta = "This is a long line that should wrap into multiple rows when resized.\n";
+        assert!(ctrl.push(delta));
+        assert_eq!(ctrl.queued_lines(), 1);
+
+        ctrl.set_width(Some(24));
+        let (cell, idle) = ctrl.on_commit_tick_batch(usize::MAX);
+        let rendered = lines_to_plain_strings(
+            &cell
+                .expect("expected resized queued lines")
+                .transcript_lines(u16::MAX),
         );
-        let rendered_strs = lines_to_plain_strings(&rendered);
 
-        assert_eq!(streamed, rendered_strs);
+        assert!(idle);
+        assert!(
+            rendered.len() > 1,
+            "expected resized content to occupy multiple lines, got {rendered:?}",
+        );
+    }
 
-        // Also assert exact expected plain strings for clarity.
-        let expected = vec![
-            "Loose vs. tight list items:".to_string(),
-            "".to_string(),
-            "1. Tight item".to_string(),
-            "2. Another tight item".to_string(),
-            "3. Loose item with its own paragraph.".to_string(),
-            "".to_string(),
-            "   This paragraph belongs to the same list item.".to_string(),
-            "4. Second loose item with a nested list after a blank line.".to_string(),
-            "    - Nested bullet under a loose item".to_string(),
-            "    - Another nested bullet".to_string(),
-        ];
+    #[test]
+    fn controller_set_width_no_duplicate_after_emit() {
+        let mut ctrl = stream_controller(Some(120));
+        let line =
+            "This is a long line that definitely wraps when the terminal shrinks to 24 columns.\n";
+        ctrl.push(line);
+        let (cell, _) = ctrl.on_commit_tick_batch(usize::MAX);
+        assert!(cell.is_some(), "expected emitted cell");
+        assert_eq!(ctrl.queued_lines(), 0);
+
+        ctrl.set_width(Some(24));
+
         assert_eq!(
-            streamed, expected,
-            "expected exact rendered lines for loose/tight section"
+            ctrl.queued_lines(),
+            0,
+            "already-emitted content must not be re-queued after resize",
         );
+    }
+
+    #[test]
+    fn controller_tick_batch_zero_is_noop() {
+        let mut ctrl = stream_controller(Some(80));
+        assert!(ctrl.push("line one\n"));
+        assert_eq!(ctrl.queued_lines(), 1);
+
+        let (cell, idle) = ctrl.on_commit_tick_batch(/*max_lines*/ 0);
+        assert!(cell.is_none(), "batch size 0 should not emit lines");
+        assert!(!idle, "batch size 0 should not drain queued lines");
+        assert_eq!(
+            ctrl.queued_lines(),
+            1,
+            "queue depth should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn controller_finalize_returns_cell_and_source() {
+        let mut ctrl = stream_controller(Some(80));
+        assert!(ctrl.push("hello\n"));
+        let (cell, source) = ctrl.finalize();
+        assert!(cell.is_some());
+        assert_eq!(source, Some("hello\n".to_string()));
+    }
+
+    #[test]
+    fn live_lines_render_full_accumulated_source() {
+        let mut ctrl = stream_controller(Some(80));
+
+        assert!(ctrl.push("## Architecture\n\nA. Input pipeline\n\n"));
+        ctrl.push("TuiEvent");
+        let before_emit = lines_to_plain_strings(&ctrl.live_lines());
+
+        assert_eq!(
+            before_emit
+                .iter()
+                .filter(|line| line.contains("Architecture"))
+                .count(),
+            1,
+            "live render should include accumulated completed source once: {before_emit:?}",
+        );
+        assert!(
+            before_emit.iter().any(|line| line.contains("TuiEvent")),
+            "live render should include the uncommitted tail: {before_emit:?}",
+        );
+
+        let _ = ctrl.on_commit_tick_batch(usize::MAX);
+        let after_emit = lines_to_plain_strings(&ctrl.live_lines());
+
+        assert_eq!(
+            after_emit
+                .iter()
+                .filter(|line| line.contains("Architecture"))
+                .count(),
+            1,
+            "active live render should stay source-backed after commit ticks: {after_emit:?}",
+        );
+        assert!(
+            after_emit.iter().any(|line| line.contains("TuiEvent")),
+            "active live render should keep the uncommitted tail after queued lines emit: {after_emit:?}",
+        );
+    }
+
+    #[test]
+    fn simple_lines_stream_in_order() {
+        let actual = collect_streamed_lines(&["hello\n", "world\n"], Some(80));
+        assert_eq!(actual, vec!["hello".to_string(), "world".to_string()]);
     }
 }

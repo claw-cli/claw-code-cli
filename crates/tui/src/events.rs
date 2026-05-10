@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::app_command::InputHistoryDirection;
+use devo_core::ItemId;
 use devo_core::SessionId;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
@@ -55,6 +56,20 @@ pub(crate) enum WorkerEvent {
     },
     /// A steer (/btw) was accepted by the server.
     SteerAccepted { turn_id: TurnId },
+    /// A streamed assistant or reasoning text item started.
+    TextItemStarted { item_id: ItemId, kind: TextItemKind },
+    /// Incremental text for a streamed assistant or reasoning item.
+    TextItemDelta {
+        item_id: ItemId,
+        kind: TextItemKind,
+        delta: String,
+    },
+    /// A streamed assistant or reasoning text item completed.
+    TextItemCompleted {
+        item_id: ItemId,
+        kind: TextItemKind,
+        final_text: String,
+    },
     /// Incremental assistant text.
     TextDelta(String),
     /// Incremental reasoning text.
@@ -263,6 +278,12 @@ pub(crate) enum WorkerEvent {
         /// History entry text, or `None` if there is no matching entry.
         text: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextItemKind {
+    Assistant,
+    Reasoning,
 }
 
 /// One rendered transcript item shown in the history pane.

@@ -144,7 +144,6 @@ fn apply_commit_tick_plan(
         }
         output.all_idle &= is_idle;
     }
-
     output
 }
 

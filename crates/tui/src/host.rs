@@ -524,6 +524,9 @@ fn handle_worker_event(
             loop_state.session_switch_pending = false;
         }
         WorkerEvent::TextDelta(_)
+        | WorkerEvent::TextItemStarted { .. }
+        | WorkerEvent::TextItemDelta { .. }
+        | WorkerEvent::TextItemCompleted { .. }
         | WorkerEvent::ReasoningDelta(_)
         | WorkerEvent::AssistantMessageCompleted(_)
         | WorkerEvent::ReasoningCompleted(_)

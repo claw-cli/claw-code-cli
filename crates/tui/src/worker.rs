@@ -52,6 +52,7 @@ use devo_server::TurnSteerParams;
 
 use crate::app_command::InputHistoryDirection;
 use crate::events::SessionListEntry;
+use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
@@ -1155,7 +1156,24 @@ async fn run_worker_inner(
                             }
                             "item/started" => {
                                 if let ServerEvent::ItemStarted(payload) = event {
+                                    tracing::debug!(
+                                        item_id = %payload.item.item_id,
+                                        item_kind = ?payload.item.item_kind,
+                                        "server item started"
+                                    );
                                     match payload.item.item_kind {
+                                        ItemKind::AgentMessage => {
+                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
+                                                item_id: payload.item.item_id,
+                                                kind: TextItemKind::Assistant,
+                                            });
+                                        }
+                                        ItemKind::Reasoning => {
+                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
+                                                item_id: payload.item.item_id,
+                                                kind: TextItemKind::Reasoning,
+                                            });
+                                        }
                                         ItemKind::CommandExecution => {
                                             if let Ok(payload) =
                                                 serde_json::from_value::<CommandExecutionPayload>(
@@ -1187,7 +1205,22 @@ async fn run_worker_inner(
                             }
                             "item/agentMessage/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
-                                    let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
+                                    if let Some(item_id) = payload.context.item_id {
+                                        tracing::debug!(
+                                            item_id = %item_id,
+                                            delta_len = payload.delta.len(),
+                                            stream_index = ?payload.stream_index,
+                                            channel = ?payload.channel,
+                                            "server assistant delta"
+                                        );
+                                        let _ = event_tx.send(WorkerEvent::TextItemDelta {
+                                            item_id,
+                                            kind: TextItemKind::Assistant,
+                                            delta: payload.delta,
+                                        });
+                                    } else {
+                                        let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
+                                    }
                                 }
                             }
                             "item/commandExecution/outputDelta" => {
@@ -1213,11 +1246,31 @@ async fn run_worker_inner(
                             }
                             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
-                                    let _ = event_tx.send(WorkerEvent::ReasoningDelta(payload.delta));
+                                    if let Some(item_id) = payload.context.item_id {
+                                        tracing::debug!(
+                                            item_id = %item_id,
+                                            delta_len = payload.delta.len(),
+                                            stream_index = ?payload.stream_index,
+                                            channel = ?payload.channel,
+                                            "server reasoning delta"
+                                        );
+                                        let _ = event_tx.send(WorkerEvent::TextItemDelta {
+                                            item_id,
+                                            kind: TextItemKind::Reasoning,
+                                            delta: payload.delta,
+                                        });
+                                    } else {
+                                        let _ = event_tx.send(WorkerEvent::ReasoningDelta(payload.delta));
+                                    }
                                 }
                             }
                             "item/completed" => {
                                 if let ServerEvent::ItemCompleted(payload) = event {
+                                    tracing::debug!(
+                                        item_id = %payload.item.item_id,
+                                        item_kind = ?payload.item.item_kind,
+                                        "server item completed"
+                                    );
                                     if let Some(text) = completed_agent_message_text(&payload) {
                                         latest_completed_agent_message = Some(text);
                                     }
@@ -1228,6 +1281,11 @@ async fn run_worker_inner(
                             }
                             "turn/completed" => {
                                 if let ServerEvent::TurnCompleted(payload) = event {
+                                    tracing::debug!(
+                                        turn_id = %payload.turn.turn_id,
+                                        status = ?payload.turn.status,
+                                        "server turn completed"
+                                    );
                                     active_turn_id = None;
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
@@ -1483,6 +1541,7 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
     match payload.item {
         ItemEnvelope {
+            item_id,
             item_kind: ItemKind::AgentMessage,
             payload,
             ..
@@ -1494,10 +1553,20 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 .filter(|text| !text.is_empty())
                 .map(ToOwned::to_owned);
             if let Some(text) = text {
-                let _ = event_tx.send(WorkerEvent::AssistantMessageCompleted(text));
+                tracing::debug!(
+                    item_id = %item_id,
+                    final_text_len = text.len(),
+                    "emitting assistant item completion"
+                );
+                let _ = event_tx.send(WorkerEvent::TextItemCompleted {
+                    item_id,
+                    kind: TextItemKind::Assistant,
+                    final_text: text,
+                });
             }
         }
         ItemEnvelope {
+            item_id,
             item_kind: ItemKind::Reasoning,
             payload,
             ..
@@ -1509,7 +1578,16 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 .filter(|text| !text.is_empty())
                 .map(ToOwned::to_owned);
             if let Some(text) = text {
-                let _ = event_tx.send(WorkerEvent::ReasoningCompleted(text));
+                tracing::debug!(
+                    item_id = %item_id,
+                    final_text_len = text.len(),
+                    "emitting reasoning item completion"
+                );
+                let _ = event_tx.send(WorkerEvent::TextItemCompleted {
+                    item_id,
+                    kind: TextItemKind::Reasoning,
+                    final_text: text,
+                });
             }
         }
         ItemEnvelope {

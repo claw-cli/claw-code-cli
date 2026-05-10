@@ -3,11 +3,6 @@ use std::io;
 use std::io::Write;
 
 use crate::history_cell::ScrollbackLine;
-use crate::history_cell::ScrollbackWrapPolicy;
-use crate::wrapping::RtOptions;
-use crate::wrapping::adaptive_wrap_line;
-use crate::wrapping::line_contains_url_like;
-use crate::wrapping::line_has_mixed_url_and_non_url_tokens;
 use crossterm::Command;
 use crossterm::cursor::MoveDown;
 use crossterm::cursor::MoveTo;
@@ -88,39 +83,17 @@ where
     let last_cursor_pos = terminal.last_known_cursor_pos;
     let writer = terminal.backend_mut();
 
-    // Pre-wrap lines for terminal scrollback. Three paths:
-    //
-    // - URL-only-ish lines are kept intact (no hard newlines inserted) so that
-    //   terminal emulators can match them as clickable links. The
-    //   terminal will character-wrap these lines at the viewport
-    //   boundary.
-    // - Mixed lines (URL + non-URL prose) are adaptively wrapped so
-    //   non-URL text still wraps naturally while URL tokens remain
-    //   unsplit.
-    // - Non-URL lines also flow through adaptive wrapping; behavior is
-    //   equivalent to standard wrapping when no URL is present.
     let screen_wrap_width = usize::from(screen_size.width.max(1));
-    let wrap_width = screen_wrap_width.min(80);
     let mut wrapped = Vec::new();
     let mut wrapped_rows = 0usize;
 
     for scrollback_line in &lines {
-        let line_wrapped = match scrollback_line.wrap_policy {
-            ScrollbackWrapPolicy::NoAdditionalWrapLimit => vec![scrollback_line.line.clone()],
-            ScrollbackWrapPolicy::LimitToEightyColumns => {
-                let line = &scrollback_line.line;
-                if line_contains_url_like(line) && !line_has_mixed_url_and_non_url_tokens(line) {
-                    vec![line.clone()]
-                } else {
-                    adaptive_wrap_line(line, RtOptions::new(wrap_width))
-                }
-            }
-        };
-        wrapped_rows += line_wrapped
-            .iter()
-            .map(|wrapped_line| wrapped_line.width().max(1).div_ceil(screen_wrap_width))
-            .sum::<usize>();
-        wrapped.extend(line_wrapped);
+        wrapped_rows += scrollback_line
+            .line
+            .width()
+            .max(1)
+            .div_ceil(screen_wrap_width);
+        wrapped.push(scrollback_line.line.clone());
     }
     let wrapped_lines = wrapped_rows as u16;
 
@@ -700,69 +673,6 @@ mod tests {
         assert!(
             !rows.iter().any(|r| r.trim_end() == "│"),
             "unexpected orphan prefix row, rows: {rows:?}"
-        );
-    }
-
-    #[test]
-    fn vt100_prefixed_mixed_url_line_wraps_suffix_words_together() {
-        let width: u16 = 24;
-        let height: u16 = 10;
-        let backend = VT100Backend::new(width, height);
-        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-        let viewport = Rect::new(0, height - 1, width, 1);
-        term.set_viewport_area(viewport);
-
-        let url = "https://example.test/path/abcdef12345";
-        let line: Line<'static> = Line::from(vec![
-            "  │ ".into(),
-            "see ".into(),
-            url.into(),
-            " tail words".into(),
-        ]);
-
-        insert_history_lines(&mut term, vec![line.into()]).expect("insert mixed history");
-
-        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
-        assert!(
-            rows.iter().any(|r| r.contains("│ see")),
-            "expected prefixed prose before URL, rows: {rows:?}"
-        );
-        assert!(
-            rows.iter().any(|r| r.contains("tail words")),
-            "expected suffix words to wrap as a phrase, rows: {rows:?}"
-        );
-    }
-
-    #[test]
-    fn vt100_non_ai_history_line_does_not_apply_eighty_column_wrap_limit() {
-        let width: u16 = 24;
-        let height: u16 = 10;
-        let backend = VT100Backend::new(width, height);
-        let mut term = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
-        let viewport = Rect::new(0, height - 1, width, 1);
-        term.set_viewport_area(viewport);
-
-        let url = "https://example.test/path/abcdef12345";
-        let line: Line<'static> = Line::from(vec![
-            "  │ ".into(),
-            "see ".into(),
-            url.into(),
-            " tail words".into(),
-        ]);
-
-        insert_history_lines(
-            &mut term,
-            vec![ScrollbackLine::new(
-                line,
-                ScrollbackWrapPolicy::NoAdditionalWrapLimit,
-            )],
-        )
-        .expect("insert non-ai history");
-
-        let rows: Vec<String> = term.backend().vt100().screen().rows(0, width).collect();
-        assert!(
-            rows.iter().any(|r| r.contains("ta")) && rows.iter().any(|r| r.contains("il words")),
-            "expected terminal-width wrapping instead of forced 80-column wrapping, rows: {rows:?}"
         );
     }
 

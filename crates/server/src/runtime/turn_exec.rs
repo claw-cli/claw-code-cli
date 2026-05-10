@@ -13,6 +13,48 @@ struct PendingToolCall {
     command: String,
 }
 
+async fn complete_reasoning_item(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    item_id: ItemId,
+    item_seq: u64,
+    text: String,
+) {
+    runtime
+        .complete_item(
+            session_id,
+            turn_id,
+            item_id,
+            item_seq,
+            ItemKind::Reasoning,
+            TurnItem::Reasoning(TextItem { text: text.clone() }),
+            serde_json::json!({ "title": "Reasoning", "text": text }),
+        )
+        .await;
+}
+
+async fn complete_assistant_item(
+    runtime: &Arc<ServerRuntime>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    item_id: ItemId,
+    item_seq: u64,
+    text: String,
+) {
+    runtime
+        .complete_item(
+            session_id,
+            turn_id,
+            item_id,
+            item_seq,
+            ItemKind::AgentMessage,
+            TurnItem::AgentMessage(TextItem { text: text.clone() }),
+            serde_json::json!({ "title": "Assistant", "text": text }),
+        )
+        .await;
+}
+
 fn is_unified_exec_tool(name: &str) -> bool {
     matches!(name, "exec_command" | "write_stdin")
 }
@@ -53,52 +95,6 @@ fn command_execution_item_id_for_progress(
         .get(tool_use_id)
         .filter(|pending| pending.is_command_execution)
         .map(|pending| pending.item_id)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn command_progress_uses_command_execution_item_id() {
-        let command_item_id = ItemId::new();
-        let tool_item_id = ItemId::new();
-        let mut pending_tool_calls = HashMap::new();
-        pending_tool_calls.insert(
-            "exec".to_string(),
-            PendingToolCall {
-                item_id: command_item_id,
-                item_seq: 1,
-                input: serde_json::json!({}),
-                is_command_execution: true,
-                command: "cargo test".to_string(),
-            },
-        );
-        pending_tool_calls.insert(
-            "read".to_string(),
-            PendingToolCall {
-                item_id: tool_item_id,
-                item_seq: 2,
-                input: serde_json::json!({}),
-                is_command_execution: false,
-                command: String::new(),
-            },
-        );
-
-        assert_eq!(
-            command_execution_item_id_for_progress(&pending_tool_calls, "exec"),
-            Some(command_item_id)
-        );
-        assert_eq!(
-            command_execution_item_id_for_progress(&pending_tool_calls, "read"),
-            None
-        );
-        assert_eq!(
-            command_execution_item_id_for_progress(&pending_tool_calls, "missing"),
-            None
-        );
-    }
 }
 
 impl ServerRuntime {
@@ -238,49 +234,54 @@ impl ServerRuntime {
                                 Some((item_id, item_seq, reasoning_text.clone()));
                         }
                     }
-                    QueryEvent::ToolUseStart { id, name, input } => {
-                        tool_names_by_id.insert(id.clone(), name.clone());
-                        if let (Some(item_id), Some(item_seq)) =
-                            (assistant_item_id.take(), assistant_item_seq.take())
-                        {
-                            runtime
-                                .complete_item(
-                                    session_id,
-                                    turn_for_events.turn_id,
-                                    item_id,
-                                    item_seq,
-                                    ItemKind::AgentMessage,
-                                    TurnItem::AgentMessage(TextItem {
-                                        text: assistant_text.clone(),
-                                    }),
-                                    serde_json::json!({
-                                        "title": "Assistant",
-                                        "text": assistant_text,
-                                    }),
-                                )
-                                .await;
-                            assistant_text.clear();
-                        }
+                    QueryEvent::ReasoningCompleted => {
                         if let (Some(item_id), Some(item_seq)) =
                             (reasoning_item_id.take(), reasoning_item_seq.take())
                         {
-                            runtime
-                                .complete_item(
-                                    session_id,
-                                    turn_for_events.turn_id,
-                                    item_id,
-                                    item_seq,
-                                    ItemKind::Reasoning,
-                                    TurnItem::Reasoning(TextItem {
-                                        text: reasoning_text.clone(),
-                                    }),
-                                    serde_json::json!({
-                                        "title": "Reasoning",
-                                        "text": reasoning_text,
-                                    }),
-                                )
-                                .await;
+                            if let Ok(mut session) = event_session_arc.try_lock() {
+                                session.deferred_reasoning.take();
+                            }
+                            complete_reasoning_item(
+                                &runtime,
+                                session_id,
+                                turn_for_events.turn_id,
+                                item_id,
+                                item_seq,
+                                reasoning_text.clone(),
+                            )
+                            .await;
                             reasoning_text.clear();
+                        }
+                    }
+                    QueryEvent::ToolUseStart { id, name, input } => {
+                        tool_names_by_id.insert(id.clone(), name.clone());
+                        if let (Some(item_id), Some(item_seq)) =
+                            (reasoning_item_id.take(), reasoning_item_seq.take())
+                        {
+                            complete_reasoning_item(
+                                &runtime,
+                                session_id,
+                                turn_for_events.turn_id,
+                                item_id,
+                                item_seq,
+                                reasoning_text.clone(),
+                            )
+                            .await;
+                            reasoning_text.clear();
+                        }
+                        if let (Some(item_id), Some(item_seq)) =
+                            (assistant_item_id.take(), assistant_item_seq.take())
+                        {
+                            complete_assistant_item(
+                                &runtime,
+                                session_id,
+                                turn_for_events.turn_id,
+                                item_id,
+                                item_seq,
+                                assistant_text.clone(),
+                            )
+                            .await;
+                            assistant_text.clear();
                         }
                         let is_command_execution = is_unified_exec_tool(&name);
                         let command = command_display_from_input(&name, &input);
@@ -556,35 +557,31 @@ impl ServerRuntime {
             // and completes them; if they're already None we must skip to avoid persisting duplicates.
             if let Some((item_id, item_seq, text)) = {
                 let mut session = event_session_arc.lock().await;
-                session.deferred_assistant.take()
+                session.deferred_reasoning.take()
             } {
-                runtime
-                    .complete_item(
-                        session_id,
-                        turn_for_events.turn_id,
-                        item_id,
-                        item_seq,
-                        ItemKind::AgentMessage,
-                        TurnItem::AgentMessage(TextItem { text: text.clone() }),
-                        serde_json::json!({ "title": "Assistant", "text": text }),
-                    )
-                    .await;
+                complete_reasoning_item(
+                    &runtime,
+                    session_id,
+                    turn_for_events.turn_id,
+                    item_id,
+                    item_seq,
+                    text,
+                )
+                .await;
             }
             if let Some((item_id, item_seq, text)) = {
                 let mut session = event_session_arc.lock().await;
-                session.deferred_reasoning.take()
+                session.deferred_assistant.take()
             } {
-                runtime
-                    .complete_item(
-                        session_id,
-                        turn_for_events.turn_id,
-                        item_id,
-                        item_seq,
-                        ItemKind::Reasoning,
-                        TurnItem::Reasoning(TextItem { text: text.clone() }),
-                        serde_json::json!({ "title": "Reasoning", "text": text }),
-                    )
-                    .await;
+                complete_assistant_item(
+                    &runtime,
+                    session_id,
+                    turn_for_events.turn_id,
+                    item_id,
+                    item_seq,
+                    text,
+                )
+                .await;
             }
             latest_usage
         });
@@ -1019,5 +1016,51 @@ impl ServerRuntime {
             },
         ))
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn command_progress_uses_command_execution_item_id() {
+        let command_item_id = ItemId::new();
+        let tool_item_id = ItemId::new();
+        let mut pending_tool_calls = HashMap::new();
+        pending_tool_calls.insert(
+            "exec".to_string(),
+            PendingToolCall {
+                item_id: command_item_id,
+                item_seq: 1,
+                input: serde_json::json!({}),
+                is_command_execution: true,
+                command: "cargo test".to_string(),
+            },
+        );
+        pending_tool_calls.insert(
+            "read".to_string(),
+            PendingToolCall {
+                item_id: tool_item_id,
+                item_seq: 2,
+                input: serde_json::json!({}),
+                is_command_execution: false,
+                command: String::new(),
+            },
+        );
+
+        assert_eq!(
+            command_execution_item_id_for_progress(&pending_tool_calls, "exec"),
+            Some(command_item_id)
+        );
+        assert_eq!(
+            command_execution_item_id_for_progress(&pending_tool_calls, "read"),
+            None
+        );
+        assert_eq!(
+            command_execution_item_id_for_progress(&pending_tool_calls, "missing"),
+            None
+        );
     }
 }

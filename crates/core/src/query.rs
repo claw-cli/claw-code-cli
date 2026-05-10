@@ -67,6 +67,8 @@ pub enum QueryEvent {
     TextDelta(String),
     /// Incremental reasoning text from the assistant.
     ReasoningDelta(String),
+    /// Current reasoning block completed.
+    ReasoningCompleted,
     /// Incremental token usage update from the provider stream.
     /// TODO: Review the mechanism from the OpenAI API / Anthropic API documentation.
     UsageDelta {
@@ -609,6 +611,9 @@ pub async fn query(
                 Ok(StreamEvent::ReasoningDelta { text, .. }) => {
                     reasoning_text.push_str(&text);
                     emit(QueryEvent::ReasoningDelta(text));
+                }
+                Ok(StreamEvent::ReasoningDone { .. }) => {
+                    emit(QueryEvent::ReasoningCompleted);
                 }
                 Ok(StreamEvent::ToolCallStart {
                     id, name, input, ..
