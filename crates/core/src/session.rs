@@ -212,7 +212,12 @@ mod tests {
     #[test]
     fn session_config_default_values() {
         let config = SessionConfig::default();
-        assert_eq!(config.permission_mode, PermissionMode::AutoApprove);
+        assert_eq!(config.permission_profile.preset, PermissionPreset::Default);
+        assert_eq!(
+            config.permission_mode,
+            config.permission_profile.permission_mode()
+        );
+        assert_eq!(config.permission_mode, PermissionMode::Interactive);
     }
 
     #[test]

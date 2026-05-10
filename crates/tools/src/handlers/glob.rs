@@ -62,7 +62,7 @@ impl ToolHandler for GlobHandler {
             }
         }
 
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|(_, mtime)| std::cmp::Reverse(*mtime));
 
         if entries.is_empty() {
             return Ok(Box::new(FunctionToolOutput::success("(no matches)")));
