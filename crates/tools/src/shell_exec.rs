@@ -244,6 +244,7 @@ fn resolve_shell(shell: Option<&str>, login: bool) -> ShellSpec {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn platform_shell_program(login: bool) -> &'static str {
     platform_shell(login).program
 }

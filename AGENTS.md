@@ -25,6 +25,7 @@ This repository is a Rust-based coding agent, currently called `devo`.
 - When running Rust-related commands (e.g., `just fix` or `cargo test`), allow them to complete without interruption, do not try to kill them using the PID. Slow execution due to Rust’s locking behavior is expected.
 - Agent can not apply patch to a file more than 800 lines, cause windows patch length limit, agent would failed to apply patch.
 - Do not introduce trivial wrapper functions — call the underlying function directly unless reuse or abstraction is clearly justified.
+- Exclude the target folder when using glob or grep, since it contains a large number of Rust build artifacts.
 
 ## Tests
 

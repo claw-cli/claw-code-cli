@@ -7,12 +7,14 @@ use crate::errors::ToolDispatchError;
 use crate::invocation::{ToolInvocation, ToolOutput};
 use crate::tool_handler::ToolHandler;
 use crate::tool_spec::{ToolExecutionMode, ToolSpec};
+use crate::unified_exec::store::ProcessStore;
 
 #[derive(Clone)]
 pub struct ToolRegistry {
     pub(crate) handlers: HashMap<String, Arc<dyn ToolHandler>>,
     pub(crate) specs: Vec<ToolSpec>,
     pub(crate) spec_index: HashMap<String, usize>,
+    pub(crate) unified_exec_store: Option<Arc<ProcessStore>>,
 }
 
 impl ToolRegistry {
@@ -21,6 +23,7 @@ impl ToolRegistry {
             handlers: HashMap::new(),
             specs: Vec::new(),
             spec_index: HashMap::new(),
+            unified_exec_store: None,
         }
     }
 
@@ -64,7 +67,11 @@ impl ToolRegistry {
             .map(|spec| ToolDefinition {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
-                input_schema: spec.input_schema.to_json_value(),
+                input_schema: unified_exec_input_schema(
+                    &spec.name,
+                    spec.input_schema.to_json_value(),
+                ),
+                output_schema: unified_exec_output_schema(&spec.name),
             })
             .collect()
     }
@@ -80,6 +87,128 @@ impl ToolRegistry {
     pub fn len(&self) -> usize {
         self.handlers.len()
     }
+
+    pub async fn terminate_unified_exec_processes(&self) {
+        if let Some(store) = &self.unified_exec_store {
+            store.terminate_all().await;
+        }
+    }
+}
+
+fn unified_exec_input_schema(tool_name: &str, mut schema: serde_json::Value) -> serde_json::Value {
+    if tool_name != "exec_command" {
+        return schema;
+    }
+
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return schema;
+    };
+
+    properties.insert(
+        "sandbox_permissions".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "description": "Sandbox permissions for the command. Use \"with_additional_permissions\" to request additional sandboxed filesystem or network permissions (preferred), or \"require_escalated\" to request running without sandbox restrictions; defaults to \"use_default\".",
+            "enum": ["use_default", "require_escalated", "with_additional_permissions"]
+        }),
+    );
+    properties.insert(
+        "additional_permissions".to_string(),
+        additional_permissions_schema(),
+    );
+    properties.insert(
+        "justification".to_string(),
+        serde_json::json!({
+            "type": "string",
+            "description": "Only set if sandbox_permissions is \"require_escalated\".\nRequest approval from the user to run this command outside the sandbox.\nPhrased as a simple question that summarizes the purpose of the\ncommand as it relates to the task at hand - e.g. 'Do you want to\nfetch and pull the latest version of this git branch?'"
+        }),
+    );
+    properties.insert(
+        "prefix_rule".to_string(),
+        serde_json::json!({
+            "type": "array",
+            "description": "Only specify when sandbox_permissions is `require_escalated`.\nSuggest a prefix command pattern that will allow you to fulfill similar requests from the user in the future.\nShould be a short but reasonable prefix, e.g. [\"git\", \"pull\"] or [\"uv\", \"run\"] or [\"pytest\"].",
+            "items": { "type": "string" }
+        }),
+    );
+
+    schema
+}
+
+fn additional_permissions_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "network": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to true to request network access."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "file_system": {
+                "type": "object",
+                "properties": {
+                    "read": {
+                        "type": "array",
+                        "description": "Absolute paths to grant read access to.",
+                        "items": { "type": "string" }
+                    },
+                    "write": {
+                        "type": "array",
+                        "description": "Absolute paths to grant write access to.",
+                        "items": { "type": "string" }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn unified_exec_output_schema(tool_name: &str) -> Option<serde_json::Value> {
+    if tool_name != "exec_command" && tool_name != "write_stdin" {
+        return None;
+    }
+
+    Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "chunk_id": {
+                "type": "string",
+                "description": "Chunk identifier included when the response reports one."
+            },
+            "wall_time_seconds": {
+                "type": "number",
+                "description": "Elapsed wall time spent waiting for output in seconds."
+            },
+            "exit_code": {
+                "type": "number",
+                "description": "Process exit code when the command finished during this call."
+            },
+            "session_id": {
+                "type": "number",
+                "description": "Session identifier to pass to write_stdin when the process is still running."
+            },
+            "original_token_count": {
+                "type": "number",
+                "description": "Approximate token count before output truncation."
+            },
+            "output": {
+                "type": "string",
+                "description": "Command output text, possibly truncated."
+            }
+        },
+        "required": ["wall_time_seconds", "output"],
+        "additionalProperties": false
+    }))
 }
 
 impl Default for ToolRegistry {
@@ -92,6 +221,7 @@ pub struct ToolRegistryBuilder {
     handlers: HashMap<String, Arc<dyn ToolHandler>>,
     specs: Vec<ToolSpec>,
     spec_index: HashMap<String, usize>,
+    unified_exec_store: Option<Arc<ProcessStore>>,
 }
 
 impl ToolRegistryBuilder {
@@ -100,6 +230,7 @@ impl ToolRegistryBuilder {
             handlers: HashMap::new(),
             specs: Vec::new(),
             spec_index: HashMap::new(),
+            unified_exec_store: None,
         }
     }
 
@@ -113,11 +244,16 @@ impl ToolRegistryBuilder {
         self.handlers.insert(name.to_string(), handler);
     }
 
+    pub fn set_unified_exec_store(&mut self, store: Arc<ProcessStore>) {
+        self.unified_exec_store = Some(store);
+    }
+
     pub fn build(self) -> ToolRegistry {
         ToolRegistry {
             handlers: self.handlers,
             specs: self.specs,
             spec_index: self.spec_index,
+            unified_exec_store: self.unified_exec_store,
         }
     }
 }
@@ -192,6 +328,62 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
         assert_eq!(defs[0].description, "test");
+    }
+
+    #[test]
+    fn registry_adds_output_schema_for_unified_exec_tools() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.push_spec(ToolSpec {
+            name: "exec_command".into(),
+            description: "exec".into(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Mixed,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![],
+            supports_parallel: true,
+        });
+
+        let registry = builder.build();
+        let defs = registry.tool_definitions();
+
+        assert!(defs[0].output_schema.is_some());
+    }
+
+    #[test]
+    fn registry_adds_permission_fields_for_exec_command() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.push_spec(ToolSpec {
+            name: "exec_command".into(),
+            description: "exec".into(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Mixed,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![],
+            supports_parallel: true,
+        });
+
+        let registry = builder.build();
+        let defs = registry.tool_definitions();
+        let properties = defs[0]
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("object schema should have properties");
+
+        assert!(properties.contains_key("sandbox_permissions"));
+        assert!(properties.contains_key("additional_permissions"));
+        assert!(properties.contains_key("justification"));
+        assert!(properties.contains_key("prefix_rule"));
+        assert_eq!(
+            properties["additional_permissions"]["properties"]["network"]["properties"]["enabled"]
+                ["type"],
+            "boolean"
+        );
+        assert_eq!(
+            properties["additional_permissions"]["properties"]["file_system"]["properties"]["read"]
+                ["items"]["type"],
+            "string"
+        );
     }
 
     #[tokio::test]

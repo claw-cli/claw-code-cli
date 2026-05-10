@@ -244,6 +244,28 @@ async fn wait_for_turn_completed(
     Ok(())
 }
 
+async fn wait_for_approval_request(
+    notifications_rx: &mut mpsc::UnboundedReceiver<serde_json::Value>,
+) -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        while let Some(value) = notifications_rx.recv().await {
+            if value.get("method") == Some(&serde_json::json!("item/started"))
+                && value
+                    .get("params")
+                    .and_then(|params| params.get("item"))
+                    .and_then(|item| item.get("item_kind"))
+                    == Some(&serde_json::json!("approval_request"))
+            {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("notification channel closed before approval request")
+    })
+    .await
+    .context("timed out waiting for approval request")??;
+    Ok(())
+}
+
 fn user_request_text(request: &ModelRequest) -> Result<String> {
     let text = all_user_request_texts(request).join("\n");
     (!text.is_empty())
@@ -266,6 +288,80 @@ fn all_user_request_texts(request: &ModelRequest) -> Vec<String> {
         .collect()
 }
 
+fn auto_review_registry(calls: Arc<std::sync::atomic::AtomicUsize>) -> Arc<ToolRegistry> {
+    let mut builder = ToolRegistryBuilder::new();
+    builder.register_handler("mutating_tool", Arc::new(RecordingMutatingTool { calls }));
+    builder.push_spec(ToolSpec {
+        name: "mutating_tool".into(),
+        description: "Mutates test state.".into(),
+        input_schema: JsonSchema::object(std::collections::BTreeMap::new(), None, None),
+        output_mode: ToolOutputMode::Text,
+        execution_mode: ToolExecutionMode::Mutating,
+        capability_tags: vec![devo_tools::ToolCapabilityTag::WriteFiles],
+        supports_parallel: false,
+    });
+    Arc::new(builder.build())
+}
+
+async fn update_permissions_to_auto_review(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_core::SessionId,
+) -> Result<()> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 3,
+                "method": "session/permissions/update",
+                "params": {
+                    "session_id": session_id,
+                    "preset": "auto-review"
+                }
+            }),
+        )
+        .await
+        .context("session/permissions/update response")?;
+    let result: SuccessResponse<devo_server::SessionPermissionsUpdateResult> =
+        serde_json::from_value(response)?;
+    assert_eq!(
+        result.result.preset,
+        devo_protocol::PermissionPreset::AutoReview
+    );
+    Ok(())
+}
+
+async fn start_auto_review_turn(
+    runtime: &Arc<ServerRuntime>,
+    connection_id: u64,
+    session_id: devo_core::SessionId,
+) -> Result<()> {
+    let response = runtime
+        .handle_incoming(
+            connection_id,
+            serde_json::json!({
+                "id": 4,
+                "method": "turn/start",
+                "params": {
+                    "session_id": session_id,
+                    "input": [
+                        { "type": "text", "text": "Use the mutating tool." }
+                    ],
+                    "model": null,
+                    "thinking": null,
+                    "sandbox": null,
+                    "approval_policy": null,
+                    "cwd": null
+                }
+            }),
+        )
+        .await
+        .context("turn/start auto-review response")?;
+    let result: SuccessResponse<devo_server::TurnStartResult> = serde_json::from_value(response)?;
+    assert_eq!(result.result.status, devo_core::TurnStatus::Running);
+    Ok(())
+}
+
 struct BlockingReadOnlyTool {
     started: Arc<Notify>,
     release: Arc<Notify>,
@@ -285,6 +381,107 @@ impl ToolHandler for BlockingReadOnlyTool {
         self.started.notify_one();
         self.release.notified().await;
         Ok(Box::new(FunctionToolOutput::success("released")))
+    }
+}
+
+struct RecordingMutatingTool {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl ToolHandler for RecordingMutatingTool {
+    fn tool_kind(&self) -> devo_tools::ToolHandlerKind {
+        devo_tools::ToolHandlerKind::Write
+    }
+
+    async fn handle(
+        &self,
+        _invocation: ToolInvocation,
+        _progress: Option<devo_tools::events::ToolProgressSender>,
+    ) -> Result<Box<dyn ToolOutput>, devo_tools::ToolExecutionError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(FunctionToolOutput::success("mutated")))
+    }
+}
+
+struct AutoReviewProvider {
+    decision: &'static str,
+    reviewer_calls: Arc<std::sync::atomic::AtomicUsize>,
+    stream_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl ModelProviderSDK for AutoReviewProvider {
+    async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        self.reviewer_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ModelResponse {
+            id: "review-1".into(),
+            content: vec![ResponseContent::Text(format!(
+                r#"{{"decision":"{}","rationale":"test decision"}}"#,
+                self.decision
+            ))],
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Usage::default(),
+            metadata: ResponseMetadata::default(),
+        })
+    }
+
+    async fn completion_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>> {
+        let stream_call = self
+            .stream_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let events = if stream_call == 0 {
+            vec![
+                Ok(StreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "tool-1".into(),
+                    name: "mutating_tool".into(),
+                    input: json!({}),
+                }),
+                Ok(StreamEvent::ToolCallInputDelta {
+                    index: 0,
+                    partial_json: "{}".into(),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-1".into(),
+                        content: vec![ResponseContent::ToolUse {
+                            id: "tool-1".into(),
+                            name: "mutating_tool".into(),
+                            input: json!({}),
+                        }],
+                        stop_reason: Some(StopReason::ToolUse),
+                        usage: Usage::default(),
+                        metadata: ResponseMetadata::default(),
+                    },
+                }),
+            ]
+        } else {
+            vec![
+                Ok(StreamEvent::TextDelta {
+                    index: 0,
+                    text: "Done.".into(),
+                }),
+                Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-2".into(),
+                        content: vec![ResponseContent::Text("Done.".into())],
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                        metadata: ResponseMetadata::default(),
+                    },
+                }),
+            ]
+        };
+        Ok(Box::pin(stream::iter(events)))
+    }
+
+    fn name(&self) -> &str {
+        "auto-review-test-provider"
     }
 }
 
@@ -633,6 +830,96 @@ async fn turn_start_rejects_missing_skill_references() -> Result<()> {
 
     assert_eq!(error.error.code, ProtocolErrorCode::InvalidParams);
     assert!(error.error.message.contains("skill not found"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_approval_executes_mutating_tool_without_user_prompt() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let user_skill_root = temp_dir.path().join("user-skills");
+    let workspace_root = temp_dir.path().join("workspace");
+    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = build_runtime_with_registry(
+        temp_dir.path(),
+        user_skill_root,
+        Some(workspace_root.clone()),
+        Arc::new(AutoReviewProvider {
+            decision: "approve",
+            reviewer_calls: Arc::clone(&reviewer_calls),
+            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+        auto_review_registry(Arc::clone(&tool_calls)),
+    );
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
+    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
+
+    start_auto_review_turn(&runtime, connection_id, session_id).await?;
+    wait_for_turn_completed(&mut notifications_rx).await?;
+
+    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_deny_blocks_mutating_tool() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let user_skill_root = temp_dir.path().join("user-skills");
+    let workspace_root = temp_dir.path().join("workspace");
+    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = build_runtime_with_registry(
+        temp_dir.path(),
+        user_skill_root,
+        Some(workspace_root.clone()),
+        Arc::new(AutoReviewProvider {
+            decision: "deny",
+            reviewer_calls: Arc::clone(&reviewer_calls),
+            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+        auto_review_registry(Arc::clone(&tool_calls)),
+    );
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
+    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
+
+    start_auto_review_turn(&runtime, connection_id, session_id).await?;
+    wait_for_turn_completed(&mut notifications_rx).await?;
+
+    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn auto_review_uncertain_falls_back_to_user_approval() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let user_skill_root = temp_dir.path().join("user-skills");
+    let workspace_root = temp_dir.path().join("workspace");
+    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reviewer_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = build_runtime_with_registry(
+        temp_dir.path(),
+        user_skill_root,
+        Some(workspace_root.clone()),
+        Arc::new(AutoReviewProvider {
+            decision: "uncertain",
+            reviewer_calls: Arc::clone(&reviewer_calls),
+            stream_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }),
+        auto_review_registry(Arc::clone(&tool_calls)),
+    );
+    let (connection_id, mut notifications_rx) = initialize_connection(&runtime).await?;
+    let session_id = start_session(&runtime, connection_id, &workspace_root).await?;
+    update_permissions_to_auto_review(&runtime, connection_id, session_id).await?;
+
+    start_auto_review_turn(&runtime, connection_id, session_id).await?;
+    wait_for_approval_request(&mut notifications_rx).await?;
+
+    assert_eq!(reviewer_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(tool_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     Ok(())
 }
 

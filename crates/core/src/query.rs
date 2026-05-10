@@ -67,6 +67,8 @@ pub enum QueryEvent {
     TextDelta(String),
     /// Incremental reasoning text from the assistant.
     ReasoningDelta(String),
+    /// Current reasoning block completed.
+    ReasoningCompleted,
     /// Incremental token usage update from the provider stream.
     /// TODO: Review the mechanism from the OpenAI API / Anthropic API documentation.
     UsageDelta {
@@ -610,6 +612,9 @@ pub async fn query(
                     reasoning_text.push_str(&text);
                     emit(QueryEvent::ReasoningDelta(text));
                 }
+                Ok(StreamEvent::ReasoningDone { .. }) => {
+                    emit(QueryEvent::ReasoningCompleted);
+                }
                 Ok(StreamEvent::ToolCallStart {
                     id, name, input, ..
                 }) => {
@@ -933,7 +938,7 @@ mod tests {
     use devo_protocol::StreamEvent;
     use devo_protocol::Usage;
     use devo_provider::ModelProviderSDK;
-    use devo_safety::legacy_permissions::PermissionMode;
+    use devo_safety::PermissionMode;
     use devo_tools::ToolRegistry;
     use devo_tools::ToolRuntime;
     use devo_tools::errors::ToolExecutionError;
@@ -1272,8 +1277,8 @@ mod tests {
             supports_parallel: false,
         });
         let registry = Arc::new(builder.build());
-        let deny_checker = PermissionChecker::new(|name| {
-            let n = name.to_string();
+        let deny_checker = PermissionChecker::new(|request| {
+            let n = request.tool_name;
             Box::pin(async move { Err(format!("{n} denied")) })
         });
         let runtime = ToolRuntime::new(Arc::clone(&registry), deny_checker);

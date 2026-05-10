@@ -24,6 +24,7 @@ use crate::chatwidget::TuiSessionState;
 use crate::events::WorkerEvent;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_onboarding_config;
+use crate::onboarding::save_project_permission_preset;
 use crate::onboarding::save_thinking_selection;
 use crate::render::renderable::Renderable;
 use crate::tui::Tui;
@@ -62,6 +63,19 @@ struct InteractiveLoopState {
 enum LoopAction {
     Continue,
     ClearAndExit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtrlCKeyAction {
+    PromptInterruptWithEsc,
+    PromptExitConfirmation,
+    Exit,
+}
+
+struct AppCommandContext<'a, M: ModelCatalog> {
+    model_catalog: &'a M,
+    default_provider: ProviderWireApi,
+    project_config_key: &'a str,
 }
 
 /// RAII guard that restores terminal modes exactly once after the TUI loop ends.
@@ -136,6 +150,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
         cwd: initial_session.cwd.clone(),
         server_log_level: config.server_log_level,
         thinking_selection: initial_session.thinking_selection.clone(),
+        permission_preset: initial_session.permission_preset,
     });
 
     // App events come from widgets and request host-level actions such as commands or exit.
@@ -158,6 +173,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
 
     let model = resolve_initial_model(&initial_session, &config.model_catalog);
     let cwd = initial_session.cwd.clone();
+    let project_config_key = devo_core::project_config_key(&cwd);
     let initial_provider = model.provider_wire_api();
     let initial_reasoning_effort = model
         .resolve_thinking_selection(initial_session.thinking_selection.as_deref())
@@ -178,6 +194,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
             reasoning_effort: initial_reasoning_effort,
         },
         initial_thinking_selection: initial_session.thinking_selection.clone(),
+        initial_permission_preset: initial_session.permission_preset,
         initial_user_message: None,
         enhanced_keys_supported: tui.enhanced_keys_supported(),
         is_first_run: config.saved_models.is_empty(),
@@ -218,8 +235,11 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
                     &mut chat_widget,
                     &mut tui,
                     &mut loop_state,
-                    &config.model_catalog,
-                    initial_session.provider,
+                    &AppCommandContext {
+                        model_catalog: &config.model_catalog,
+                        default_provider: initial_session.provider,
+                        project_config_key: &project_config_key,
+                    },
                 )? {
                     LoopAction::Continue => {}
                     LoopAction::ClearAndExit => {
@@ -278,7 +298,7 @@ fn clear_before_exit(tui: &mut Tui) -> Result<()> {
 fn handle_tui_event(
     tui_event: Option<TuiEvent>,
     tui: &mut Tui,
-    worker: &QueryWorkerHandle,
+    _worker: &QueryWorkerHandle,
     chat_widget: &mut ChatWidget,
     loop_state: &mut InteractiveLoopState,
 ) -> Result<LoopAction> {
@@ -325,21 +345,19 @@ fn handle_tui_event(
             })?;
         }
         TuiEvent::Key(key) => {
-            // Let Ctrl-C interrupt active work first, then require a second press to exit.
+            // Keep Ctrl-C available for terminal copy workflows while work is
+            // active. Cancellation is owned by the bottom pane's Esc flow.
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                if loop_state.busy {
-                    worker.interrupt_turn()?;
-                    chat_widget.set_status_message("Interrupted;");
-                } else {
-                    let now = Instant::now();
-                    if loop_state
-                        .last_ctrl_c_at
-                        .is_some_and(|last| now.duration_since(last) <= Duration::from_secs(2))
-                    {
+                match handle_ctrl_c_key(loop_state, Instant::now()) {
+                    CtrlCKeyAction::PromptInterruptWithEsc => {
+                        chat_widget.set_status_message("Press Esc twice to interrupt");
+                    }
+                    CtrlCKeyAction::PromptExitConfirmation => {
+                        chat_widget.set_status_message("Press Ctrl-C again to exit");
+                    }
+                    CtrlCKeyAction::Exit => {
                         return Ok(LoopAction::ClearAndExit);
                     }
-                    loop_state.last_ctrl_c_at = Some(now);
-                    chat_widget.set_status_message("Press Ctrl-C again to exit");
                 }
                 return Ok(LoopAction::Continue);
             }
@@ -372,14 +390,30 @@ fn handle_tui_event(
     Ok(LoopAction::Continue)
 }
 
+fn handle_ctrl_c_key(loop_state: &mut InteractiveLoopState, now: Instant) -> CtrlCKeyAction {
+    if loop_state.busy {
+        loop_state.last_ctrl_c_at = None;
+        return CtrlCKeyAction::PromptInterruptWithEsc;
+    }
+
+    if loop_state
+        .last_ctrl_c_at
+        .is_some_and(|last| now.duration_since(last) <= Duration::from_secs(2))
+    {
+        return CtrlCKeyAction::Exit;
+    }
+
+    loop_state.last_ctrl_c_at = Some(now);
+    CtrlCKeyAction::PromptExitConfirmation
+}
+
 fn handle_app_event(
     app_event: Option<AppEvent>,
     worker: &QueryWorkerHandle,
     chat_widget: &mut ChatWidget,
     tui: &mut Tui,
     loop_state: &mut InteractiveLoopState,
-    model_catalog: &impl ModelCatalog,
-    default_provider: ProviderWireApi,
+    context: &AppCommandContext<'_, impl ModelCatalog>,
 ) -> Result<LoopAction> {
     let Some(app_event) = app_event else {
         return Ok(LoopAction::ClearAndExit);
@@ -400,15 +434,7 @@ fn handle_app_event(
     if let AppEvent::Command(command) = &app_event {
         chat_widget.handle_app_event(app_event.clone());
         // Commands that affect sessions, providers, or turns are forwarded to the worker.
-        handle_app_command(
-            command,
-            worker,
-            chat_widget,
-            tui,
-            loop_state,
-            model_catalog,
-            default_provider,
-        )?;
+        handle_app_command(command, worker, chat_widget, tui, loop_state, context)?;
         return Ok(LoopAction::Continue);
     }
     chat_widget.handle_app_event(app_event);
@@ -498,6 +524,9 @@ fn handle_worker_event(
             loop_state.session_switch_pending = false;
         }
         WorkerEvent::TextDelta(_)
+        | WorkerEvent::TextItemStarted { .. }
+        | WorkerEvent::TextItemDelta { .. }
+        | WorkerEvent::TextItemCompleted { .. }
         | WorkerEvent::ReasoningDelta(_)
         | WorkerEvent::AssistantMessageCompleted(_)
         | WorkerEvent::ReasoningCompleted(_)
@@ -510,6 +539,8 @@ fn handle_worker_event(
         | WorkerEvent::SessionTitleUpdated { .. }
         | WorkerEvent::InputHistoryLoaded { .. }
         | WorkerEvent::InputQueueUpdated { .. }
+        | WorkerEvent::ApprovalRequest { .. }
+        | WorkerEvent::ApprovalDecision { .. }
         | WorkerEvent::SteerAccepted { .. } => {}
     }
     if matches!(&worker_event, WorkerEvent::SessionsListed { .. }) {
@@ -530,14 +561,14 @@ fn handle_app_command(
     chat_widget: &mut ChatWidget,
     tui: &mut Tui,
     loop_state: &mut InteractiveLoopState,
-    model_catalog: &impl ModelCatalog,
-    default_provider: ProviderWireApi,
+    context: &AppCommandContext<'_, impl ModelCatalog>,
 ) -> Result<()> {
     match command {
         AppCommand::UserTurn {
             input,
             model,
             thinking,
+            approval_policy,
             ..
         } => {
             if let Some(model) = model {
@@ -554,7 +585,7 @@ fn handle_app_command(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            worker.submit_prompt(prompt)?;
+            worker.submit_prompt(prompt, approval_policy.clone())?;
         }
         AppCommand::SteerTurn {
             input,
@@ -570,15 +601,36 @@ fn handle_app_command(
                 .join("\n");
             worker.submit_steer(prompt, *expected_turn_id)?;
         }
+        AppCommand::ApprovalRespond {
+            session_id,
+            turn_id,
+            approval_id,
+            decision,
+            scope,
+        } => {
+            worker.approval_respond(
+                *session_id,
+                *turn_id,
+                approval_id.clone(),
+                decision.clone(),
+                scope.clone(),
+            )?;
+        }
+        AppCommand::UpdatePermissions { preset } => {
+            worker.update_permissions(*preset)?;
+            save_project_permission_preset(context.project_config_key, *preset)?;
+            chat_widget.note_permissions_updated(*preset);
+        }
         AppCommand::OverrideTurnContext {
             model, thinking, ..
         } => {
             if let Some(model) = model {
                 worker.set_model(model.clone())?;
-                let provider = model_catalog
+                let provider = context
+                    .model_catalog
                     .get(model)
                     .map(Model::provider_wire_api)
-                    .unwrap_or(default_provider);
+                    .unwrap_or(context.default_provider);
                 save_last_used_model(/*wire_api*/ None, provider, model)?;
             }
             if let Some(thinking) = thinking {
@@ -613,10 +665,11 @@ fn handle_app_command(
                     .get("api_key")
                     .and_then(serde_json::Value::as_str)
                     .map(ToOwned::to_owned);
-                let provider = model_catalog
+                let provider = context
+                    .model_catalog
                     .get(&model)
                     .map(Model::provider_wire_api)
-                    .unwrap_or(default_provider);
+                    .unwrap_or(context.default_provider);
                 loop_state.pending_onboarding = Some(PendingOnboarding {
                     provider,
                     model: model.clone(),
@@ -655,4 +708,37 @@ fn handle_app_command(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn ctrl_c_while_busy_prompts_for_esc_without_arming_exit() {
+        let mut loop_state = InteractiveLoopState {
+            busy: true,
+            last_ctrl_c_at: Some(Instant::now()),
+            ..InteractiveLoopState::default()
+        };
+
+        let action = handle_ctrl_c_key(&mut loop_state, Instant::now());
+
+        assert_eq!(CtrlCKeyAction::PromptInterruptWithEsc, action);
+        assert_eq!(None, loop_state.last_ctrl_c_at);
+    }
+
+    #[test]
+    fn ctrl_c_when_idle_requires_second_press_to_exit() {
+        let now = Instant::now();
+        let mut loop_state = InteractiveLoopState::default();
+
+        let first = handle_ctrl_c_key(&mut loop_state, now);
+        let second = handle_ctrl_c_key(&mut loop_state, now + Duration::from_secs(1));
+
+        assert_eq!(CtrlCKeyAction::PromptExitConfirmation, first);
+        assert_eq!(CtrlCKeyAction::Exit, second);
+    }
 }

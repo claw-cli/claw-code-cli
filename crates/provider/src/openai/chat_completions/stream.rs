@@ -104,6 +104,12 @@ pub(super) async fn completion_stream(
             match event {
                 Event::Open => {}
                 Event::Message(message) => {
+                    tracing::trace!(
+                        event = %message.event,
+                        data_len = message.data.len(),
+                        data = %message.data,
+                        "openai chat completions raw stream event"
+                    );
                     if message.data == "[DONE]" {
                         break;
                     }
@@ -139,6 +145,7 @@ struct ChatCompletionStreamState {
     text: StreamTextBlock,
     text_parser: TaggedTextParser,
     reasoning: StreamTextBlock,
+    reasoning_content_active: bool,
     refusal: String,
     role: Option<String>,
     tool_calls: BTreeMap<u32, PartialToolCall>,
@@ -199,12 +206,18 @@ impl ChatCompletionStreamState {
             self.refusal.push_str(&refusal);
         }
 
-        if let Some(reasoning_content) = choice
-            .delta
-            .reasoning_content
-            .filter(|reasoning_content| !reasoning_content.is_empty())
-        {
-            self.push_reasoning_delta(reasoning_content, events);
+        match choice.delta.reasoning_content {
+            Some(reasoning_content) => {
+                self.reasoning_content_active = true;
+                if !reasoning_content.is_empty() {
+                    self.push_reasoning_delta(reasoning_content, events);
+                }
+            }
+            None if self.reasoning_content_active => {
+                self.reasoning_content_active = false;
+                self.push_reasoning_done(events);
+            }
+            None => {}
         }
 
         if let Some(content) = choice.delta.content.filter(|content| !content.is_empty()) {
@@ -257,6 +270,12 @@ impl ChatCompletionStreamState {
         }
         self.reasoning.value.push_str(&text);
         events.push(StreamEvent::ReasoningDelta { index: 1, text });
+    }
+
+    fn push_reasoning_done(&mut self, events: &mut Vec<StreamEvent>) {
+        if self.reasoning.started {
+            events.push(StreamEvent::ReasoningDone { index: 1 });
+        }
     }
 
     fn apply_tool_call_delta(
@@ -1072,5 +1091,143 @@ mod tests {
             if provider == "openai"
                 && payload["choices"][0]["index"] == json!(0)
         )));
+    }
+
+    #[test]
+    fn reasoning_content_phase_done_before_tool_call_when_field_disappears() {
+        let mut state = ChatCompletionStreamState::default();
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "content": null,
+                        "reasoning_content": ""
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })));
+        assert!(events.is_empty());
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": null,
+                        "reasoning_content": " wants"
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ReasoningStart { index: 1 }
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::ReasoningDelta { index: 1, text } if text == " wants"
+        ));
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": null,
+                        "reasoning_content": "."
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ReasoningDelta { index: 1, text } if text == "."
+        ));
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_00_600mpUqdusY9jkJm31MM0811",
+                                "type": "function",
+                                "function": {
+                                    "name": "read",
+                                    "arguments": ""
+                                }
+                            }
+                        ]
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ReasoningDone { index: 1 }
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::ToolCallStart { index: 1, id, name, .. }
+            if id == "call_00_600mpUqdusY9jkJm31MM0811" && name == "read"
+        ));
+    }
+
+    #[test]
+    fn reasoning_content_null_ends_active_reasoning_phase_once() {
+        let mut state = ChatCompletionStreamState::default();
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": "plan"
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })));
+        assert_eq!(events.len(), 2);
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": null
+                    },
+                    "finish_reason": null
+                }
+            ]
+        })));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ReasoningDone { index: 1 }
+        ));
+
+        let events = state.apply_chunk(parse_chunk(json!({
+            "choices": [
+                {
+                    "delta": {
+                        "content": "answer"
+                    },
+                    "finish_reason": "stop"
+                }
+            ]
+        })));
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], StreamEvent::TextStart { index: 0 }));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::TextDelta { index: 0, text } if text == "answer"
+        ));
     }
 }

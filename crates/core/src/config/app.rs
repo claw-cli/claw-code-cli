@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use devo_protocol::PermissionPreset;
 use serde::{Deserialize, Serialize};
 
 use devo_utils::FileSystemConfigPathResolver;
+use devo_utils::git_op::get_git_repo_root;
 
 use crate::AgentsMdConfig;
 use crate::SkillsConfig;
@@ -35,6 +38,15 @@ pub struct AppConfig {
     /// TODO: Not sure what's purpose of `project_root_markers`?
     /// Marker names used when discovering a project root.
     pub project_root_markers: Vec<String>,
+    /// User-level settings remembered per project key.
+    pub projects: BTreeMap<String, ProjectConfig>,
+}
+
+/// Settings remembered for one project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProjectConfig {
+    /// Permission preset to use when starting new sessions for this project.
+    pub permission_preset: Option<PermissionPreset>,
 }
 
 /// Controls how the CLI checks for new releases at startup.
@@ -118,6 +130,7 @@ impl Default for AppConfig {
                 check_interval_hours: 24,
             },
             project_root_markers: vec![".git".into()],
+            projects: BTreeMap::new(),
         }
     }
 }
@@ -129,6 +142,28 @@ impl AppConfig {
             ..AgentsMdConfig::default()
         }
     }
+}
+
+/// Returns the stable key used to remember project-level permission settings.
+///
+/// Git repositories are keyed by their repository root. Non-git directories fall
+/// back to the canonical current working directory when possible.
+pub fn project_config_key(cwd: &Path) -> String {
+    let root = get_git_repo_root(cwd)
+        .or_else(|| cwd.canonicalize().ok())
+        .unwrap_or_else(|| cwd.to_path_buf());
+    strip_unc_prefix(root).display().to_string()
+}
+
+fn strip_unc_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.display().to_string();
+        if let Some(stripped) = value.strip_prefix("\\\\?\\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
 }
 
 fn read_config_value(path: &Path) -> Result<toml::Value, AppConfigError> {

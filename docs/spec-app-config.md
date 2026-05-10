@@ -41,6 +41,13 @@ pub struct AppConfig {
     pub skills: SkillsConfig,
     pub updates: UpdatesConfig,
     pub project_root_markers: Vec<String>,
+    pub projects: BTreeMap<String, ProjectConfig>,
+}
+```
+
+```rust
+pub struct ProjectConfig {
+    pub permission_preset: Option<PermissionPreset>,
 }
 ```
 
@@ -193,6 +200,23 @@ check_interval_hours = 24
 
 These settings control whether user-facing CLI commands check GitHub Releases
 for a newer `devo` version and how often a fresh network request is allowed.
+
+## Project Config
+
+The TUI stores `/permissions` selections in the user-level config so the preset
+can be changed before any session exists. Project entries are keyed by git
+repository root, falling back to the current working directory when no git root
+is found:
+
+```toml
+[projects."C:\\Users\\me\\repo"]
+permission_preset = "default"
+```
+
+Supported preset values are `read-only`, `default`, `auto-review`, and
+`full-access`. The `projects` table is intentionally extensible for future
+project-scoped settings. New server sessions are initialized from the remembered
+permission preset after the first prompt creates the session.
 
 ## File Locations
 

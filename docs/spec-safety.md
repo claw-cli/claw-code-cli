@@ -142,6 +142,22 @@ Policy modes supported by the overview:
 - `StaticPolicy`
 - `ModelGuidedPolicy`
 
+Runtime permission presets exposed by `/permissions`:
+
+- `ReadOnly`: read workspace files without approval; edits, shell commands, and network ask.
+- `Default`: read and edit files inside the workspace and run shell commands; network and writes outside the workspace ask.
+- `AutoReview`: same base policy as `Default`, but eligible `Ask` decisions are reviewed by the automatic reviewer before interrupting the user.
+- `FullAccess`: allow tool requests without approval. This mode is intended for trusted environments only.
+
+Preset rules:
+
+- The active runtime permission profile is the source of truth for tool execution decisions.
+- Preset changes must clear cached approvals created under the previous profile.
+- `AutoReview` is a reviewer routing mode, not a broader sandbox mode.
+- If the reviewer approves, execution continues and an approval-decision audit item is recorded.
+- If the reviewer denies, execution is blocked and an approval-decision audit item is recorded.
+- If the reviewer is uncertain, unavailable, or returns invalid output, the runtime must fall back to user approval.
+
 Implementation note:
 
 - `ModelGuidedPolicy` must use a configurable model-selection policy rather than implicitly binding to either the active main model or a fixed classifier model.

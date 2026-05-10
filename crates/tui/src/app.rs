@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::events::SavedModelEntry;
+use devo_core::PermissionPreset;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderWireApi;
 
@@ -28,6 +29,8 @@ pub struct InitialTuiSession {
     pub provider: ProviderWireApi,
     /// Initial thinking selection restored from persisted config.
     pub thinking_selection: Option<String>,
+    /// Initial permission preset restored from project-level config.
+    pub permission_preset: PermissionPreset,
     /// Working directory used for the initial session.
     pub cwd: PathBuf,
 }

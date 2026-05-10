@@ -54,29 +54,20 @@ use std::time::Instant;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(crate) const AI_REPLY_WRAP_WIDTH: usize = 80;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ScrollbackWrapPolicy {
-    LimitToEightyColumns,
-    NoAdditionalWrapLimit,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ScrollbackLine {
     pub(crate) line: Line<'static>,
-    pub(crate) wrap_policy: ScrollbackWrapPolicy,
 }
 
 impl ScrollbackLine {
-    pub(crate) fn new(line: Line<'static>, wrap_policy: ScrollbackWrapPolicy) -> Self {
-        Self { line, wrap_policy }
+    pub(crate) fn new(line: Line<'static>) -> Self {
+        Self { line }
     }
 }
 
 impl From<Line<'static>> for ScrollbackLine {
     fn from(line: Line<'static>) -> Self {
-        Self::new(line, ScrollbackWrapPolicy::LimitToEightyColumns)
+        Self::new(line)
     }
 }
 
@@ -161,10 +152,6 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// the first rendered frame even though the main viewport is animating.
     fn transcript_animation_tick(&self) -> Option<u64> {
         None
-    }
-
-    fn scrollback_wrap_policy(&self) -> ScrollbackWrapPolicy {
-        ScrollbackWrapPolicy::NoAdditionalWrapLimit
     }
 }
 
@@ -284,6 +271,20 @@ fn trim_trailing_blank_lines(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>
     lines
 }
 
+pub(crate) fn collapse_consecutive_blank_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    let mut collapsed = Vec::with_capacity(lines.len());
+    let mut last_was_blank = false;
+    for line in lines {
+        let is_blank = line.spans.iter().all(|span| span.content.trim().is_empty());
+        if is_blank && last_was_blank {
+            continue;
+        }
+        last_was_blank = is_blank;
+        collapsed.push(line);
+    }
+    collapsed
+}
+
 impl HistoryCell for UserHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let wrap_width = width
@@ -302,7 +303,7 @@ impl HistoryCell for UserHistoryCell {
         let prefix_style = Style::default().fg(accent);
         let blank_prefixed_line = || {
             Line::from(vec![
-                Span::styled("┃ ", prefix_style),
+                Span::styled("▌ ", prefix_style),
                 Span::styled(String::new(), style),
             ])
             .style(style)
@@ -340,7 +341,7 @@ impl HistoryCell for UserHistoryCell {
         let mut lines: Vec<Line<'static>> = vec![blank_prefixed_line()];
 
         if let Some(wrapped_message) = wrapped_message {
-            lines.extend(prefix_lines(wrapped_message, "┃ ".cyan(), "┃ ".cyan()));
+            lines.extend(prefix_lines(wrapped_message, "▌ ".cyan(), "▌ ".cyan()));
         }
 
         lines.push(blank_prefixed_line());
@@ -370,7 +371,6 @@ impl ReasoningSummaryCell {
     }
 
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
-        let width = width.min(AI_REPLY_WRAP_WIDTH as u16);
         let mut lines: Vec<Line<'static>> = Vec::new();
         append_markdown(
             &self.content,
@@ -394,7 +394,7 @@ impl ReasoningSummaryCell {
         adaptive_wrap_lines(
             &summary_lines,
             RtOptions::new(width as usize)
-                .initial_indent("• ".dim().into())
+                .initial_indent("▌ ".dim().into())
                 .subsequent_indent("  ".into()),
         )
     }
@@ -412,10 +412,6 @@ impl HistoryCell for ReasoningSummaryCell {
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.lines(width)
     }
-
-    fn scrollback_wrap_policy(&self) -> ScrollbackWrapPolicy {
-        ScrollbackWrapPolicy::LimitToEightyColumns
-    }
 }
 
 #[derive(Debug)]
@@ -424,7 +420,6 @@ pub(crate) struct AgentMessageCell {
     initial_prefix: Line<'static>,
     subsequent_prefix: Line<'static>,
     is_stream_continuation: bool,
-    max_wrap_width: Option<usize>,
 }
 
 impl AgentMessageCell {
@@ -432,13 +427,12 @@ impl AgentMessageCell {
         Self {
             lines,
             initial_prefix: if is_first_line {
-                "• ".dim().into()
+                "▌ ".dim().into()
             } else {
                 "  ".into()
             },
             subsequent_prefix: "  ".into(),
             is_stream_continuation: !is_first_line,
-            max_wrap_width: None,
         }
     }
 
@@ -453,7 +447,6 @@ impl AgentMessageCell {
             initial_prefix: initial_prefix.into(),
             subsequent_prefix: subsequent_prefix.into(),
             is_stream_continuation,
-            max_wrap_width: Some(AI_REPLY_WRAP_WIDTH),
         }
     }
 
@@ -468,34 +461,65 @@ impl AgentMessageCell {
             initial_prefix: initial_prefix.into(),
             subsequent_prefix: subsequent_prefix.into(),
             is_stream_continuation,
-            max_wrap_width: None,
         }
     }
 }
 
 impl HistoryCell for AgentMessageCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let width = self
-            .max_wrap_width
-            .map_or(width, |max_wrap_width| width.min(max_wrap_width as u16));
-        adaptive_wrap_lines(
+        collapse_consecutive_blank_lines(adaptive_wrap_lines(
             &self.lines,
             RtOptions::new(width as usize)
                 .initial_indent(self.initial_prefix.clone())
                 .subsequent_indent(self.subsequent_prefix.clone()),
-        )
+        ))
     }
 
     fn is_stream_continuation(&self) -> bool {
         self.is_stream_continuation
     }
+}
 
-    fn scrollback_wrap_policy(&self) -> ScrollbackWrapPolicy {
-        if self.max_wrap_width == Some(AI_REPLY_WRAP_WIDTH) {
-            ScrollbackWrapPolicy::LimitToEightyColumns
-        } else {
-            ScrollbackWrapPolicy::NoAdditionalWrapLimit
+#[derive(Debug)]
+pub(crate) struct AgentMarkdownCell {
+    markdown_source: String,
+    cwd: PathBuf,
+    initial_prefix: Line<'static>,
+    subsequent_prefix: Line<'static>,
+}
+
+impl AgentMarkdownCell {
+    pub(crate) fn new(
+        markdown_source: String,
+        cwd: &Path,
+        initial_prefix: impl Into<Line<'static>>,
+        subsequent_prefix: impl Into<Line<'static>>,
+    ) -> Self {
+        Self {
+            markdown_source,
+            cwd: cwd.to_path_buf(),
+            initial_prefix: initial_prefix.into(),
+            subsequent_prefix: subsequent_prefix.into(),
         }
+    }
+}
+
+impl HistoryCell for AgentMarkdownCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        append_markdown(
+            &self.markdown_source,
+            /*width*/ None,
+            Some(self.cwd.as_path()),
+            &mut lines,
+        );
+        let lines = collapse_consecutive_blank_lines(lines);
+        collapse_consecutive_blank_lines(adaptive_wrap_lines(
+            &lines,
+            RtOptions::new(width as usize)
+                .initial_indent(self.initial_prefix.clone())
+                .subsequent_indent(self.subsequent_prefix.clone()),
+        ))
     }
 }
 
@@ -573,9 +597,9 @@ impl HistoryCell for UnifiedExecInteractionCell {
         let waited_only = self.stdin.is_empty();
 
         let mut header_spans = if waited_only {
-            vec!["• Waited for background terminal".bold()]
+            vec!["▌ ".cyan(), "Waited for background terminal".bold()]
         } else {
-            vec!["↳ ".dim(), "Interacted with background terminal".bold()]
+            vec!["▌ ".cyan(), "Interacted with background terminal".bold()]
         };
         if let Some(command) = &self.command_display
             && !command.is_empty()
@@ -593,11 +617,8 @@ impl HistoryCell for UnifiedExecInteractionCell {
             return out;
         }
 
-        let input_lines: Vec<Line<'static>> = self
-            .stdin
-            .lines()
-            .map(|line| Line::from(line.to_string()))
-            .collect();
+        let input_lines: Vec<Line<'static>> =
+            self.stdin.lines().map(render_terminal_input).collect();
 
         let input_wrapped = adaptive_wrap_lines(
             input_lines,
@@ -615,6 +636,13 @@ pub(crate) fn new_unified_exec_interaction(
     stdin: String,
 ) -> UnifiedExecInteractionCell {
     UnifiedExecInteractionCell::new(command_display, stdin)
+}
+
+fn render_terminal_input(input: &str) -> Line<'static> {
+    if input.is_empty() {
+        return Line::from("⏎".dim());
+    }
+    Line::from(input.to_string())
 }
 
 #[derive(Debug)]
@@ -647,11 +675,11 @@ impl HistoryCell for UnifiedExecProcessesCell {
         out.push("".into());
 
         if self.processes.is_empty() {
-            out.push("  • No background terminals running.".italic().into());
+            out.push("  ▌ No background terminals running.".italic().into());
             return out;
         }
 
-        let prefix = "  • ";
+        let prefix = "  ▌ ";
         let prefix_width = UnicodeWidthStr::width(prefix);
         let truncation_suffix = " [...]";
         let truncation_suffix_width = UnicodeWidthStr::width(truncation_suffix);
@@ -821,6 +849,32 @@ pub fn new_guardian_approved_action_request(summary: String) -> Box<dyn HistoryC
         Span::from(summary).dim(),
     ]);
     Box::new(PrefixedWrappedHistoryCell::new(line, "✔ ".green(), "  "))
+}
+
+pub fn new_permission_request_cell(title: String, body: String) -> Box<dyn HistoryCell> {
+    let mut lines = vec![Line::from(vec![
+        "Permission required: ".yellow().bold(),
+        Span::from(title),
+    ])];
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        lines.push(Line::from(line.to_string()).dim());
+    }
+    lines.push(Line::from(vec![
+        "Press ".dim(),
+        "y".bold(),
+        " once, ".dim(),
+        "s".bold(),
+        " session, ".dim(),
+        "n".bold(),
+        " deny, ".dim(),
+        "Esc".bold(),
+        " cancel".dim(),
+    ]));
+    Box::new(PlainHistoryCell::new(prefix_lines(
+        lines,
+        "? ".yellow(),
+        "  ".into(),
+    )))
 }
 
 /// Cyan history cell line showing the current review status.
@@ -1238,7 +1292,7 @@ impl HistoryCell for DeprecationNoticeCell {
 }
 
 pub(crate) fn new_info_event(message: String, hint: Option<String>) -> PlainHistoryCell {
-    let mut line = vec!["• ".dim(), message.into()];
+    let mut line = vec!["▌ ".dim(), message.into()];
     if let Some(hint) = hint {
         line.push(" ".into());
         line.push(hint.dark_gray());
@@ -1366,7 +1420,7 @@ pub(crate) fn new_view_image_tool_call(path: PathBuf, cwd: &Path) -> PlainHistor
     let display_path = display_path_for(&path, cwd);
 
     let lines: Vec<Line<'static>> = vec![
-        vec!["• ".dim(), "Viewed Image".bold()].into(),
+        vec!["▌ ".dim(), "Viewed Image".bold()].into(),
         vec!["  └ ".dim(), display_path.dim()].into(),
     ];
 
@@ -1381,7 +1435,7 @@ pub(crate) fn new_image_generation_call(
     let detail = revised_prompt.unwrap_or_else(|| call_id.clone());
 
     let mut lines: Vec<Line<'static>> = vec![
-        vec!["• ".dim(), "Generated Image:".bold()].into(),
+        vec!["▌ ".dim(), "Generated Image:".bold()].into(),
         vec!["  └ ".dim(), detail.dim()].into(),
     ];
     if let Some(saved_path) = saved_path {
@@ -1459,7 +1513,7 @@ impl HistoryCell for FinalMessageSeparator {
             return vec![Line::from_iter(["─".repeat(width as usize).dim()])];
         }
 
-        let label = format!("─ {} ─", label_parts.join(" • "));
+        let label = format!("─ {} ─", label_parts.join(" ▌ "));
         let (label, _suffix, label_width) = take_prefix_by_width(&label, width as usize);
         vec![
             Line::from_iter([

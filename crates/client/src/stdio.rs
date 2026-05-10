@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
+use devo_protocol::ApprovalRespondParams;
 use devo_protocol::ClientNotification;
 use devo_protocol::ClientRequest;
 use devo_protocol::ClientTransportKind;
@@ -28,6 +29,8 @@ use devo_protocol::SessionListParams;
 use devo_protocol::SessionListResult;
 use devo_protocol::SessionMetadataUpdateParams;
 use devo_protocol::SessionMetadataUpdateResult;
+use devo_protocol::SessionPermissionsUpdateParams;
+use devo_protocol::SessionPermissionsUpdateResult;
 use devo_protocol::SessionResumeParams;
 use devo_protocol::SessionResumeResult;
 use devo_protocol::SessionRollbackParams;
@@ -184,6 +187,13 @@ impl StdioServerClient {
         self.request("session/metadata/update", params).await
     }
 
+    pub async fn session_permissions_update(
+        &mut self,
+        params: SessionPermissionsUpdateParams,
+    ) -> Result<SessionPermissionsUpdateResult> {
+        self.request("session/permissions/update", params).await
+    }
+
     pub async fn session_compact(
         &mut self,
         params: SessionCompactParams,
@@ -237,6 +247,11 @@ impl StdioServerClient {
 
     pub async fn turn_steer(&mut self, params: TurnSteerParams) -> Result<TurnSteerResult> {
         self.request("turn/steer", params).await
+    }
+
+    pub async fn approval_respond(&mut self, params: ApprovalRespondParams) -> Result<()> {
+        let _: serde_json::Value = self.request("approval/respond", params).await?;
+        Ok(())
     }
 
     pub async fn recv_notification(&mut self) -> Option<ServerNotificationMessage> {

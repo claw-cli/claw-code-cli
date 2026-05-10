@@ -1,13 +1,127 @@
-pub mod legacy_permissions;
-
-use std::collections::{BTreeSet, HashSet};
-use std::path::{Path, PathBuf};
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use smol_str::SmolStr;
+
+/// Controls how tool permission requests are handled by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionMode {
+    /// Approve every request without asking.
+    AutoApprove,
+    /// Ask the user for confirmation on each request.
+    Interactive,
+    /// Deny all requests that require permission.
+    Deny,
+}
+
+/// User-facing permission presets exposed by `/permissions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[derive(Default)]
+pub enum PermissionPreset {
+    /// Read workspace files without approval; edits, commands, and network ask.
+    ReadOnly,
+    /// Read and edit workspace files and run shell commands; network and outside
+    /// workspace writes ask.
+    #[default]
+    Default,
+    /// Same base policy as default, but eligible approvals may be routed through
+    /// an automatic reviewer before the user is interrupted.
+    AutoReview,
+    /// Allow all tool requests without approval.
+    FullAccess,
+}
+
+/// Selects who reviews approval requests after policy decides that approval is required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalsReviewer {
+    /// Show approval prompts to the user.
+    #[default]
+    User,
+    /// Let the automatic reviewer decide eligible requests first.
+    AutoReview,
+}
+
+/// Runtime permissions derived from a user-facing permission preset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePermissionProfile {
+    pub preset: PermissionPreset,
+    pub reviewer: ApprovalsReviewer,
+    pub workspace_root: PathBuf,
+    pub readable_roots: BTreeSet<PathBuf>,
+    pub writable_roots: BTreeSet<PathBuf>,
+    pub allow_shell_commands: bool,
+    pub allow_network: bool,
+    pub auto_approve: bool,
+}
+
+impl RuntimePermissionProfile {
+    pub fn from_preset(
+        preset: PermissionPreset,
+        workspace_root: PathBuf,
+    ) -> RuntimePermissionProfile {
+        let mut readable_roots = BTreeSet::new();
+        readable_roots.insert(workspace_root.clone());
+        let mut writable_roots = BTreeSet::new();
+        let reviewer = if matches!(preset, PermissionPreset::AutoReview) {
+            ApprovalsReviewer::AutoReview
+        } else {
+            ApprovalsReviewer::User
+        };
+
+        match preset {
+            PermissionPreset::ReadOnly => RuntimePermissionProfile {
+                preset,
+                reviewer,
+                workspace_root,
+                readable_roots,
+                writable_roots,
+                allow_shell_commands: false,
+                allow_network: false,
+                auto_approve: false,
+            },
+            PermissionPreset::Default | PermissionPreset::AutoReview => {
+                writable_roots.insert(workspace_root.clone());
+                RuntimePermissionProfile {
+                    preset,
+                    reviewer,
+                    workspace_root,
+                    readable_roots,
+                    writable_roots,
+                    allow_shell_commands: true,
+                    allow_network: false,
+                    auto_approve: false,
+                }
+            }
+            PermissionPreset::FullAccess => RuntimePermissionProfile {
+                preset,
+                reviewer,
+                workspace_root,
+                readable_roots,
+                writable_roots,
+                allow_shell_commands: true,
+                allow_network: true,
+                auto_approve: true,
+            },
+        }
+    }
+
+    pub fn permission_mode(&self) -> PermissionMode {
+        if self.auto_approve {
+            PermissionMode::AutoApprove
+        } else {
+            PermissionMode::Interactive
+        }
+    }
+}
 
 /// The fixed placeholder inserted when a secret is redacted from model-visible text.
 pub const REDACTED_SECRET_PLACEHOLDER: &str = "[REDACTED_SECRET]";
@@ -348,6 +462,8 @@ pub struct ApprovalCache {
     pub host_scopes: BTreeSet<String>,
     /// Canonical path prefixes approved for the whole session.
     pub path_scopes: BTreeSet<PathBuf>,
+    /// Shell command prefixes approved for the whole session.
+    pub command_prefix_scopes: BTreeSet<Vec<String>>,
 }
 
 /// Describes the declared filesystem policy before approval merging.
@@ -708,15 +824,29 @@ mod tests {
 
     use regex::Regex;
 
-    use super::{
-        ApprovalCache, DefaultSandboxPolicyTransformer, EffectiveSandboxPolicy,
-        FileSystemPolicyRecord, InMemorySecretDetectorRegistry, NetworkPolicy, PermissionDecision,
-        PermissionProfile, PermissionRequest, PolicyModelSelection, PolicySnapshot,
-        REDACTED_SECRET_PLACEHOLDER, RegexSecretDetector, ResourceKind, SafetyPolicyMode,
-        SandboxMode, SandboxPolicyRecord, SecretDetectorRegistry, SecretMatchConfidence,
-        SecretRedactor, StaticPermissionPolicy,
-    };
-    use crate::{PermissionPolicy, SandboxPolicyTransformer};
+    use super::ApprovalCache;
+    use super::DefaultSandboxPolicyTransformer;
+    use super::EffectiveSandboxPolicy;
+    use super::FileSystemPolicyRecord;
+    use super::InMemorySecretDetectorRegistry;
+    use super::NetworkPolicy;
+    use super::PermissionDecision;
+    use super::PermissionProfile;
+    use super::PermissionRequest;
+    use super::PolicyModelSelection;
+    use super::PolicySnapshot;
+    use super::REDACTED_SECRET_PLACEHOLDER;
+    use super::RegexSecretDetector;
+    use super::ResourceKind;
+    use super::SafetyPolicyMode;
+    use super::SandboxMode;
+    use super::SandboxPolicyRecord;
+    use super::SecretDetectorRegistry;
+    use super::SecretMatchConfidence;
+    use super::SecretRedactor;
+    use super::StaticPermissionPolicy;
+    use crate::PermissionPolicy;
+    use crate::SandboxPolicyTransformer;
 
     fn abs_path(suffix: &str) -> PathBuf {
         #[cfg(windows)]

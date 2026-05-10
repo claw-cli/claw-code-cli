@@ -133,6 +133,13 @@ impl ServerRuntime {
                 session.summary.cwd = cwd.clone();
                 session.core_session.lock().await.cwd = cwd;
             }
+            if let Some(permission_mode) = params
+                .approval_policy
+                .as_deref()
+                .and_then(permission_mode_from_approval_policy)
+            {
+                session.core_session.lock().await.config.permission_mode = permission_mode;
+            }
             let requested_model = params.model.as_deref().or(session.summary.model.as_deref());
             let requested_thinking = params
                 .thinking

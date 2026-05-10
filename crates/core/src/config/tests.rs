@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use devo_protocol::PermissionPreset;
 use pretty_assertions::assert_eq;
 
 use super::{
     AppConfig, AppConfigLoader, ContextManageConfig, FileSystemAppConfigLoader, LogRotation,
-    LoggingConfig, SafetyPolicyModelSelection, SummaryModelSelection, UpdatesConfig,
+    LoggingConfig, ProjectConfig, SafetyPolicyModelSelection, SummaryModelSelection, UpdatesConfig,
 };
 use crate::SkillsConfig;
 
@@ -110,6 +112,7 @@ check_interval_hours = 48
                 check_interval_hours: 48,
             },
             project_root_markers: vec![".workspace".into()],
+            projects: BTreeMap::new(),
         }
     );
 
@@ -156,6 +159,33 @@ fn loader_rejects_duplicate_skill_roots() {
         result,
         Err(super::AppConfigError::Validation { .. })
     ));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn loader_reads_project_configs() {
+    let root = unique_temp_dir("config-projects");
+    let home = root.join("home").join(".devo");
+    std::fs::create_dir_all(&home).expect("home config dir");
+    std::fs::write(
+        home.join("config.toml"),
+        "[projects.\"C:\\\\repo\"]\npermission_preset = 'read-only'\n",
+    )
+    .expect("write user config");
+
+    let loader = FileSystemAppConfigLoader::new(home);
+    let config = loader.load(None).expect("load config");
+
+    assert_eq!(
+        config.projects,
+        BTreeMap::from([(
+            "C:\\repo".to_string(),
+            ProjectConfig {
+                permission_preset: Some(PermissionPreset::ReadOnly),
+            },
+        )])
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

@@ -1,4 +1,8 @@
-use std::path::{Path, PathBuf};
+// TODO: Current tool sumary is a function with match, we need to refactor the summary as tool trait
+//       and implement the summary as a method of a tool.
+
+use std::path::Path;
+use std::path::PathBuf;
 
 fn make_relative(cwd: &Path, path: &str) -> String {
     let p = PathBuf::from(path);

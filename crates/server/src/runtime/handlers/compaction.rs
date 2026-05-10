@@ -301,11 +301,11 @@ impl ServerRuntime {
     ) -> Vec<ItemId> {
         let normalized_persisted_items = persisted_turn_items
             .iter()
-            .filter_map(|item| {
-                let response_item = match &item.turn_item {
+            .flat_map(|item| {
+                let response_items = match &item.turn_item {
                     TurnItem::UserMessage(TextItem { text })
                     | TurnItem::SteerInput(TextItem { text }) => {
-                        ResponseItem::Message(Message::user(text.clone()))
+                        vec![ResponseItem::Message(Message::user(text.clone()))]
                     }
                     TurnItem::AgentMessage(TextItem { text })
                     | TurnItem::Plan(TextItem { text })
@@ -313,39 +313,65 @@ impl ServerRuntime {
                     | TurnItem::ImageGeneration(TextItem { text })
                     | TurnItem::ContextCompaction(TextItem { text })
                     | TurnItem::HookPrompt(TextItem { text }) => {
-                        ResponseItem::Message(Message::assistant_text(text.clone()))
+                        vec![ResponseItem::Message(Message::assistant_text(text.clone()))]
                     }
                     TurnItem::Reasoning(TextItem { text }) => {
-                        ResponseItem::Reason { text: text.clone() }
+                        vec![ResponseItem::Reason { text: text.clone() }]
                     }
                     TurnItem::ToolCall(ToolCallItem {
                         tool_call_id,
                         tool_name,
                         input,
-                    }) => ResponseItem::ToolCall {
+                    }) => vec![ResponseItem::ToolCall {
                         id: tool_call_id.clone(),
                         name: tool_name.clone(),
                         input: input.clone(),
-                    },
+                    }],
                     TurnItem::ToolResult(ToolResultItem {
                         tool_call_id,
                         output,
                         is_error,
                         ..
-                    }) => ResponseItem::ToolCallOutput {
+                    }) => vec![ResponseItem::ToolCallOutput {
                         tool_use_id: tool_call_id.clone(),
                         content: match output {
                             serde_json::Value::String(text) => text.clone(),
                             other => other.to_string(),
                         },
                         is_error: *is_error,
-                    },
+                    }],
+                    TurnItem::CommandExecution(CommandExecutionItem {
+                        tool_call_id,
+                        tool_name,
+                        input,
+                        output,
+                        is_error,
+                        ..
+                    }) => vec![
+                        ResponseItem::ToolCall {
+                            id: tool_call_id.clone(),
+                            name: tool_name.clone(),
+                            input: input.clone(),
+                        },
+                        ResponseItem::ToolCallOutput {
+                            tool_use_id: tool_call_id.clone(),
+                            content: match output {
+                                serde_json::Value::String(text) => text.clone(),
+                                other => other.to_string(),
+                            },
+                            is_error: *is_error,
+                        },
+                    ],
                     TurnItem::ToolProgress(_)
                     | TurnItem::ApprovalRequest(_)
                     | TurnItem::ApprovalDecision(_)
-                    | TurnItem::TurnSummary(_) => return None,
+                    | TurnItem::TurnSummary(_) => Vec::new(),
                 };
-                (!response_item.is_reason()).then_some((item.item_id, response_item))
+                response_items
+                    .into_iter()
+                    .filter(|response_item| !response_item.is_reason())
+                    .map(|response_item| (item.item_id, response_item))
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         let preserved = compacted_items.get(1..).unwrap_or(&[]);
@@ -382,5 +408,52 @@ impl ServerRuntime {
             })
             .unwrap_or_default();
         TurnItem::ContextCompaction(TextItem { text: summary_text })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn preserved_item_ids_match_complete_command_execution_pair() {
+        let command_item_id = ItemId::new();
+        let command_input = serde_json::json!({ "cmd": "printf ok" });
+        let command_output = serde_json::Value::String("ok".to_string());
+        let persisted_turn_items = vec![crate::execution::PersistedTurnItem {
+            turn_id: TurnId::new(),
+            item_id: command_item_id,
+            turn_item: TurnItem::CommandExecution(CommandExecutionItem {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "exec_command".to_string(),
+                command: "printf ok".to_string(),
+                input: command_input.clone(),
+                output: command_output.clone(),
+                is_error: false,
+            }),
+        }];
+        let compacted_items = vec![
+            ResponseItem::Message(Message::assistant_text("summary")),
+            ResponseItem::ToolCall {
+                id: "call-1".to_string(),
+                name: "exec_command".to_string(),
+                input: command_input,
+            },
+            ResponseItem::ToolCallOutput {
+                tool_use_id: "call-1".to_string(),
+                content: "ok".to_string(),
+                is_error: false,
+            },
+        ];
+
+        assert_eq!(
+            ServerRuntime::preserved_item_ids_from_compacted(
+                &persisted_turn_items,
+                &compacted_items
+            ),
+            vec![command_item_id, command_item_id]
+        );
     }
 }

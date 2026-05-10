@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::app_command::InputHistoryDirection;
+use devo_core::ItemId;
 use devo_core::SessionId;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
@@ -55,6 +56,20 @@ pub(crate) enum WorkerEvent {
     },
     /// A steer (/btw) was accepted by the server.
     SteerAccepted { turn_id: TurnId },
+    /// A streamed assistant or reasoning text item started.
+    TextItemStarted { item_id: ItemId, kind: TextItemKind },
+    /// Incremental text for a streamed assistant or reasoning item.
+    TextItemDelta {
+        item_id: ItemId,
+        kind: TextItemKind,
+        delta: String,
+    },
+    /// A streamed assistant or reasoning text item completed.
+    TextItemCompleted {
+        item_id: ItemId,
+        kind: TextItemKind,
+        final_text: String,
+    },
     /// Incremental assistant text.
     TextDelta(String),
     /// Incremental reasoning text.
@@ -89,6 +104,23 @@ pub(crate) enum WorkerEvent {
         is_error: bool,
         /// Whether the preview was truncated for display.
         truncated: bool,
+    },
+    ApprovalRequest {
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        action_summary: String,
+        justification: String,
+        resource: Option<String>,
+        available_scopes: Vec<String>,
+        path: Option<String>,
+        host: Option<String>,
+        target: Option<String>,
+    },
+    ApprovalDecision {
+        approval_id: String,
+        decision: String,
+        scope: String,
     },
     /// Live usage update for the active turn.
     UsageUpdated {
@@ -248,6 +280,12 @@ pub(crate) enum WorkerEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextItemKind {
+    Assistant,
+    Reasoning,
+}
+
 /// One rendered transcript item shown in the history pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TranscriptItem {
@@ -328,6 +366,7 @@ pub(crate) enum TranscriptItemKind {
     ToolResult,
     /// Failed tool result or runtime error.
     Error,
+    Approval,
     /// Local UI/system note that is not model-authored content.
     System,
     /// Turn summary with model name and duration.

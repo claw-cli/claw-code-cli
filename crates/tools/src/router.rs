@@ -1,16 +1,20 @@
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use devo_safety::ResourceKind;
 use futures::future::join_all;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::invocation::{ToolCallId, ToolContent, ToolInvocation, ToolName};
 use crate::registry::ToolRegistry;
+use crate::tool_spec::ToolCapabilityTag;
 
 type ProgressCallback = dyn Fn(&str, &str) + Send + Sync;
 type ProgressCallbackArc = Arc<ProgressCallback>;
 type PermissionFuture = futures::future::BoxFuture<'static, Result<(), String>>;
-type PermissionCheckFn = dyn Fn(&str) -> PermissionFuture + Send + Sync;
+type PermissionCheckFn = dyn Fn(ToolPermissionRequest) -> PermissionFuture + Send + Sync;
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {
@@ -48,6 +52,7 @@ pub struct ToolRuntime {
     registry: Arc<ToolRegistry>,
     permission: PermissionChecker,
     gate: RwLock<()>,
+    context: ToolRuntimeContext,
 }
 
 impl ToolRuntime {
@@ -56,6 +61,20 @@ impl ToolRuntime {
             registry,
             permission,
             gate: RwLock::new(()),
+            context: ToolRuntimeContext::default(),
+        }
+    }
+
+    pub fn new_with_context(
+        registry: Arc<ToolRegistry>,
+        permission: PermissionChecker,
+        context: ToolRuntimeContext,
+    ) -> Self {
+        ToolRuntime {
+            registry,
+            permission,
+            gate: RwLock::new(()),
+            context,
         }
     }
 
@@ -64,6 +83,7 @@ impl ToolRuntime {
             registry,
             permission: PermissionChecker::always_allow(),
             gate: RwLock::new(()),
+            context: ToolRuntimeContext::default(),
         }
     }
 
@@ -126,13 +146,13 @@ impl ToolRuntime {
             }
         };
 
-        if !self.registry.is_read_only(&call.name) {
-            match self.permission.check(&call.name).await {
+        if let Some(request) = self.permission_request_for_call(call) {
+            match self.permission.check(request).await {
                 Ok(()) => {}
                 Err(reason) => {
                     return ToolCallResult::error(
                         &call.id,
-                        &format!("permission denied: {}", reason),
+                        &format!("permission denied: {reason}"),
                     );
                 }
             }
@@ -143,8 +163,8 @@ impl ToolRuntime {
         let invocation = ToolInvocation {
             call_id: ToolCallId(call.id.clone()),
             tool_name: ToolName(call.name.clone().into()),
-            session_id: String::new(),
-            cwd: std::path::PathBuf::new(),
+            session_id: self.context.session_id.clone(),
+            cwd: self.context.cwd.clone(),
             input: call.input.clone(),
         };
 
@@ -173,6 +193,44 @@ impl ToolRuntime {
             Err(e) => ToolCallResult::error(&call.id, &e.to_string()),
         }
     }
+
+    fn permission_request_for_call(&self, call: &ToolCall) -> Option<ToolPermissionRequest> {
+        let spec = self.registry.spec(&call.name)?;
+        let needs_permission = spec.execution_mode == crate::tool_spec::ToolExecutionMode::Mutating
+            || spec
+                .capability_tags
+                .iter()
+                .any(|tag| matches!(tag, ToolCapabilityTag::NetworkAccess));
+        if !needs_permission {
+            return None;
+        }
+
+        let resource = resource_kind_for_tool(&call.name, &spec.capability_tags);
+        let path = path_for_tool_input(&call.name, &call.input, &self.context.cwd);
+        let host = host_for_tool_input(&call.name, &call.input);
+        let target = target_for_tool_input(&call.name, &call.input);
+        let command_prefix = command_prefix_for_tool_input(&call.name, &call.input);
+        Some(ToolPermissionRequest {
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            input: call.input.clone(),
+            cwd: self.context.cwd.clone(),
+            session_id: self.context.session_id.clone(),
+            turn_id: self.context.turn_id.clone(),
+            resource,
+            action_summary: crate::tool_summary::tool_summary(
+                &call.name,
+                &call.input,
+                &self.context.cwd,
+            ),
+            justification: justification_for_tool_input(&call.input),
+            path,
+            host,
+            target,
+            command_prefix,
+            requests_escalation: requests_explicit_escalation(&call.input),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -183,7 +241,7 @@ pub struct PermissionChecker {
 impl PermissionChecker {
     pub fn new<F>(check: F) -> Self
     where
-        F: Fn(&str) -> PermissionFuture + Send + Sync + 'static,
+        F: Fn(ToolPermissionRequest) -> PermissionFuture + Send + Sync + 'static,
     {
         PermissionChecker {
             inner: Arc::new(check),
@@ -194,9 +252,229 @@ impl PermissionChecker {
         PermissionChecker::new(|_| Box::pin(async { Ok(()) }))
     }
 
-    pub async fn check(&self, tool_name: &str) -> Result<(), String> {
-        (self.inner)(tool_name).await
+    pub async fn check(&self, request: ToolPermissionRequest) -> Result<(), String> {
+        (self.inner)(request).await
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolRuntimeContext {
+    pub session_id: String,
+    pub turn_id: Option<String>,
+    pub cwd: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolPermissionRequest {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub cwd: PathBuf,
+    pub session_id: String,
+    pub turn_id: Option<String>,
+    pub resource: ResourceKind,
+    pub action_summary: String,
+    pub justification: Option<String>,
+    pub path: Option<PathBuf>,
+    pub host: Option<String>,
+    pub target: Option<String>,
+    pub command_prefix: Option<Vec<String>>,
+    pub requests_escalation: bool,
+}
+
+fn resource_kind_for_tool(tool_name: &str, tags: &[ToolCapabilityTag]) -> ResourceKind {
+    if tags
+        .iter()
+        .any(|tag| matches!(tag, ToolCapabilityTag::NetworkAccess))
+    {
+        return ResourceKind::Network;
+    }
+    if tags
+        .iter()
+        .any(|tag| matches!(tag, ToolCapabilityTag::ExecuteProcess))
+    {
+        return ResourceKind::ShellExec;
+    }
+    if tags
+        .iter()
+        .any(|tag| matches!(tag, ToolCapabilityTag::WriteFiles))
+    {
+        return ResourceKind::FileWrite;
+    }
+    if tags.iter().any(|tag| {
+        matches!(
+            tag,
+            ToolCapabilityTag::ReadFiles | ToolCapabilityTag::SearchWorkspace
+        )
+    }) {
+        return ResourceKind::FileRead;
+    }
+    ResourceKind::Custom(tool_name.to_string())
+}
+
+fn path_for_tool_input(tool_name: &str, input: &serde_json::Value, cwd: &Path) -> Option<PathBuf> {
+    let raw = match tool_name {
+        "read" | "write" | "lsp" => input
+            .get("filePath")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.get("path").and_then(serde_json::Value::as_str)),
+        "grep" | "glob" => input.get("path").and_then(serde_json::Value::as_str),
+        _ => None,
+    }?;
+    let path = PathBuf::from(raw);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    })
+}
+
+fn host_for_tool_input(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "webfetch" => input
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .and_then(host_from_url),
+        "websearch" => input
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .map(|_| "websearch".to_string()),
+        _ => None,
+    }
+}
+
+fn host_from_url(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    after_scheme
+        .split('/')
+        .next()
+        .and_then(|host| (!host.is_empty()).then(|| host.to_string()))
+}
+
+fn target_for_tool_input(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "bash" | "shell_command" => input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        "exec_command" => input
+            .get("cmd")
+            .or_else(|| input.get("command"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        "webfetch" => input
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        "websearch" => input
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn command_prefix_for_tool_input(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Option<Vec<String>> {
+    if tool_name == "exec_command"
+        && let Some(prefix_rule) = input.get("prefix_rule").and_then(prefix_rule_from_value)
+    {
+        return Some(prefix_rule);
+    }
+
+    let command = match tool_name {
+        "bash" | "shell_command" => input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(serde_json::Value::as_str),
+        "exec_command" => input
+            .get("cmd")
+            .or_else(|| input.get("command"))
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    }?;
+    command_prefix(command)
+}
+
+fn prefix_rule_from_value(value: &serde_json::Value) -> Option<Vec<String>> {
+    let prefix = value
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>()?;
+    (!prefix.is_empty()).then(|| prefix.into_iter().map(str::to_string).collect())
+}
+
+fn requests_explicit_escalation(input: &serde_json::Value) -> bool {
+    matches!(
+        input
+            .get("sandbox_permissions")
+            .and_then(serde_json::Value::as_str),
+        Some("require_escalated" | "with_additional_permissions")
+    ) || input.get("additional_permissions").is_some()
+}
+
+fn command_prefix(command: &str) -> Option<Vec<String>> {
+    let argv = shlex::split(command)?;
+    if argv
+        .iter()
+        .any(|token| shell_token_requires_user_scope(command, token))
+        || argv
+            .first()
+            .is_some_and(|token| looks_like_env_assignment(token))
+    {
+        return None;
+    }
+    prefix_from_argv(&argv)
+}
+
+fn shell_token_requires_user_scope(command: &str, token: &str) -> bool {
+    token.contains(['|', ';', '>', '<', '*', '?', '$', '(', ')'])
+        || token.contains("$(")
+        || command.contains("&&")
+        || command.contains("||")
+        || command.contains("$(")
+        || command.contains('`')
+}
+
+fn looks_like_env_assignment(token: &str) -> bool {
+    let Some((name, value)) = token.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && !value.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+}
+
+fn prefix_from_argv(argv: &[String]) -> Option<Vec<String>> {
+    let executable = argv.first()?.clone();
+    let second = argv
+        .iter()
+        .skip(1)
+        .find(|token| !token.starts_with('-'))
+        .cloned();
+    Some(
+        second
+            .map(|token| vec![executable.clone(), token])
+            .unwrap_or_else(|| vec![executable]),
+    )
+}
+
+fn justification_for_tool_input(input: &serde_json::Value) -> Option<String> {
+    input
+        .get("justification")
+        .or_else(|| input.get("description"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -211,6 +489,7 @@ mod tests {
     use crate::tool_handler::ToolHandler;
     use crate::tool_spec::{ToolExecutionMode, ToolOutputMode, ToolSpec};
     use async_trait::async_trait;
+    use pretty_assertions::assert_eq;
 
     struct ReadOnlyTool;
 
@@ -265,7 +544,7 @@ mod tests {
             input_schema: JsonSchema::object(Default::default(), None, None),
             output_mode: ToolOutputMode::Text,
             execution_mode: ToolExecutionMode::Mutating,
-            capability_tags: vec![],
+            capability_tags: vec![ToolCapabilityTag::WriteFiles],
             supports_parallel: false,
         });
         Arc::new(builder.build())
@@ -322,13 +601,18 @@ mod tests {
     #[tokio::test]
     async fn permission_checker_allow() {
         let checker = PermissionChecker::always_allow();
-        assert!(checker.check("any_tool").await.is_ok());
+        assert!(
+            checker
+                .check(test_permission_request("any_tool"))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn permission_checker_deny() {
-        let checker = PermissionChecker::new(|name| {
-            let n = name.to_string();
+        let checker = PermissionChecker::new(|request| {
+            let n = request.tool_name;
             Box::pin(async move {
                 if n == "blocked" {
                     Err("blocked".into())
@@ -337,15 +621,25 @@ mod tests {
                 }
             })
         });
-        assert!(checker.check("allowed").await.is_ok());
-        assert!(checker.check("blocked").await.is_err());
+        assert!(
+            checker
+                .check(test_permission_request("allowed"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            checker
+                .check(test_permission_request("blocked"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn runtime_denies_mutating_with_deny_checker() {
         let registry = make_registry();
-        let checker = PermissionChecker::new(|name| {
-            let n = name.to_string();
+        let checker = PermissionChecker::new(|request| {
+            let n = request.tool_name;
             Box::pin(async move { Err(format!("{n} denied")) })
         });
         let runtime = ToolRuntime::new(registry, checker);
@@ -375,6 +669,135 @@ mod tests {
                 .into_string()
                 .contains("permission denied")
         );
+    }
+
+    #[tokio::test]
+    async fn mutating_tool_permission_request_carries_context_and_summary() {
+        let registry = make_registry();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Mutex::new(Some(tx));
+        let checker = PermissionChecker::new(move |request| {
+            tx.lock()
+                .expect("lock sender")
+                .take()
+                .expect("send once")
+                .send(request)
+                .expect("receiver still alive");
+            Box::pin(async { Ok(()) })
+        });
+        let runtime = ToolRuntime::new_with_context(
+            registry,
+            checker,
+            ToolRuntimeContext {
+                session_id: "session-1".into(),
+                turn_id: Some("turn-1".into()),
+                cwd: PathBuf::from("C:/workspace"),
+            },
+        );
+        let call = ToolCall {
+            id: "call-1".into(),
+            name: "write_tool".into(),
+            input: serde_json::json!({ "filePath": "src/main.rs" }),
+        };
+
+        let result = runtime.execute_single(&call, &None).await;
+        let request = rx.await.expect("permission request");
+
+        assert!(!result.is_error);
+        assert_eq!(request.tool_call_id, "call-1");
+        assert_eq!(request.tool_name, "write_tool");
+        assert_eq!(request.session_id, "session-1");
+        assert_eq!(request.turn_id, Some("turn-1".into()));
+        assert_eq!(request.resource, devo_safety::ResourceKind::FileWrite);
+    }
+
+    #[test]
+    fn path_for_tool_input_resolves_relative_paths_against_cwd() {
+        let path = path_for_tool_input(
+            "write",
+            &serde_json::json!({ "filePath": "src/lib.rs" }),
+            Path::new("C:/workspace"),
+        );
+
+        assert_eq!(path, Some(PathBuf::from("C:/workspace").join("src/lib.rs")));
+    }
+
+    #[test]
+    fn host_from_url_ignores_scheme_and_path() {
+        assert_eq!(
+            host_from_url("https://example.com/docs/index.html"),
+            Some("example.com".into())
+        );
+    }
+
+    #[test]
+    fn command_prefix_uses_first_command_tokens() {
+        assert_eq!(
+            command_prefix("git add -A"),
+            Some(vec!["git".to_string(), "add".to_string()])
+        );
+        assert_eq!(
+            command_prefix("'cargo' test --all"),
+            Some(vec!["cargo".to_string(), "test".to_string()])
+        );
+    }
+
+    #[test]
+    fn command_prefix_rejects_complex_shell_features() {
+        assert_eq!(command_prefix("git add -A | tee out.txt"), None);
+        assert_eq!(command_prefix("npm test > output.txt"), None);
+        assert_eq!(command_prefix("echo $(pwd)"), None);
+        assert_eq!(command_prefix("echo $HOME"), None);
+        assert_eq!(command_prefix("FOO=bar cargo test"), None);
+        assert_eq!(command_prefix("(pwd)"), None);
+        assert_eq!(command_prefix("rg *.rs"), None);
+        assert_eq!(command_prefix("cargo fmt && cargo test"), None);
+    }
+
+    #[test]
+    fn exec_command_prefix_rule_overrides_derived_prefix() {
+        assert_eq!(
+            command_prefix_for_tool_input(
+                "exec_command",
+                &serde_json::json!({
+                    "cmd": "git add -A",
+                    "prefix_rule": ["cargo", "test"]
+                })
+            ),
+            Some(vec!["cargo".to_string(), "test".to_string()])
+        );
+    }
+
+    #[test]
+    fn explicit_sandbox_permissions_request_escalation() {
+        assert!(requests_explicit_escalation(&serde_json::json!({
+            "sandbox_permissions": "require_escalated"
+        })));
+        assert!(requests_explicit_escalation(&serde_json::json!({
+            "additional_permissions": {"network": true}
+        })));
+        assert!(!requests_explicit_escalation(&serde_json::json!({
+            "sandbox_permissions": "use_default"
+        })));
+    }
+
+    fn test_permission_request(tool_name: &str) -> ToolPermissionRequest {
+        ToolPermissionRequest {
+            tool_call_id: "call".into(),
+            tool_name: tool_name.into(),
+            input: serde_json::json!({}),
+            cwd: std::path::PathBuf::new(),
+            session_id: "session".into(),
+            turn_id: Some("turn".into()),
+            resource: devo_safety::ResourceKind::Custom(tool_name.into()),
+            action_summary: tool_name.into(),
+            justification: None,
+            path: None,
+            host: None,
+            target: None,
+            command_prefix: None,
+            requests_escalation: false,
+        }
     }
 
     #[tokio::test]

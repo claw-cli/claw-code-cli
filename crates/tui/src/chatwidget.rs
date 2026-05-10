@@ -8,13 +8,13 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use devo_core::ItemId;
 use devo_protocol::InputItem;
 use devo_protocol::Model;
 use devo_protocol::ProviderWireApi;
@@ -44,6 +44,8 @@ use devo_protocol::TurnId;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::bottom_pane::ApprovalOverlay;
+use crate::bottom_pane::ApprovalOverlayRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::InputResult;
@@ -54,13 +56,13 @@ use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
 use crate::events::SessionListEntry;
+use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
 use crate::exec_cell::truncated_tool_output_preview;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
-use crate::history_cell::AI_REPLY_WRAP_WIDTH;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
@@ -82,6 +84,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) app_event_tx: AppEventSender,
     pub(crate) initial_session: TuiSessionState,
     pub(crate) initial_thinking_selection: Option<String>,
+    pub(crate) initial_permission_preset: devo_protocol::PermissionPreset,
     pub(crate) initial_user_message: Option<UserMessage>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) is_first_run: bool,
@@ -214,6 +217,93 @@ struct PendingModelSelection {
     thinking_selection: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingApprovalRequest {
+    session_id: devo_protocol::SessionId,
+    turn_id: TurnId,
+    approval_id: String,
+    action_summary: String,
+}
+
+struct ActiveTextItem {
+    item_id: ActiveTextItemId,
+    kind: TextItemKind,
+    status: DotStatus,
+    stream_controller: Option<StreamController>,
+    raw_text: String,
+    cell: Option<history_cell::AgentMessageCell>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveTextItemId {
+    Server(ItemId),
+    Legacy(TextItemKind),
+}
+
+impl ActiveTextItemId {
+    fn log_label(self) -> String {
+        match self {
+            Self::Server(item_id) => item_id.to_string(),
+            Self::Legacy(kind) => format!("legacy-{kind:?}"),
+        }
+    }
+}
+
+fn permission_preset_items(current: devo_protocol::PermissionPreset) -> Vec<SelectionItem> {
+    [
+        (
+            devo_protocol::PermissionPreset::ReadOnly,
+            "Read Only",
+            "Devo can read files in the current workspace. Approval is required to edit files, run commands, or access the internet.",
+        ),
+        (
+            devo_protocol::PermissionPreset::Default,
+            "Default",
+            "Devo can read and edit files in the current workspace, and run commands. Approval is required to access the internet or edit other files.",
+        ),
+        (
+            devo_protocol::PermissionPreset::AutoReview,
+            "Auto-review",
+            "Same workspace-write permissions as Default, but eligible approvals are routed through the auto-reviewer before interrupting you.",
+        ),
+        (
+            devo_protocol::PermissionPreset::FullAccess,
+            "Full Access",
+            "Devo can edit files outside this workspace and access the internet without asking for approval. Exercise caution when using.",
+        ),
+    ]
+    .into_iter()
+    .map(|(preset, label, description)| {
+        let name = if preset == current {
+            format!("{label} (current)")
+        } else {
+            label.to_string()
+        };
+        SelectionItem {
+            name,
+            description: Some(description.to_string()),
+            is_current: preset == current,
+            dismiss_on_select: true,
+            actions: vec![Box::new(move |app_event_tx| {
+                app_event_tx.send(AppEvent::Command(AppCommand::UpdatePermissions {
+                    preset,
+                }));
+            })],
+            ..Default::default()
+        }
+    })
+    .collect()
+}
+
+fn permission_preset_label(preset: devo_protocol::PermissionPreset) -> &'static str {
+    match preset {
+        devo_protocol::PermissionPreset::ReadOnly => "Read Only",
+        devo_protocol::PermissionPreset::Default => "Default",
+        devo_protocol::PermissionPreset::AutoReview => "Auto-review",
+        devo_protocol::PermissionPreset::FullAccess => "Full Access",
+    }
+}
+
 pub(crate) struct ChatWidget {
     // App event, such as UserTurn, List Sessions, New Session, Onboard or Browser Input History
     app_event_tx: AppEventSender,
@@ -234,13 +324,8 @@ pub(crate) struct ChatWidget {
     queued_user_messages: VecDeque<UserMessage>,
     external_editor_state: ExternalEditorState,
     status_message: String,
-    active_assistant_text: String,
-    active_reasoning_text: String,
-    active_assistant_cell: Option<history_cell::AgentMessageCell>,
-    active_reasoning_cell: Option<history_cell::AgentMessageCell>,
-    stream_controller: Option<StreamController>,
+    active_text_items: Vec<ActiveTextItem>,
     stream_chunking_policy: AdaptiveChunkingPolicy,
-    reasoning_stream_active: bool,
     available_models: Vec<Model>,
     saved_model_slugs: Vec<String>,
     onboarding_step: Option<OnboardingStep>,
@@ -259,6 +344,8 @@ pub(crate) struct ChatWidget {
     last_query_total_tokens: usize,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
+    pending_approval: Option<PendingApprovalRequest>,
+    permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
     selection_mode: bool,
     selected_user_cell_index: Option<usize>,
@@ -280,6 +367,7 @@ impl ChatWidget {
             SlashCommand::Compact => "session",
             SlashCommand::New => "session",
             SlashCommand::Resume => "session",
+            SlashCommand::Permissions => "permissions",
             SlashCommand::Diff => "diff",
             SlashCommand::Exit | SlashCommand::Status | SlashCommand::Clear | SlashCommand::Btw => {
                 return;
@@ -347,6 +435,18 @@ impl ChatWidget {
     fn pending_dot_prefix() -> Line<'static> {
         Line::from(vec![
             Span::styled("▌", Style::default().fg(Color::Rgb(110, 200, 255))),
+            " ".into(),
+        ])
+    }
+
+    fn reasoning_dot_prefix(status: DotStatus) -> Line<'static> {
+        let color = match status {
+            DotStatus::Pending => Color::Rgb(210, 150, 60),
+            DotStatus::Completed => Color::Rgb(120, 220, 160),
+            DotStatus::Failed => Color::Rgb(255, 100, 100),
+        };
+        Line::from(vec![
+            Span::styled("▌", Style::default().fg(color)),
             " ".into(),
         ])
     }
@@ -597,11 +697,7 @@ impl ChatWidget {
         self.active_cell_revision = 0;
         self.active_tool_calls.clear();
         self.pending_tool_calls.clear();
-        self.active_assistant_text.clear();
-        self.active_reasoning_text.clear();
-        self.active_assistant_cell = None;
-        self.active_reasoning_cell = None;
-        self.stream_controller = None;
+        self.active_text_items.clear();
         self.bottom_pane.clear_composer();
         self.set_status_message("Resuming session");
     }
@@ -623,6 +719,7 @@ impl ChatWidget {
             app_event_tx,
             initial_session,
             initial_thinking_selection,
+            initial_permission_preset,
             initial_user_message,
             enhanced_keys_supported,
             is_first_run,
@@ -695,13 +792,8 @@ impl ChatWidget {
             queued_user_messages,
             external_editor_state: ExternalEditorState::Closed,
             status_message: "Ready".to_string(),
-            active_assistant_text: String::new(),
-            active_reasoning_text: String::new(),
-            active_assistant_cell: None,
-            active_reasoning_cell: None,
-            stream_controller: None,
+            active_text_items: Vec::new(),
             stream_chunking_policy: AdaptiveChunkingPolicy::default(),
-            reasoning_stream_active: false,
             available_models,
             saved_model_slugs,
             onboarding_step: None,
@@ -720,6 +812,8 @@ impl ChatWidget {
             last_query_total_tokens: 0,
             queued_count: 0,
             active_turn_id: None,
+            pending_approval: None,
+            permission_preset: initial_permission_preset,
             busy: false,
             selection_mode: false,
             selected_user_cell_index: None,
@@ -770,7 +864,7 @@ impl ChatWidget {
                             self.session.model.as_ref().map(|m| m.slug.clone()),
                             self.thinking_selection.clone(),
                             /*sandbox*/ None,
-                            /*approval_policy*/ None,
+                            Some("on-request".to_string()),
                         )));
                     self.set_status_message("Message queued");
                 } else {
@@ -1022,9 +1116,7 @@ impl ChatWidget {
 
     pub(crate) fn pre_draw_tick(&mut self) {
         self.advance_startup_header_animation();
-        if self.stream_controller.is_some() {
-            self.run_stream_commit_tick();
-        }
+        self.run_stream_commit_tick();
         self.bottom_pane.pre_draw_tick();
     }
 
@@ -1065,10 +1157,15 @@ impl ChatWidget {
                 }
                 self.set_status_message(format!("Command queued: {}", command.kind()));
             }
+            AppEvent::RunSlashCommand { command } => {
+                if let Ok(command) = command.parse::<SlashCommand>() {
+                    self.handle_slash_command(command, String::new());
+                }
+                self.frame_requester.schedule_frame();
+            }
             AppEvent::Exit(_)
             | AppEvent::OpenSlashCommandPopup
             | AppEvent::ClosePopup
-            | AppEvent::RunSlashCommand { .. }
             | AppEvent::OpenModelPicker
             | AppEvent::OpenThinkingPicker
             | AppEvent::OpenThemePicker
@@ -1110,47 +1207,83 @@ impl ChatWidget {
                 self.session.reasoning_effort = reasoning_effort;
                 self.refresh_header_box();
                 self.busy = true;
-                self.active_assistant_text.clear();
-                self.active_reasoning_text.clear();
-                self.active_assistant_cell = None;
-                self.active_reasoning_cell = None;
-                self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
+                self.active_text_items.clear();
                 self.stream_chunking_policy.reset();
-                self.reasoning_stream_active = false;
                 self.bottom_pane.set_task_running(true);
             }
+            WorkerEvent::TextItemStarted { item_id, kind } => {
+                self.start_text_item(ActiveTextItemId::Server(item_id), kind);
+                self.set_status_message(match kind {
+                    TextItemKind::Assistant => "Generating",
+                    TextItemKind::Reasoning => "Thinking",
+                });
+            }
+            WorkerEvent::TextItemDelta {
+                item_id,
+                kind,
+                delta,
+            } => {
+                self.push_text_item_delta(ActiveTextItemId::Server(item_id), kind, &delta);
+                self.set_status_message(match kind {
+                    TextItemKind::Assistant => "Generating",
+                    TextItemKind::Reasoning => "Thinking",
+                });
+            }
+            WorkerEvent::TextItemCompleted {
+                item_id,
+                kind,
+                final_text,
+            } => {
+                self.complete_text_item(ActiveTextItemId::Server(item_id), kind, final_text);
+                self.set_status_message(match kind {
+                    TextItemKind::Assistant => "Generating",
+                    TextItemKind::Reasoning => "Thinking",
+                });
+            }
             WorkerEvent::TextDelta(text) => {
-                self.push_assistant_stream_delta(&text);
+                if !self.has_server_active_item(TextItemKind::Assistant) {
+                    self.push_text_item_delta(
+                        ActiveTextItemId::Legacy(TextItemKind::Assistant),
+                        TextItemKind::Assistant,
+                        &text,
+                    );
+                }
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningDelta(text) => {
-                self.reasoning_stream_active = true;
-                self.active_reasoning_text.push_str(&text);
-                self.sync_active_reasoning_cell();
+                if !self.has_server_active_item(TextItemKind::Reasoning) {
+                    self.push_text_item_delta(
+                        ActiveTextItemId::Legacy(TextItemKind::Reasoning),
+                        TextItemKind::Reasoning,
+                        &text,
+                    );
+                }
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                if self.busy && self.stream_controller.is_none() {
-                    self.active_assistant_text = text;
+                if !self.has_server_active_item(TextItemKind::Assistant) {
+                    self.complete_text_item(
+                        ActiveTextItemId::Legacy(TextItemKind::Assistant),
+                        TextItemKind::Assistant,
+                        text,
+                    );
                 }
-                self.sync_active_assistant_cell();
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningCompleted(text) => {
-                if self.busy {
-                    self.active_reasoning_text = text;
+                if !self.has_server_active_item(TextItemKind::Reasoning) {
+                    self.complete_text_item(
+                        ActiveTextItemId::Legacy(TextItemKind::Reasoning),
+                        TextItemKind::Reasoning,
+                        text,
+                    );
                 }
-                self.sync_active_reasoning_cell();
-                self.reasoning_stream_active = false;
-                self.flush_stream_commit_ticks();
                 self.set_status_message("Thinking");
             }
             WorkerEvent::ToolCall {
                 tool_use_id,
                 summary,
             } => {
-                // Do not commit active streams here — pending tool calls share the
-                // active viewport alongside reasoning/assistant text.
                 let title = summary;
                 let tool_call = ActiveToolCall {
                     tool_use_id: tool_use_id.clone(),
@@ -1159,26 +1292,21 @@ impl ChatWidget {
                 };
                 self.active_tool_calls
                     .insert(tool_use_id.clone(), tool_call.clone());
-                self.pending_tool_calls.push(tool_call);
+                self.add_history_entry_without_redraw(Box::new(
+                    history_cell::AgentMessageCell::new_with_prefix(
+                        tool_call.lines,
+                        self.dot_prefix(DotStatus::Pending),
+                        "  ",
+                        false,
+                    ),
+                ));
                 self.frame_requester.schedule_frame();
                 self.set_status_message("Tool started");
             }
             WorkerEvent::ToolOutputDelta { tool_use_id, delta } => {
-                // Append streaming output to the active tool call lines
                 if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
                     let line = Line::from(delta.clone()).patch_style(Self::tool_text_style());
                     tool_call.lines.push(line);
-                    // Also update the pending viewport entry
-                    if let Some(pending) = self
-                        .pending_tool_calls
-                        .iter_mut()
-                        .find(|tc| tc.tool_use_id == tool_use_id)
-                    {
-                        pending
-                            .lines
-                            .push(Line::from(delta).patch_style(Self::tool_text_style()));
-                    }
-                    self.frame_requester.schedule_frame();
                 }
             }
             WorkerEvent::ToolResult {
@@ -1188,7 +1316,6 @@ impl ChatWidget {
                 is_error,
                 truncated,
             } => {
-                self.commit_active_streams(DotStatus::Completed);
                 // Remove from pending viewport entries — it will be committed to history below.
                 if let Some(pos) = self
                     .pending_tool_calls
@@ -1232,7 +1359,59 @@ impl ChatWidget {
                     "Tool completed"
                 });
             }
-            // TODO: The token usage should include `total_input_cahed_tokens` or `total_read_cached_tokens`
+            WorkerEvent::ApprovalRequest {
+                session_id,
+                turn_id,
+                approval_id,
+                action_summary,
+                justification,
+                resource,
+                available_scopes,
+                path,
+                host,
+                target,
+            } => {
+                self.commit_active_streams(DotStatus::Completed);
+                self.pending_approval = Some(PendingApprovalRequest {
+                    session_id,
+                    turn_id,
+                    approval_id: approval_id.clone(),
+                    action_summary: action_summary.clone(),
+                });
+                self.bottom_pane
+                    .open_popup_view(Box::new(ApprovalOverlay::new(
+                        ApprovalOverlayRequest {
+                            session_id,
+                            turn_id,
+                            approval_id,
+                            action_summary,
+                            justification,
+                            resource,
+                            available_scopes,
+                            path,
+                            host,
+                            target,
+                        },
+                        self.app_event_tx.clone(),
+                        self.active_accent_color(),
+                    )));
+                self.busy = true;
+                self.bottom_pane.set_task_running(false);
+                self.set_status_message("Approval required");
+            }
+            WorkerEvent::ApprovalDecision {
+                approval_id: _,
+                decision,
+                scope,
+            } => {
+                self.pending_approval = None;
+                let symbol = if decision == "approve" { "✔" } else { "✗" };
+                self.add_to_history(history_cell::new_info_event(
+                    format!("{symbol} Permission request {decision} ({scope})"),
+                    None,
+                ));
+                self.bottom_pane.set_task_running(self.busy);
+            }
             WorkerEvent::UsageUpdated {
                 total_input_tokens,
                 total_output_tokens,
@@ -1261,6 +1440,7 @@ impl ChatWidget {
                 self.commit_active_streams(DotStatus::Completed);
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
+                self.pending_approval = None;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1305,6 +1485,7 @@ impl ChatWidget {
                 self.commit_active_streams(DotStatus::Failed);
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
+                self.pending_approval = None;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1373,13 +1554,8 @@ impl ChatWidget {
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
-                self.active_assistant_text.clear();
-                self.active_reasoning_text.clear();
-                self.active_assistant_cell = None;
-                self.active_reasoning_cell = None;
-                self.stream_controller = None;
+                self.active_text_items.clear();
                 self.stream_chunking_policy.reset();
-                self.reasoning_stream_active = false;
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.busy = false;
@@ -1418,13 +1594,8 @@ impl ChatWidget {
                 self.session.reasoning_effort = reasoning_effort;
                 self.history.clear();
                 self.next_history_flush_index = 0;
-                self.active_assistant_text.clear();
-                self.active_reasoning_text.clear();
-                self.active_assistant_cell = None;
-                self.active_reasoning_cell = None;
-                self.stream_controller = None;
+                self.active_text_items.clear();
                 self.stream_chunking_policy.reset();
-                self.reasoning_stream_active = false;
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
                 self.total_cache_read_tokens = total_cache_read_tokens;
@@ -1539,7 +1710,7 @@ impl ChatWidget {
                 self.session.model.as_ref().map(|model| model.slug.clone()),
                 self.thinking_selection.clone(),
                 /*sandbox*/ None,
-                /*approval_policy*/ None,
+                Some("on-request".to_string()),
             )));
         self.set_status_message("Submitted locally");
     }
@@ -1558,13 +1729,8 @@ impl ChatWidget {
             SlashCommand::Clear => {
                 self.history.clear();
                 self.next_history_flush_index = 0;
-                self.active_assistant_text.clear();
-                self.active_reasoning_text.clear();
-                self.active_assistant_cell = None;
-                self.active_reasoning_cell = None;
-                self.stream_controller = None;
+                self.active_text_items.clear();
                 self.stream_chunking_policy.reset();
-                self.reasoning_stream_active = false;
                 self.set_status_message("Transcript cleared");
             }
             SlashCommand::Onboard => {
@@ -1595,6 +1761,9 @@ impl ChatWidget {
                 ]);
                 self.add_to_history(PlainHistoryCell::new(lines));
                 self.set_status_message("Session status shown");
+            }
+            SlashCommand::Permissions => {
+                self.open_permissions_picker();
             }
             SlashCommand::Theme => {
                 self.open_theme_picker();
@@ -1794,12 +1963,8 @@ impl ChatWidget {
         body: &str,
         status: DotStatus,
     ) {
-        let markdown_width = if title == "Assistant" || title == "Reasoning" {
-            None
-        } else {
-            Some(AI_REPLY_WRAP_WIDTH)
-        };
-        let mut lines = if title == "Assistant" || title == "Reasoning" {
+        let is_ai_message = title == "Assistant" || title == "Reasoning";
+        let mut lines = if is_ai_message {
             Vec::new()
         } else {
             vec![Line::from(title.to_string()).bold()]
@@ -1808,7 +1973,7 @@ impl ChatWidget {
             let mut body_lines = Vec::new();
             append_markdown(
                 body,
-                markdown_width,
+                /*width*/ None,
                 Some(&self.session.cwd),
                 &mut body_lines,
             );
@@ -1821,9 +1986,9 @@ impl ChatWidget {
             }
             lines.extend(body_lines);
         } else {
-            append_markdown(body, markdown_width, Some(&self.session.cwd), &mut lines);
+            append_markdown(body, None, Some(&self.session.cwd), &mut lines);
         }
-        if title == "Assistant" || title == "Reasoning" {
+        if is_ai_message {
             self.add_history_entry_without_redraw(Box::new(
                 history_cell::AgentMessageCell::new_ai_response_with_prefix(
                     lines,
@@ -1897,8 +2062,8 @@ impl ChatWidget {
             TranscriptItemKind::ToolCall => {
                 self.add_history_entry_without_redraw(Box::new(
                     history_cell::AgentMessageCell::new_with_prefix(
-                        vec![Self::ran_tool_line(&item.title)],
-                        Self::tool_dot_prefix(),
+                        vec![Self::running_tool_line(&item.title)],
+                        self.dot_prefix(DotStatus::Pending),
                         "  ",
                         false,
                     ),
@@ -1919,6 +2084,7 @@ impl ChatWidget {
             TranscriptItemKind::Error => self.add_history_entry_without_redraw(Box::new(
                 history_cell::new_error_event_with_hint(item.body, Some(item.title)),
             )),
+            TranscriptItemKind::Approval => {}
             TranscriptItemKind::System => {
                 self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
                     item.title,
@@ -1939,157 +2105,339 @@ impl ChatWidget {
     }
 
     fn commit_active_streams(&mut self, status: DotStatus) {
-        // Take the text first so any buffered delta events that arrive after
-        // this call will not re-create the active reasoning/assistant cells
-        // with stale content.
-        let reasoning_text = std::mem::take(&mut self.active_reasoning_text);
-        self.active_reasoning_cell = None;
-        self.active_assistant_cell = None;
-        self.reasoning_stream_active = false;
-        if !reasoning_text.trim().is_empty() {
-            self.add_markdown_history_with_status("Reasoning", &reasoning_text, status);
-        }
-        if let Some(controller) = self.stream_controller.as_mut() {
-            if let Some(cell) = controller.finalize() {
-                self.add_history_entry_without_redraw(cell);
-            }
-            self.stream_controller = None;
-            self.stream_chunking_policy.reset();
-        } else {
-            let assistant_text = std::mem::take(&mut self.active_assistant_text);
-            if !assistant_text.trim().is_empty() {
-                self.add_markdown_history_with_status_without_redraw(
-                    "Assistant",
-                    &assistant_text,
-                    status,
-                );
-            }
+        tracing::debug!(
+            status = ?status,
+            active_items = ?self.active_text_item_log_order(),
+            "committing all active text items"
+        );
+        while !self.active_text_items.is_empty() {
+            self.commit_text_item_at(0, status);
         }
     }
 
-    fn push_assistant_stream_delta(&mut self, text: &str) {
-        if self.stream_controller.is_none() {
-            self.stream_controller = Some(StreamController::new(None, &self.session.cwd));
-            self.stream_chunking_policy.reset();
+    fn start_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) {
+        if self
+            .active_text_items
+            .iter()
+            .any(|item| item.item_id == item_id)
+        {
+            return;
         }
-        if let Some(controller) = self.stream_controller.as_mut() {
-            controller.push(text);
+
+        let stream_controller = match kind {
+            TextItemKind::Assistant => Some(StreamController::new(None, &self.session.cwd)),
+            TextItemKind::Reasoning => None,
+        };
+        let insert_index = self.active_text_item_insert_index(kind);
+        tracing::debug!(
+            item_id = %item_id.log_label(),
+            kind = ?kind,
+            insert_index,
+            before = ?self.active_text_item_log_order(),
+            "starting active text item"
+        );
+        self.active_text_items.insert(
+            insert_index,
+            ActiveTextItem {
+                item_id,
+                kind,
+                status: DotStatus::Pending,
+                stream_controller,
+                raw_text: String::new(),
+                cell: None,
+            },
+        );
+        tracing::trace!(
+            after = ?self.active_text_item_log_order(),
+            "active text item order after start"
+        );
+        self.stream_chunking_policy.reset();
+    }
+
+    fn push_text_item_delta(&mut self, item_id: ActiveTextItemId, kind: TextItemKind, delta: &str) {
+        let index = self.ensure_text_item(item_id, kind);
+        tracing::debug!(
+            item_id = %item_id.log_label(),
+            kind = ?kind,
+            delta_len = delta.len(),
+            active_items = ?self.active_text_item_log_order(),
+            "received active text item delta"
+        );
+        match kind {
+            TextItemKind::Assistant => {
+                if let Some(controller) = self.active_text_items[index].stream_controller.as_mut() {
+                    controller.push(delta);
+                }
+            }
+            TextItemKind::Reasoning => {
+                self.active_text_items[index].raw_text.push_str(delta);
+            }
         }
-        self.sync_active_assistant_cell();
+        self.sync_text_item_cell(index);
         self.frame_requester.schedule_frame();
     }
 
-    fn flush_assistant_stream_commits(&mut self) {
-        self.sync_active_assistant_cell();
-    }
-
-    fn finalize_assistant_stream(&mut self) {
-        self.stream_controller = None;
-        self.sync_active_assistant_cell();
-    }
-
-    fn sync_active_assistant_cell(&mut self) {
-        if let Some(controller) = &self.stream_controller {
-            let lines = controller.live_lines();
-            if lines.iter().any(|line| !Self::is_blank_line(line)) {
-                self.active_assistant_cell =
-                    Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
-                        lines,
-                        Self::pending_dot_prefix(),
-                        "  ",
-                        false,
-                    ));
-            } else {
-                self.active_assistant_cell = None;
-            }
-        } else if !self.active_assistant_text.trim().is_empty() {
-            self.active_assistant_cell =
-                Some(self.bulleted_markdown_cell(
-                    &self.active_assistant_text,
-                    Self::pending_dot_prefix(),
-                ));
-        } else {
-            self.active_assistant_cell = None;
+    fn complete_text_item(
+        &mut self,
+        item_id: ActiveTextItemId,
+        kind: TextItemKind,
+        final_text: String,
+    ) {
+        let index = self.ensure_text_item(item_id, kind);
+        tracing::debug!(
+            item_id = %item_id.log_label(),
+            kind = ?kind,
+            final_text_len = final_text.len(),
+            active_items = ?self.active_text_item_log_order(),
+            "completed active text item"
+        );
+        self.active_text_items[index].status = DotStatus::Completed;
+        if !final_text.trim().is_empty() {
+            self.active_text_items[index].raw_text = final_text;
         }
+        self.sync_text_item_cell(index);
+        self.commit_completed_text_items();
+    }
+
+    fn ensure_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) -> usize {
+        if let Some(index) = self
+            .active_text_items
+            .iter()
+            .position(|item| item.item_id == item_id)
+        {
+            return index;
+        }
+
+        self.start_text_item(item_id, kind);
+        self.active_text_items
+            .iter()
+            .position(|item| item.item_id == item_id)
+            .unwrap_or_else(|| self.active_text_items.len().saturating_sub(1))
+    }
+
+    fn has_server_active_item(&self, kind: TextItemKind) -> bool {
+        self.active_text_items
+            .iter()
+            .any(|item| matches!(item.item_id, ActiveTextItemId::Server(_)) && item.kind == kind)
+    }
+
+    fn commit_text_item_at(&mut self, index: usize, status: DotStatus) {
+        if index >= self.active_text_items.len() {
+            return;
+        }
+
+        let mut item = self.active_text_items.remove(index);
+        tracing::debug!(
+            item_id = %item.item_id.log_label(),
+            kind = ?item.kind,
+            status = ?status,
+            remaining = ?self.active_text_item_log_order(),
+            "committing active text item"
+        );
+        match item.kind {
+            TextItemKind::Assistant => {
+                if let Some(controller) = item.stream_controller.as_mut() {
+                    let (_cell, source) = controller.finalize();
+                    if let Some(source) = source {
+                        self.add_assistant_markdown_source(source, status);
+                    } else if !item.raw_text.trim().is_empty() {
+                        self.add_markdown_history_with_status_without_redraw(
+                            "Assistant",
+                            &item.raw_text,
+                            status,
+                        );
+                    }
+                } else if !item.raw_text.trim().is_empty() {
+                    self.add_markdown_history_with_status_without_redraw(
+                        "Assistant",
+                        &item.raw_text,
+                        status,
+                    );
+                }
+            }
+            TextItemKind::Reasoning => {
+                if !item.raw_text.trim().is_empty() {
+                    self.add_markdown_history_with_status("Reasoning", &item.raw_text, status);
+                }
+            }
+        }
+        self.stream_chunking_policy.reset();
+    }
+
+    fn add_assistant_markdown_source(&mut self, source: String, status: DotStatus) {
+        if source.trim().is_empty() {
+            return;
+        }
+
+        self.add_history_entry_without_redraw(Box::new(history_cell::AgentMarkdownCell::new(
+            source,
+            &self.session.cwd,
+            self.dot_prefix(status),
+            "  ",
+        )));
+    }
+
+    fn active_text_item_insert_index(&self, kind: TextItemKind) -> usize {
+        match kind {
+            TextItemKind::Reasoning => self
+                .active_text_items
+                .iter()
+                .position(|item| item.kind == TextItemKind::Assistant)
+                .unwrap_or(self.active_text_items.len()),
+            TextItemKind::Assistant => self.active_text_items.len(),
+        }
+    }
+
+    fn commit_completed_text_items(&mut self) {
+        let mut index = 0;
+        while index < self.active_text_items.len() {
+            let item = &self.active_text_items[index];
+            if item.status != DotStatus::Completed {
+                index += 1;
+                continue;
+            }
+
+            if item.kind == TextItemKind::Assistant
+                && self.active_text_items[..index]
+                    .iter()
+                    .any(|prior| prior.kind == TextItemKind::Reasoning)
+            {
+                tracing::debug!(
+                    item_id = %item.item_id.log_label(),
+                    active_items = ?self.active_text_item_log_order(),
+                    "deferring assistant commit until prior reasoning item commits"
+                );
+                index += 1;
+                continue;
+            }
+
+            self.commit_text_item_at(index, DotStatus::Completed);
+        }
+    }
+
+    fn active_text_item_log_order(&self) -> Vec<String> {
+        self.active_text_items
+            .iter()
+            .map(|item| {
+                format!(
+                    "{:?}:{}:{:?}",
+                    item.kind,
+                    item.item_id.log_label(),
+                    item.status
+                )
+            })
+            .collect()
     }
 
     fn run_stream_commit_tick(&mut self) {
-        if self.reasoning_stream_active {
-            return;
-        }
-        self.drain_stream_commit_tick(true);
-    }
-
-    fn flush_stream_commit_ticks(&mut self) {
-        if self.reasoning_stream_active {
-            return;
-        }
-        if let Some(controller) = self.stream_controller.as_mut() {
-            let queue_len = controller.queued_lines();
-            if queue_len == 0 {
-                return;
-            }
-            // Drain all queued lines in one batch so they become a single
-            // history cell rather than multiple cells separated by blank rows.
-            let (cell, _idle) = controller.on_commit_tick_batch(queue_len);
-            if let Some(cell) = cell {
-                self.add_history_entry_without_redraw(cell);
-                self.sync_active_assistant_cell();
-                self.frame_requester.schedule_frame();
-            }
-        }
-    }
-
-    fn drain_stream_commit_tick(&mut self, schedule_followup: bool) {
         let now = Instant::now();
-        let output = run_commit_tick(
-            &mut self.stream_chunking_policy,
-            self.stream_controller.as_mut(),
-            CommitTickScope::AnyMode,
-            now,
-        );
+        let mut output_cells = Vec::new();
+        let mut needs_followup = false;
+        let mut changed_indexes = Vec::new();
 
-        if !output.cells.is_empty() {
-            for cell in output.cells {
-                self.add_history_entry_without_redraw(cell);
+        for (index, item) in self.active_text_items.iter_mut().enumerate() {
+            let Some(controller) = item.stream_controller.as_mut() else {
+                continue;
+            };
+            let output = run_commit_tick(
+                &mut self.stream_chunking_policy,
+                Some(controller),
+                CommitTickScope::AnyMode,
+                now,
+            );
+            if item.kind == TextItemKind::Assistant {
+                if !output.cells.is_empty() {
+                    changed_indexes.push(index);
+                }
+                if !output.all_idle {
+                    needs_followup = true;
+                }
+                continue;
             }
-            self.sync_active_assistant_cell();
+            if !output.cells.is_empty() {
+                output_cells.extend(output.cells);
+                changed_indexes.push(index);
+            }
+            if !output.all_idle {
+                needs_followup = true;
+            }
+        }
+
+        for cell in output_cells {
+            self.add_history_entry_without_redraw(cell);
+        }
+        for index in changed_indexes {
+            self.sync_text_item_cell(index);
+        }
+        if needs_followup {
+            self.frame_requester
+                .schedule_frame_in(std::time::Duration::from_millis(16));
+        }
+        if !self.active_text_items.is_empty() {
             self.frame_requester.schedule_frame();
         }
-
-        if schedule_followup && self.stream_controller.is_some() && !output.all_idle {
-            self.frame_requester
-                .schedule_frame_in(Duration::from_millis(16));
-        }
     }
 
-    fn sync_active_reasoning_cell(&mut self) {
-        if !self.active_reasoning_text.trim().is_empty() {
-            let mut body_lines = Vec::new();
-            append_markdown(
-                &self.active_reasoning_text,
-                None,
-                Some(&self.session.cwd),
-                &mut body_lines,
-            );
-            Self::patch_lines_style(&mut body_lines, Self::reasoning_text_style());
-            if let Some(first_line) = body_lines.first_mut() {
-                first_line.spans.insert(
-                    0,
-                    Span::styled("Thinking: ", Self::reasoning_heading_style()),
-                );
-            }
-            let lines = body_lines;
-            self.active_reasoning_cell =
-                Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
+    fn sync_text_item_cell(&mut self, index: usize) {
+        if index >= self.active_text_items.len() {
+            return;
+        }
+
+        let cell = match self.active_text_items[index].kind {
+            TextItemKind::Assistant => self.assistant_active_cell(&self.active_text_items[index]),
+            TextItemKind::Reasoning => self.reasoning_active_cell(&self.active_text_items[index]),
+        };
+        self.active_text_items[index].cell = cell;
+    }
+
+    fn assistant_active_cell(
+        &self,
+        item: &ActiveTextItem,
+    ) -> Option<history_cell::AgentMessageCell> {
+        if let Some(controller) = &item.stream_controller {
+            let lines = controller.live_lines();
+            if lines.iter().any(|line| !Self::is_blank_line(line)) {
+                return Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
                     lines,
                     Self::pending_dot_prefix(),
                     "  ",
                     false,
                 ));
-        } else {
-            self.active_reasoning_cell = None;
+            }
+        } else if !item.raw_text.trim().is_empty() {
+            return Some(self.bulleted_markdown_cell(&item.raw_text, Self::pending_dot_prefix()));
         }
+        None
+    }
+
+    fn reasoning_active_cell(
+        &self,
+        item: &ActiveTextItem,
+    ) -> Option<history_cell::AgentMessageCell> {
+        if item.raw_text.trim().is_empty() {
+            return None;
+        }
+
+        let mut body_lines = Vec::new();
+        append_markdown(
+            &item.raw_text,
+            None,
+            Some(&self.session.cwd),
+            &mut body_lines,
+        );
+        Self::patch_lines_style(&mut body_lines, Self::reasoning_text_style());
+        if let Some(first_line) = body_lines.first_mut() {
+            first_line.spans.insert(
+                0,
+                Span::styled("Thinking: ", Self::reasoning_heading_style()),
+            );
+        }
+        Some(history_cell::AgentMessageCell::new_ai_response_with_prefix(
+            body_lines,
+            Self::reasoning_dot_prefix(item.status),
+            "  ",
+            false,
+        ))
     }
 
     fn last_known_width(&self) -> u16 {
@@ -2181,7 +2529,9 @@ impl ChatWidget {
 
     #[cfg(test)]
     pub(crate) fn has_stream_controller(&self) -> bool {
-        self.stream_controller.is_some()
+        self.active_text_items
+            .iter()
+            .any(|item| item.stream_controller.is_some())
     }
 
     #[cfg(test)]
@@ -2419,13 +2769,16 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    pub(crate) fn active_viewport_lines_for_test(&self, width: u16) -> Vec<Line<'static>> {
+        self.active_viewport_lines(width)
+    }
+
     fn active_viewport_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        if let Some(active_cell) = &self.active_cell {
-            Self::extend_lines_with_separator(&mut lines, active_cell.display_lines(width));
-        }
-        if let Some(reasoning_cell) = &self.active_reasoning_cell {
-            Self::extend_lines_with_separator(&mut lines, reasoning_cell.display_lines(width));
+        for item in &self.active_text_items {
+            if let Some(cell) = &item.cell {
+                Self::extend_lines_with_separator(&mut lines, cell.display_lines(width));
+            }
         }
         // Pending tool calls are shown with a pending (cyan) dot until their results arrive.
         for pending in &self.pending_tool_calls {
@@ -2439,9 +2792,6 @@ impl ChatWidget {
                 )
                 .display_lines(width),
             );
-        }
-        if let Some(assistant_cell) = &self.active_assistant_cell {
-            Self::extend_lines_with_separator(&mut lines, assistant_cell.display_lines(width));
         }
         Self::trim_trailing_blank_lines(&mut lines);
         lines
@@ -2470,7 +2820,6 @@ impl ChatWidget {
             .skip(self.next_history_flush_index)
             .enumerate()
         {
-            let wrap_policy = cell.scrollback_wrap_policy();
             let cell_lines = cell.display_lines(width);
             let should_insert_separator = index > 0
                 && !cell_lines.is_empty()
@@ -2482,20 +2831,13 @@ impl ChatWidget {
                     .first()
                     .is_some_and(|line| !Self::is_blank_line(line));
             if should_insert_separator {
-                lines.push(ScrollbackLine::new(Line::from(""), wrap_policy));
+                lines.push(ScrollbackLine::new(Line::from("")));
             }
-            lines.extend(
-                cell_lines
-                    .into_iter()
-                    .map(|line| ScrollbackLine::new(line, wrap_policy)),
-            );
+            lines.extend(cell_lines.into_iter().map(ScrollbackLine::new));
         }
         self.next_history_flush_index = self.history.len();
         if !lines.is_empty() {
-            lines.push(ScrollbackLine::new(
-                Line::from(""),
-                history_cell::ScrollbackWrapPolicy::NoAdditionalWrapLimit,
-            ));
+            lines.push(ScrollbackLine::new(Line::from("")));
         }
         lines
     }
@@ -2560,6 +2902,32 @@ impl ChatWidget {
         self.bottom_pane
             .open_theme_picker(&self.theme_set.themes, self.active_theme_name.clone());
         self.set_status_message("Select a theme");
+    }
+
+    fn open_permissions_picker(&mut self) {
+        let current = self.permission_preset;
+        self.bottom_pane
+            .open_popup_view(Box::new(ListSelectionView::new(
+                SelectionViewParams {
+                    title: Some("Update Model Permissions".to_string()),
+                    footer_hint: Some(Line::from("Press enter to confirm or esc to go back")),
+                    items: permission_preset_items(current),
+                    ..SelectionViewParams::default()
+                },
+                self.app_event_tx.clone(),
+                self.active_accent_color(),
+            )));
+        self.set_status_message("Select permissions");
+    }
+
+    pub(crate) fn note_permissions_updated(&mut self, preset: devo_protocol::PermissionPreset) {
+        self.permission_preset = preset;
+        let label = permission_preset_label(preset);
+        self.add_to_history(history_cell::new_info_event(
+            format!("Permissions updated to {label}"),
+            None,
+        ));
+        self.set_status_message(format!("Permissions updated to {label}"));
     }
 
     fn apply_theme_selection(&mut self, name: String) {
@@ -2834,9 +3202,7 @@ impl Renderable for ChatWidget {
 
         let viewport_lines = self.active_viewport_lines(history_area.width);
         if !viewport_lines.is_empty() {
-            Paragraph::new(Text::from(viewport_lines))
-                .wrap(Wrap { trim: false })
-                .render(history_area, buf);
+            Paragraph::new(Text::from(viewport_lines)).render(history_area, buf);
         }
 
         self.bottom_pane.render(bottom_area, buf);

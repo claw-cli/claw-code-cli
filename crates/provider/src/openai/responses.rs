@@ -671,6 +671,7 @@ mod tests {
                 name: "get_weather".to_string(),
                 description: "Get weather by city".to_string(),
                 input_schema: json!({"type": "object"}),
+                output_schema: None,
             }]),
             sampling: SamplingControls {
                 temperature: Some(0.4),

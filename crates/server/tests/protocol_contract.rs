@@ -141,6 +141,11 @@ fn server_request_payload_roundtrip() {
         approval_id: "approval-1".into(),
         action_summary: "run shell command".into(),
         justification: "writes files".into(),
+        resource: Some("ShellExec".into()),
+        available_scopes: vec!["once".into(), "turn".into(), "session".into()],
+        path: None,
+        host: None,
+        target: Some("echo hi".into()),
     };
 
     let json = serde_json::to_string(&payload).expect("serialize");

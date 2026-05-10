@@ -1,95 +1,11 @@
+use serde_json::json;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
-use std::path::PathBuf;
 
-use async_trait::async_trait;
-use serde_json::json;
-
-use crate::Tool;
-use crate::ToolContext;
 use crate::ToolOutput;
-
-const DESCRIPTION: &str = include_str!("read.txt");
-
-pub struct ReadTool;
-
-#[async_trait]
-impl Tool for ReadTool {
-    fn name(&self) -> &str {
-        "read"
-    }
-
-    fn description(&self) -> &str {
-        DESCRIPTION
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "filePath": {
-                    "type": "string",
-                    "description": "The absolute path to the file or directory to read"
-                },
-                "offset": {
-                    "type": "integer",
-                    "description": "The line number to start reading from (1-indexed, default 1)"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "The maximum number of lines to read (no limit by default)"
-                }
-            },
-            "required": ["filePath"]
-        })
-    }
-
-    async fn execute(
-        &self,
-        ctx: &ToolContext,
-        input: serde_json::Value,
-    ) -> anyhow::Result<ToolOutput> {
-        let mut filepath = input["filePath"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("missing 'filePath' field"))?
-            .to_string();
-        let offset = input["offset"].as_u64().map(|value| value as usize);
-        let limit = input["limit"].as_u64().map(|value| value as usize);
-
-        if let Some(offset) = offset
-            && offset < 1
-        {
-            return Ok(ToolOutput::error(
-                "offset must be greater than or equal to 1",
-            ));
-        }
-
-        if !Path::new(&filepath).is_absolute() {
-            filepath = ctx.cwd.join(&filepath).to_string_lossy().to_string();
-        }
-
-        let path = PathBuf::from(&filepath);
-        if !path.exists() {
-            return Ok(ToolOutput::error(missing_file_message(&filepath)));
-        }
-
-        if path.is_dir() {
-            return read_directory(&path, limit.unwrap_or(usize::MAX), offset.unwrap_or(1));
-        }
-
-        if is_binary_file(&path)? {
-            return Ok(ToolOutput::error(format!(
-                "Cannot read binary file: {}",
-                path.display()
-            )));
-        }
-
-        read_file(&path, limit.unwrap_or(usize::MAX), offset.unwrap_or(1))
-    }
-}
 
 pub(crate) fn read_directory(
     path: &Path,

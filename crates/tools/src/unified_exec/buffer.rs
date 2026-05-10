@@ -68,10 +68,6 @@ impl HeadTailBuffer {
         let head_str = String::from_utf8_lossy(&self.head);
         result.push_str(&head_str);
 
-        if self.dropped {
-            result.push_str("\n\n... [output truncated]\n\n");
-        }
-
         let tail_str = String::from_utf8_lossy(&self.tail);
         result.push_str(&tail_str);
 
@@ -80,12 +76,18 @@ impl HeadTailBuffer {
 
     /// Collect raw bytes (for when callers need `Vec<u8>` directly)
     pub fn collect_bytes(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(self.head.len() + self.tail.len() + 100);
+        let mut result = Vec::with_capacity(self.head.len() + self.tail.len());
         result.extend_from_slice(&self.head);
-        if self.dropped {
-            result.extend_from_slice(b"\n\n... [output truncated]\n\n");
-        }
         result.extend_from_slice(&self.tail);
+        result
+    }
+
+    pub fn drain_collect_bytes(&mut self) -> Vec<u8> {
+        let result = self.collect_bytes();
+        self.head.clear();
+        self.tail.clear();
+        self.total = 0;
+        self.dropped = false;
         result
     }
 
@@ -207,6 +209,17 @@ mod tests {
     }
 
     #[test]
+    fn buffer_drain_collect_bytes_clears_buffer() {
+        let mut buf = HeadTailBuffer::new();
+        buf.push(b"hello");
+
+        assert_eq!(&buf.drain_collect_bytes(), b"hello");
+        assert_eq!(&buf.collect_bytes(), b"");
+        assert_eq!(buf.total(), 0);
+        assert!(!buf.truncated());
+    }
+
+    #[test]
     fn buffer_truncation_preserves_tail() {
         let mut buf = HeadTailBuffer::new();
         buf.head_limit = 20;
@@ -217,9 +230,9 @@ mod tests {
         assert!(buf.truncated());
 
         let result = buf.collect();
-        // Should have head and tail, with truncation marker in between
+        // Should have head and tail without inserting a second truncation marker.
         assert!(result.starts_with("AAAAAAAAAA"));
-        assert!(result.contains("... [output truncated]"));
+        assert_eq!(result.len(), 40);
     }
 
     #[test]

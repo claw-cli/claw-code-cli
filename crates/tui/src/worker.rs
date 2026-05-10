@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use devo_core::Model;
 use devo_core::ModelCatalog;
+use devo_core::PermissionPreset;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderWireApi;
 use devo_core::ReasoningEffort;
@@ -21,6 +22,10 @@ use devo_provider::ModelProviderSDK;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
 use devo_provider::openai::OpenAIResponsesProvider;
+use devo_server::ApprovalDecisionPayload;
+use devo_server::ApprovalRequestPayload;
+use devo_server::ApprovalRespondParams;
+use devo_server::CommandExecutionPayload;
 use devo_server::InputItem;
 use devo_server::ItemEnvelope;
 use devo_server::ItemEventPayload;
@@ -47,6 +52,7 @@ use devo_server::TurnSteerParams;
 
 use crate::app_command::InputHistoryDirection;
 use crate::events::SessionListEntry;
+use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
@@ -56,6 +62,7 @@ struct EnsureSessionOutcome {
     model: Option<String>,
     thinking: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    created: bool,
 }
 
 /// Immutable runtime configuration used to construct the background server client worker.
@@ -68,13 +75,18 @@ pub(crate) struct QueryWorkerConfig {
     pub(crate) server_log_level: Option<String>,
     /// Initial thinking mode used for new turns.
     pub(crate) thinking_selection: Option<String>,
+    /// Permission preset to apply to the server session when it exists.
+    pub(crate) permission_preset: PermissionPreset,
 }
 
 /// TODO: Should we extract the OperationCommand to the `protocol` crate? Since it can be shareable.
 /// Commands accepted by the background query worker.
 enum OperationCommand {
     /// Submit a new user prompt to the session.
-    SubmitPrompt(String),
+    SubmitPrompt {
+        prompt: String,
+        approval_policy: Option<String>,
+    },
     /// Update the model used for future turns.
     /// TODO: Model should be bind at Session Metadata, not turn, indicate to the model utilized to generate
     /// at next turn. However, we can still bind a model at turn, to indicate what model is utlized generated.
@@ -124,6 +136,16 @@ enum OperationCommand {
         input: Vec<InputItem>,
         expected_turn_id: TurnId,
     },
+    ApprovalRespond {
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        decision: devo_server::ApprovalDecisionValue,
+        scope: devo_server::ApprovalScopeValue,
+    },
+    UpdatePermissions {
+        preset: devo_protocol::PermissionPreset,
+    },
     /// Browse persisted input history via the server/runtime session state.
     BrowseInputHistory(InputHistoryDirection),
     /// Stop the worker loop.
@@ -154,9 +176,16 @@ impl QueryWorkerHandle {
     }
 
     /// Submits one prompt to the worker.
-    pub(crate) fn submit_prompt(&self, prompt: String) -> Result<()> {
+    pub(crate) fn submit_prompt(
+        &self,
+        prompt: String,
+        approval_policy: Option<String>,
+    ) -> Result<()> {
         self.command_tx
-            .send(OperationCommand::SubmitPrompt(prompt))
+            .send(OperationCommand::SubmitPrompt {
+                prompt,
+                approval_policy,
+            })
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
@@ -281,6 +310,31 @@ impl QueryWorkerHandle {
             .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
     }
 
+    pub(crate) fn approval_respond(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        approval_id: String,
+        decision: devo_server::ApprovalDecisionValue,
+        scope: devo_server::ApprovalScopeValue,
+    ) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::ApprovalRespond {
+                session_id,
+                turn_id,
+                approval_id,
+                decision,
+                scope,
+            })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
+    pub(crate) fn update_permissions(&self, preset: devo_protocol::PermissionPreset) -> Result<()> {
+        self.command_tx
+            .send(OperationCommand::UpdatePermissions { preset })
+            .map_err(|_| anyhow::anyhow!("interactive worker is no longer running"))
+    }
+
     pub(crate) fn browse_input_history(&self, direction: InputHistoryDirection) -> Result<()> {
         self.command_tx
             .send(OperationCommand::BrowseInputHistory(direction))
@@ -356,6 +410,7 @@ async fn run_worker_inner(
     let mut session_cwd = config.cwd.clone();
     let mut model = config.model;
     let mut thinking_selection = config.thinking_selection;
+    let mut permission_preset = config.permission_preset;
     let mut active_turn_id: Option<TurnId> = None;
     let mut turn_count = 0usize;
     let mut total_input_tokens = 0usize;
@@ -371,7 +426,10 @@ async fn run_worker_inner(
         tokio::select! {
             maybe_command = command_rx.recv() => {
                 match maybe_command {
-                    Some(OperationCommand::SubmitPrompt(prompt)) => {
+                    Some(OperationCommand::SubmitPrompt {
+                        prompt,
+                        approval_policy,
+                    }) => {
                         let session_start = ensure_session_started(
                             &mut client,
                             &config.cwd,
@@ -387,13 +445,21 @@ async fn run_worker_inner(
                             .clone()
                             .or(thinking_selection);
                         let active_session_id = session_start.session_id;
+                        if session_start.created {
+                            apply_session_permissions(
+                                &mut client,
+                                active_session_id,
+                                permission_preset,
+                            )
+                            .await?;
+                        }
                         let start_result = client.turn_start(TurnStartParams {
                             session_id: active_session_id,
                             input: vec![InputItem::Text { text: prompt }],
                             model: Some(model.clone()),
                             thinking: thinking_selection.clone(),
                             sandbox: None,
-                            approval_policy: None,
+                            approval_policy,
                             cwd: None,
                         }).await;
                         match start_result {
@@ -954,6 +1020,53 @@ async fn run_worker_inner(
                         }
                         }
                     }
+                    Some(OperationCommand::ApprovalRespond {
+                        session_id,
+                        turn_id,
+                        approval_id,
+                        decision,
+                        scope,
+                    }) => {
+                        if let Err(error) = client
+                            .approval_respond(ApprovalRespondParams {
+                                session_id,
+                                turn_id,
+                                approval_id: approval_id.into(),
+                                decision,
+                                scope,
+                            })
+                            .await
+                        {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                        }
+                    }
+                    Some(OperationCommand::UpdatePermissions { preset }) => {
+                        permission_preset = preset;
+                        let Some(active_session_id) = session_id else {
+                            continue;
+                        };
+                        if let Err(error) =
+                            apply_session_permissions(&mut client, active_session_id, preset).await
+                        {
+                            let _ = event_tx.send(WorkerEvent::TurnFailed {
+                                message: error.to_string(),
+                                turn_count,
+                                total_input_tokens,
+                                total_output_tokens,
+                                total_cache_read_tokens,
+                                prompt_token_estimate: total_input_tokens,
+                                last_query_input_tokens,
+                            });
+                        }
+                    }
                     Some(OperationCommand::BrowseInputHistory(direction)) => {
                         let text = if let Some(active_session_id) = session_id {
                             match client
@@ -1042,19 +1155,72 @@ async fn run_worker_inner(
                                 latest_completed_agent_message = None;
                             }
                             "item/started" => {
-                                if let ServerEvent::ItemStarted(payload) = event
-                                    && matches!(payload.item.item_kind, ItemKind::ToolCall)
-                                        && let Ok(payload) = serde_json::from_value::<ToolCallPayload>(payload.item.payload) {
-                                            let summary = summarize_tool_call(&payload);
-                                            let _ = event_tx.send(WorkerEvent::ToolCall {
-                                                tool_use_id: payload.tool_call_id,
-                                                summary,
+                                if let ServerEvent::ItemStarted(payload) = event {
+                                    tracing::debug!(
+                                        item_id = %payload.item.item_id,
+                                        item_kind = ?payload.item.item_kind,
+                                        "server item started"
+                                    );
+                                    match payload.item.item_kind {
+                                        ItemKind::AgentMessage => {
+                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
+                                                item_id: payload.item.item_id,
+                                                kind: TextItemKind::Assistant,
                                             });
                                         }
+                                        ItemKind::Reasoning => {
+                                            let _ = event_tx.send(WorkerEvent::TextItemStarted {
+                                                item_id: payload.item.item_id,
+                                                kind: TextItemKind::Reasoning,
+                                            });
+                                        }
+                                        ItemKind::CommandExecution => {
+                                            if let Ok(payload) =
+                                                serde_json::from_value::<CommandExecutionPayload>(
+                                                    payload.item.payload,
+                                                )
+                                            {
+                                                let _ = event_tx.send(WorkerEvent::ToolCall {
+                                                    tool_use_id: payload.tool_call_id,
+                                                    summary: payload.command,
+                                                });
+                                            }
+                                        }
+                                        ItemKind::ToolCall => {
+                                            if let Ok(payload) =
+                                                serde_json::from_value::<ToolCallPayload>(
+                                                    payload.item.payload,
+                                                )
+                                            {
+                                                let summary = summarize_tool_call(&payload);
+                                                let _ = event_tx.send(WorkerEvent::ToolCall {
+                                                    tool_use_id: payload.tool_call_id,
+                                                    summary,
+                                                });
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
+                            }
                             "item/agentMessage/delta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
-                                    let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
+                                    if let Some(item_id) = payload.context.item_id {
+                                        tracing::debug!(
+                                            item_id = %item_id,
+                                            delta_len = payload.delta.len(),
+                                            stream_index = ?payload.stream_index,
+                                            channel = ?payload.channel,
+                                            "server assistant delta"
+                                        );
+                                        let _ = event_tx.send(WorkerEvent::TextItemDelta {
+                                            item_id,
+                                            kind: TextItemKind::Assistant,
+                                            delta: payload.delta,
+                                        });
+                                    } else {
+                                        let _ = event_tx.send(WorkerEvent::TextDelta(payload.delta));
+                                    }
                                 }
                             }
                             "item/commandExecution/outputDelta" => {
@@ -1080,11 +1246,31 @@ async fn run_worker_inner(
                             }
                             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
                                 if let ServerEvent::ItemDelta { payload, .. } = event {
-                                    let _ = event_tx.send(WorkerEvent::ReasoningDelta(payload.delta));
+                                    if let Some(item_id) = payload.context.item_id {
+                                        tracing::debug!(
+                                            item_id = %item_id,
+                                            delta_len = payload.delta.len(),
+                                            stream_index = ?payload.stream_index,
+                                            channel = ?payload.channel,
+                                            "server reasoning delta"
+                                        );
+                                        let _ = event_tx.send(WorkerEvent::TextItemDelta {
+                                            item_id,
+                                            kind: TextItemKind::Reasoning,
+                                            delta: payload.delta,
+                                        });
+                                    } else {
+                                        let _ = event_tx.send(WorkerEvent::ReasoningDelta(payload.delta));
+                                    }
                                 }
                             }
                             "item/completed" => {
                                 if let ServerEvent::ItemCompleted(payload) = event {
+                                    tracing::debug!(
+                                        item_id = %payload.item.item_id,
+                                        item_kind = ?payload.item.item_kind,
+                                        "server item completed"
+                                    );
                                     if let Some(text) = completed_agent_message_text(&payload) {
                                         latest_completed_agent_message = Some(text);
                                     }
@@ -1095,6 +1281,11 @@ async fn run_worker_inner(
                             }
                             "turn/completed" => {
                                 if let ServerEvent::TurnCompleted(payload) = event {
+                                    tracing::debug!(
+                                        turn_id = %payload.turn.turn_id,
+                                        status = ?payload.turn.status,
+                                        "server turn completed"
+                                    );
                                     active_turn_id = None;
                                     let completed = payload.turn.status == TurnStatus::Completed
                                         || payload.turn.status == TurnStatus::Interrupted;
@@ -1248,6 +1439,7 @@ async fn ensure_session_started(
             model: Some(model.to_string()),
             thinking: None,
             reasoning_effort: None,
+            created: false,
         });
     }
 
@@ -1265,7 +1457,22 @@ async fn ensure_session_started(
         model: session.session.model,
         thinking: session.session.thinking,
         reasoning_effort: session.session.reasoning_effort,
+        created: true,
     })
+}
+
+async fn apply_session_permissions(
+    client: &mut StdioServerClient,
+    session_id: SessionId,
+    preset: PermissionPreset,
+) -> Result<()> {
+    client
+        .session_permissions_update(devo_server::SessionPermissionsUpdateParams {
+            session_id,
+            preset,
+        })
+        .await?;
+    Ok(())
 }
 
 async fn spawn_client(cwd: &Path, server_log_level: Option<String>) -> Result<StdioServerClient> {
@@ -1334,6 +1541,7 @@ fn completed_agent_message_text(payload: &ItemEventPayload) -> Option<String> {
 fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSender<WorkerEvent>) {
     match payload.item {
         ItemEnvelope {
+            item_id,
             item_kind: ItemKind::AgentMessage,
             payload,
             ..
@@ -1345,10 +1553,20 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 .filter(|text| !text.is_empty())
                 .map(ToOwned::to_owned);
             if let Some(text) = text {
-                let _ = event_tx.send(WorkerEvent::AssistantMessageCompleted(text));
+                tracing::debug!(
+                    item_id = %item_id,
+                    final_text_len = text.len(),
+                    "emitting assistant item completion"
+                );
+                let _ = event_tx.send(WorkerEvent::TextItemCompleted {
+                    item_id,
+                    kind: TextItemKind::Assistant,
+                    final_text: text,
+                });
             }
         }
         ItemEnvelope {
+            item_id,
             item_kind: ItemKind::Reasoning,
             payload,
             ..
@@ -1360,7 +1578,16 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 .filter(|text| !text.is_empty())
                 .map(ToOwned::to_owned);
             if let Some(text) = text {
-                let _ = event_tx.send(WorkerEvent::ReasoningCompleted(text));
+                tracing::debug!(
+                    item_id = %item_id,
+                    final_text_len = text.len(),
+                    "emitting reasoning item completion"
+                );
+                let _ = event_tx.send(WorkerEvent::TextItemCompleted {
+                    item_id,
+                    kind: TextItemKind::Reasoning,
+                    final_text: text,
+                });
             }
         }
         ItemEnvelope {
@@ -1391,6 +1618,64 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
                 preview: render_json_value_text(&payload.content),
                 is_error: payload.is_error,
                 truncated: false,
+            });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::CommandExecution,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<CommandExecutionPayload>(payload) else {
+                return;
+            };
+            let _ = event_tx.send(WorkerEvent::ToolResult {
+                tool_use_id: payload.tool_call_id,
+                title: payload.command,
+                preview: payload
+                    .output
+                    .as_ref()
+                    .map(render_json_value_text)
+                    .unwrap_or_default(),
+                is_error: payload.is_error,
+                truncated: false,
+            });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::ApprovalRequest,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<ApprovalRequestPayload>(payload) else {
+                return;
+            };
+            let Some(turn_id) = payload.request.turn_id else {
+                return;
+            };
+            let _ = event_tx.send(WorkerEvent::ApprovalRequest {
+                session_id: payload.request.session_id,
+                turn_id,
+                approval_id: payload.approval_id.to_string(),
+                action_summary: payload.action_summary,
+                justification: payload.justification,
+                resource: payload.resource,
+                available_scopes: payload.available_scopes,
+                path: payload.path,
+                host: payload.host,
+                target: payload.target,
+            });
+        }
+        ItemEnvelope {
+            item_kind: ItemKind::ApprovalDecision,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<ApprovalDecisionPayload>(payload) else {
+                return;
+            };
+            let _ = event_tx.send(WorkerEvent::ApprovalDecision {
+                approval_id: payload.approval_id.to_string(),
+                decision: payload.decision,
+                scope: payload.scope,
             });
         }
         _ => {}
@@ -1450,12 +1735,16 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
             SessionHistoryItemKind::Reasoning => TranscriptItemKind::Reasoning,
             SessionHistoryItemKind::ToolCall => TranscriptItemKind::ToolCall,
             SessionHistoryItemKind::ToolResult => TranscriptItemKind::ToolResult,
+            SessionHistoryItemKind::CommandExecution => TranscriptItemKind::ToolResult,
             SessionHistoryItemKind::Error => TranscriptItemKind::Error,
             SessionHistoryItemKind::TurnSummary => TranscriptItemKind::TurnSummary,
         };
         let mut transcript_item = match item.kind {
             SessionHistoryItemKind::ToolCall => TranscriptItem::tool_call(item.title.clone()),
             SessionHistoryItemKind::ToolResult => {
+                TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
+            }
+            SessionHistoryItemKind::CommandExecution => {
                 TranscriptItem::restored_tool_result(item.title.clone(), item.body.clone())
             }
             SessionHistoryItemKind::Error => {
@@ -1979,6 +2268,22 @@ mod tests {
                 TranscriptItem::restored_tool_result("Ran read a", "A"),
                 TranscriptItem::restored_tool_result("Ran read b", "B"),
             ]
+        );
+    }
+
+    #[test]
+    fn project_history_restores_command_execution_items() {
+        let items = vec![SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: SessionHistoryItemKind::CommandExecution,
+            title: "cargo test".to_string(),
+            body: "ok".to_string(),
+            duration_ms: None,
+        }];
+
+        assert_eq!(
+            project_history_items(&items),
+            vec![TranscriptItem::restored_tool_result("cargo test", "ok")]
         );
     }
 

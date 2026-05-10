@@ -4,10 +4,16 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use devo_protocol::ApprovalDecisionValue;
+use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
+use devo_protocol::ItemId;
 use devo_protocol::Model;
+use devo_protocol::PermissionPreset;
 use devo_protocol::ReasoningEffort;
+use devo_protocol::SessionId;
 use devo_protocol::ThinkingCapability;
+use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
 use tokio::sync::mpsc;
 
@@ -40,6 +46,7 @@ fn widget_with_model_and_thinking(
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_thinking_selection,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -62,6 +69,7 @@ fn onboarding_widget_with_model(
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -102,6 +110,19 @@ fn find_row_index(rows: &[String], needle: &str) -> Option<usize> {
     rows.iter().position(|row| row.contains(needle))
 }
 
+fn scrollback_plain_lines(lines: &[crate::history_cell::ScrollbackLine]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            line.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect()
+}
+
 fn trim_trailing_blank_scrollback_lines(
     mut lines: Vec<crate::history_cell::ScrollbackLine>,
 ) -> Vec<crate::history_cell::ScrollbackLine> {
@@ -114,6 +135,18 @@ fn trim_trailing_blank_scrollback_lines(
         lines.pop();
     }
     lines
+}
+
+fn indices_containing(lines: &[String], needles: &[&str]) -> Vec<usize> {
+    needles
+        .iter()
+        .map(|needle| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle} in:\n{}", lines.join("\n")))
+        })
+        .collect()
 }
 
 #[test]
@@ -136,6 +169,191 @@ fn resume_command_opens_loading_browser_immediately() {
         rows.iter()
             .any(|row| row.contains("Loading saved sessions"))
     );
+}
+
+#[test]
+fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ApprovalRequest {
+        session_id,
+        turn_id,
+        approval_id: "approval-call-1".to_string(),
+        action_summary: "write src/main.rs".to_string(),
+        justification: "Tool execution requires approval.".to_string(),
+        resource: Some("FileWrite".to_string()),
+        available_scopes: vec!["once".to_string(), "session".to_string()],
+        path: Some("src/main.rs".to_string()),
+        host: None,
+        target: None,
+    });
+
+    let scrollback = widget.drain_scrollback_lines(80);
+    assert!(!scrollback_contains_text(
+        &scrollback,
+        "Permission required"
+    ));
+
+    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(rendered.contains("Permission approval required"));
+    assert!(rendered.contains("Approve once"));
+    assert!(rendered.contains("Approve for session"));
+    assert!(rendered.contains("Deny"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("approval response event");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::ApprovalRespond {
+            session_id,
+            turn_id,
+            approval_id: "approval-call-1".to_string(),
+            decision: ApprovalDecisionValue::Approve,
+            scope: ApprovalScopeValue::Once,
+        })
+    );
+}
+
+#[test]
+fn approval_request_bottom_pane_menu_denies_with_n_shortcut() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ApprovalRequest {
+        session_id,
+        turn_id,
+        approval_id: "approval-call-2".to_string(),
+        action_summary: "run shell command".to_string(),
+        justification: "Tool execution requires approval.".to_string(),
+        resource: Some("ShellExec".to_string()),
+        available_scopes: vec!["once".to_string()],
+        path: None,
+        host: None,
+        target: Some("cargo test".to_string()),
+    });
+
+    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(rendered.contains("Permission approval required"));
+    assert!(rendered.contains("run shell command"));
+    assert!(rendered.contains("Deny"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("approval response event");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::ApprovalRespond {
+            session_id,
+            turn_id,
+            approval_id: "approval-call-2".to_string(),
+            decision: ApprovalDecisionValue::Deny,
+            scope: ApprovalScopeValue::Once,
+        })
+    );
+}
+
+#[test]
+fn submitted_prompt_requests_on_request_approval_policy() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("please edit a file".to_string());
+
+    let event = app_event_rx.try_recv().expect("user turn event");
+    let AppEvent::Command(AppCommand::UserTurn {
+        approval_policy, ..
+    }) = event
+    else {
+        panic!("expected user turn command");
+    };
+    assert_eq!(approval_policy, Some("on-request".to_string()));
+}
+
+#[test]
+fn permissions_command_opens_bottom_pane_picker_and_updates_default() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: TurnId::new(),
+    });
+
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "permissions".to_string(),
+    });
+
+    let rendered = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(rendered.contains("Update Model Permissions"));
+    assert!(rendered.contains("Read Only"));
+    assert!(rendered.contains("Default (current)"));
+    assert!(rendered.contains("Auto-review"));
+    assert!(rendered.contains("Full Access"));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+
+    let event = app_event_rx.try_recv().expect("permissions update event");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::UpdatePermissions {
+            preset: devo_protocol::PermissionPreset::ReadOnly,
+        })
+    );
+}
+
+#[test]
+fn permissions_command_marks_initial_project_preset_current() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
+    let mut widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: AppEventSender::new(app_event_tx),
+        initial_session: TuiSessionState::new(PathBuf::from("."), Some(model)),
+        initial_thinking_selection: None,
+        initial_permission_preset: PermissionPreset::FullAccess,
+        initial_user_message: None,
+        enhanced_keys_supported: true,
+        is_first_run: false,
+        available_models: Vec::new(),
+        saved_model_slugs: Vec::new(),
+        show_model_onboarding: false,
+        startup_tooltip_override: None,
+        initial_theme_name: None,
+    });
+
+    widget.handle_app_event(AppEvent::RunSlashCommand {
+        command: "permissions".to_string(),
+    });
+
+    let rendered = rendered_rows(&widget, 100, 18).join("\n");
+    assert!(rendered.contains("Full Access (current)"));
 }
 
 #[test]
@@ -332,7 +550,7 @@ fn submit_text_emits_user_turn_with_model_and_thinking() {
             model: Some("test-model".to_string()),
             thinking: Some("disabled".to_string()),
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -365,7 +583,7 @@ fn typed_character_submits_after_paste_burst_flush() {
             model: Some("test-model".to_string()),
             thinking: None,
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -414,7 +632,7 @@ fn key_release_does_not_duplicate_text_input() {
             model: Some("test-model".to_string()),
             thinking: None,
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -686,9 +904,9 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
     assert!(
         committed_rows
             .windows(3)
-            .any(|window| window[0].trim_end() == "┃"
+            .any(|window| window[0].trim_end() == "▌"
                 && window[1].contains("hello")
-                && window[2].trim_end() == "┃"),
+                && window[2].trim_end() == "▌"),
         "expected blank line spacing with colored bar before restored user input: {committed_lines:?}"
     );
 }
@@ -845,6 +1063,87 @@ fn active_assistant_markdown_does_not_double_wrap() {
 }
 
 #[test]
+fn active_assistant_multiline_text_has_no_extra_blank_rows() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "Line1\nLine2\nLine3\n".to_string(),
+    ));
+
+    let rows = rendered_rows(&widget, 80, 12);
+    let line1 = find_row_index(&rows, "Line1").expect("missing Line1");
+    let line2 = find_row_index(&rows, "Line2").expect("missing Line2");
+    let line3 = find_row_index(&rows, "Line3").expect("missing Line3");
+    assert_eq!(line2, line1 + 1, "unexpected rows:\n{}", rows.join("\n"));
+    assert_eq!(line3, line2 + 1, "unexpected rows:\n{}", rows.join("\n"));
+}
+
+#[test]
+fn active_assistant_renders_resume_like_markdown_without_fragment_gaps() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "## devo-cli -- Binary entry point that assembles all crates\n\n".to_string(),
+    ));
+    widget.pre_draw_tick();
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "4 source files, produces the devo binary.\n\n".to_string(),
+    ));
+    widget.pre_draw_tick();
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "Command dispatch (/crates/cli/src/main.rs)\n\n".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "devo                 -> run_agent()            interactive TUI (default)\n".to_string(),
+    ));
+
+    let rows = rendered_rows(&widget, 180, 24);
+    let indices = indices_containing(
+        &rows,
+        &[
+            "devo-cli",
+            "4 source files",
+            "Command dispatch",
+            "run_agent",
+        ],
+    );
+
+    assert_eq!(
+        indices
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect::<Vec<_>>(),
+        vec![2, 2, 2],
+        "expected active assistant markdown blocks to have one separator row, not doubled gaps:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn committed_assistant_markdown_does_not_double_wrap() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -888,6 +1187,102 @@ fn committed_assistant_markdown_does_not_double_wrap() {
     assert!(
         committed.contains("betabet gamma"),
         "expected committed assistant markdown to keep trailing words together, got:\n{committed}"
+    );
+}
+
+#[test]
+fn committed_assistant_multiline_text_has_no_extra_blank_rows() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "Line1\nLine2\nLine3\n".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Completed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
+    let lines = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
+        widget.drain_scrollback_lines(80),
+    ));
+    let line1 = lines
+        .iter()
+        .position(|line| line.contains("Line1"))
+        .unwrap();
+    let line2 = lines
+        .iter()
+        .position(|line| line.contains("Line2"))
+        .unwrap();
+    let line3 = lines
+        .iter()
+        .position(|line| line.contains("Line3"))
+        .unwrap();
+    assert_eq!(line2, line1 + 1, "unexpected lines:\n{}", lines.join("\n"));
+    assert_eq!(line3, line2 + 1, "unexpected lines:\n{}", lines.join("\n"));
+}
+
+#[test]
+fn tool_call_start_and_finish_are_both_visible_in_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let _ = widget.drain_scrollback_lines(80);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "powershell -NoProfile -Command Get-Date".to_string(),
+    });
+
+    let running = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        running.contains("Running powershell -NoProfile -Command Get-Date"),
+        "expected running tool cell, got:\n{running}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "powershell -NoProfile -Command Get-Date".to_string(),
+        preview: "2026-05-09".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let ran = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        ran.contains("Ran powershell -NoProfile -Command Get-Date"),
+        "expected ran tool cell, got:\n{ran}"
+    );
+    assert!(
+        ran.contains("2026-05-09"),
+        "expected tool output, got:\n{ran}"
     );
 }
 
@@ -1016,17 +1411,24 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
     assert!(
         !scrollback_contains_text(&committed_before_reasoning_complete, "final answer line 1"),
-        "assistant output should stay live until reasoning completes"
+        "assistant output should stay live, not drain to scrollback while reasoning is pending"
+    );
+    let active_before_reasoning_complete = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        active_before_reasoning_complete.contains("final answer line 1"),
+        "assistant output should remain visible in the active viewport:\n{active_before_reasoning_complete}"
     );
 
     widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
         "thinking".to_string(),
     ));
 
+    // Reasoning is now committed to scrollback on ReasoningCompleted,
+    // no longer visible in the live viewport.
     let after = rendered_rows(&widget, 80, 16).join("\n");
     assert!(
-        after.contains("thinking"),
-        "reasoning text should remain visible after completion:\n{after}"
+        !after.contains("thinking"),
+        "reasoning text should commit to scrollback, not remain in viewport:\n{after}"
     );
 
     let committed_after_reasoning_complete =
@@ -1037,8 +1439,210 @@ fn reasoning_and_assistant_stream_in_separate_cells() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert!(
-        committed_after_text.contains("final answer line 1"),
-        "assistant output should flush once reasoning completes: {committed_after_reasoning_complete:?}"
+        committed_after_text.contains("thinking"),
+        "reasoning text should be in scrollback after ReasoningCompleted: {committed_after_reasoning_complete:?}"
+    );
+    let after_reasoning_rows = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        after_reasoning_rows.contains("final answer line 2"),
+        "undrained assistant output should remain active after reasoning completes:\n{after_reasoning_rows}"
+    );
+}
+
+#[test]
+fn lifecycle_text_items_render_as_ordered_sibling_cells() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let reasoning_id = ItemId::new();
+    let assistant_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        delta: "thinking".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+        delta: "Line1\nLine2\n".to_string(),
+    });
+
+    let rows = rendered_rows(&widget, 80, 16);
+    let reasoning_row = find_row_index(&rows, "thinking").expect("missing reasoning row");
+    let line1 = find_row_index(&rows, "Line1").expect("missing assistant row");
+    let line2 = find_row_index(&rows, "Line2").expect("missing second assistant row");
+    assert_eq!(
+        line1,
+        reasoning_row + 2,
+        "unexpected rows:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(line2, line1 + 1, "unexpected rows:\n{}", rows.join("\n"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        final_text: "thinking".to_string(),
+    });
+    let rows_after_reasoning = rendered_rows(&widget, 80, 16);
+    assert!(
+        !rows_after_reasoning
+            .iter()
+            .any(|row| row.contains("thinking")),
+        "completed reasoning should leave active viewport:\n{}",
+        rows_after_reasoning.join("\n")
+    );
+    assert!(
+        rows_after_reasoning.iter().any(|row| row.contains("Line1")),
+        "assistant should remain active:\n{}",
+        rows_after_reasoning.join("\n")
+    );
+}
+
+#[test]
+fn lifecycle_text_items_keep_reasoning_before_assistant_when_events_arrive_out_of_order() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let reasoning_id = ItemId::new();
+    let assistant_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+        delta: "answer line\n".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        delta: "thinking text".to_string(),
+    });
+
+    let rows = rendered_rows(&widget, 80, 16);
+    let reasoning_row = find_row_index(&rows, "thinking text").expect("missing reasoning row");
+    let assistant_row = find_row_index(&rows, "answer line").expect("missing assistant row");
+    assert!(
+        reasoning_row < assistant_row,
+        "reasoning should render above assistant:\n{}",
+        rows.join("\n")
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+        final_text: "answer line".to_string(),
+    });
+    let committed_before_reasoning = widget.drain_scrollback_lines(80);
+    assert!(
+        !scrollback_contains_text(&committed_before_reasoning, "answer line"),
+        "assistant should wait for prior reasoning before committing: {committed_before_reasoning:?}"
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        final_text: "thinking text".to_string(),
+    });
+    let committed = scrollback_plain_lines(&trim_trailing_blank_scrollback_lines(
+        widget.drain_scrollback_lines(80),
+    ))
+    .join("\n");
+    let reasoning_index = committed
+        .find("thinking text")
+        .expect("missing committed reasoning");
+    let assistant_index = committed
+        .find("answer line")
+        .expect("missing committed assistant");
+    assert!(
+        reasoning_index < assistant_index,
+        "reasoning should commit before assistant:\n{committed}"
+    );
+}
+
+#[test]
+fn assistant_stream_commit_tick_runs_while_reasoning_is_pending() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+    let reasoning_id = ItemId::new();
+    let assistant_id = ItemId::new();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: reasoning_id,
+        kind: crate::events::TextItemKind::Reasoning,
+        delta: "thinking text".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id: assistant_id,
+        kind: crate::events::TextItemKind::Assistant,
+        delta: "first line\nsecond line\n".to_string(),
+    });
+
+    widget.pre_draw_tick();
+    let committed = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    let active = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(
+        !committed.contains("first line"),
+        "assistant stream should stay out of scrollback until completion:\n{committed}"
+    );
+    assert!(
+        active.contains("first line"),
+        "assistant stream should remain visible even with pending reasoning:\n{active}"
     );
 }
 
@@ -1084,6 +1688,7 @@ fn slash_model_opens_model_picker_instead_of_printing_current_model() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1235,41 +1840,22 @@ fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
         reasoning_effort: None,
         turn_id: Default::default(),
     });
-    assert!(widget.has_stream_controller());
+    assert!(!widget.has_stream_controller());
 
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
         "first line\nsecond line\n".to_string(),
     ));
+    assert!(widget.has_stream_controller());
 
     widget.pre_draw_tick();
-    let first_pass = widget
-        .drain_scrollback_lines(80)
-        .into_iter()
-        .map(|line| {
-            line.line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let first_pass = rendered_rows(&widget, 80, 12).join("\n");
     assert!(first_pass.contains("first line"));
-    assert!(!first_pass.contains("second line"));
+    assert!(first_pass.contains("second line"));
+    let first_scrollback = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(!first_scrollback.contains("first line"));
 
     widget.pre_draw_tick();
-    let second_pass = widget
-        .drain_scrollback_lines(80)
-        .into_iter()
-        .map(|line| {
-            line.line
-                .spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let second_pass = rendered_rows(&widget, 80, 12).join("\n");
     assert!(second_pass.contains("second line"));
 }
 
@@ -1342,6 +1928,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model.clone())),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1381,7 +1968,7 @@ fn model_selection_updates_session_projection_and_emits_context_override() {
             model: Some("second-model".to_string()),
             thinking: Some("high".to_string()),
             sandbox: None,
-            approval_policy: None,
+            approval_policy: Some("on-request".to_string()),
         })
     );
 }
@@ -1410,6 +1997,7 @@ fn model_selection_with_thinking_support_waits_for_second_step() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(model)),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1463,6 +2051,7 @@ fn model_selection_without_thinking_support_finishes_immediately() {
         app_event_tx: AppEventSender::new(app_event_tx),
         initial_session: TuiSessionState::new(cwd, Some(base_model)),
         initial_thinking_selection: None,
+        initial_permission_preset: devo_protocol::PermissionPreset::Default,
         initial_user_message: None,
         enhanced_keys_supported: true,
         is_first_run: false,
@@ -1516,15 +2105,32 @@ fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
     widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
         "line one\nline two\nline three\n".to_string(),
     ));
-    // Complete reasoning — this triggers the flush
+    // Complete reasoning; assistant stays active until its own item or turn completes.
     widget.handle_worker_event(crate::events::WorkerEvent::ReasoningCompleted(
         "thinking".to_string(),
     ));
 
+    let committed = trim_trailing_blank_scrollback_lines(widget.drain_scrollback_lines(80));
+    let committed_text = committed
+        .iter()
+        .flat_map(|l| l.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(committed_text.contains("thinking"));
+    assert!(!committed_text.contains("line one"));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Completed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
     let committed = widget.drain_scrollback_lines(80);
-    // The three assistant lines should be in a single cell, so there should be
-    // no blank separator lines between them. Expect exactly 3 non-blank content
-    // lines (plus possibly a blank separator between header and this cell).
     let non_blank: Vec<&crate::history_cell::ScrollbackLine> = committed
         .iter()
         .filter(|l| {
@@ -1542,6 +2148,55 @@ fn flushed_assistant_lines_after_reasoning_are_in_one_cell() {
     assert!(text.contains("line one"));
     assert!(text.contains("line two"));
     assert!(text.contains("line three"));
+}
+
+#[test]
+fn completed_streaming_assistant_consolidates_to_source_backed_cell() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let _ = widget.drain_scrollback_lines(80);
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnStarted {
+        model: "test-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        turn_id: Default::default(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "## Architecture\n\nA. Input pipeline\n\n".to_string(),
+    ));
+    widget.pre_draw_tick();
+    widget.handle_worker_event(crate::events::WorkerEvent::TextDelta(
+        "TuiEvent".to_string(),
+    ));
+    widget.handle_worker_event(crate::events::WorkerEvent::TurnFinished {
+        stop_reason: "Completed".to_string(),
+        turn_count: 1,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+    });
+
+    let committed = widget.drain_scrollback_lines(80);
+    let text = committed
+        .iter()
+        .flat_map(|line| line.line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(
+        text.matches("Architecture").count(),
+        1,
+        "completed assistant history should be consolidated without replay: {text}"
+    );
+    assert!(text.contains("TuiEvent"));
 }
 
 #[test]
