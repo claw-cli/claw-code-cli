@@ -2282,3 +2282,87 @@ fn live_reasoning_cell_renders_without_duplication() {
         "reasoning should appear exactly once, got {occurrences}:\n{before}"
     );
 }
+
+#[test]
+fn transcript_overlay_lines_include_full_completed_tool_output() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let output = (1..=8)
+        .map(|index| format!("line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "bash".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "bash".to_string(),
+        preview: output,
+        is_error: false,
+        truncated: false,
+    });
+
+    let inline = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    let transcript = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !inline.contains("line 5"),
+        "inline output should stay compact: {inline}"
+    );
+    assert!(
+        transcript.contains("line 5") && transcript.contains("line 8"),
+        "transcript output should include the full tool output: {transcript}"
+    );
+}
+
+#[test]
+fn transcript_overlay_lines_include_running_tool_output_delta() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "bash".to_string(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolOutputDelta {
+        tool_use_id: "tool-1".to_string(),
+        delta: "streamed output line".to_string(),
+    });
+
+    let transcript = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        transcript.contains("streamed output line"),
+        "transcript output should include running tool deltas: {transcript}"
+    );
+}

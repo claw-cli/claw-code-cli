@@ -154,7 +154,7 @@ The TUI supports two screen modes toggled by `Ctrl+T`:
 
 **Inline mode (default)** — the TUI renders directly into the terminal scrollback. Mouse interaction is not available. Tool output cells are collapsed by default and can be expanded via keyboard (`Enter` on a selected cell). This mode preserves usable terminal scrollback after exit.
 
-**Alternative screen mode** (`Ctrl+T` to enter) — the TUI switches to the terminal's alternate screen buffer. The transcript, composer, and all cells render identically to inline mode. Mouse events are captured so tool output cells can be clicked to expand or collapse. `Ctrl+T` toggles back to inline mode.
+**Alternative screen mode** (`Ctrl+T` to enter) — the TUI switches to the terminal's alternate screen buffer and opens a read-only pager overlay. The pager renders the full transcript, including full tool output and any live in-flight output, without replacing the inline composer. `Ctrl+T`, `Esc`, `q`, or `Ctrl+C` closes the overlay and returns to inline mode.
 
 On exit, if the TUI is in alternative screen mode, it must switch back to inline mode first, then
 run the same terminal-safe teardown used by normal inline exit.
@@ -296,8 +296,8 @@ Rules:
 | `Alt+Up` / `Alt+Down` | any | enter selection mode; move between user cells |
 | `Enter` | selection mode (on a user cell) | open action menu (Rollback / Fork / Cancel) |
 | `Esc` | selection mode | exit selection mode, return to composer |
-| Mouse click | tool cell (alt-screen mode) | expand / collapse tool output |
-| `Ctrl+T` | any | toggle inline / alternative screen mode |
+| `Ctrl+T` | main view | open full transcript pager in alternative screen mode |
+| `Ctrl+T` / `Esc` / `q` | transcript or diff pager | close pager and return to inline mode |
 | `Ctrl+C` | any | exit TUI |
 | `/exit` | composer | exit TUI |
 | `/` | composer | open slash command list |
@@ -569,7 +569,7 @@ Each cell (user message, thinking, tool-ran, assistant reply) has:
 - `Thinking:` is italic with a distinct color
 - the rest of the text is gray
 
-Tool-ran cells follow the same convention. Tool output is rendered collapsed by default. In inline mode, use keyboard (`Enter` on a selected cell) to expand or collapse. In alternative screen mode, the cell is clickable to expand or collapse.
+Tool-ran cells follow the same convention. Tool output is rendered compactly in inline mode. Press `Ctrl+T` to open the transcript pager and view the full output.
 
 The tool cell distinguishes success and failure:
 

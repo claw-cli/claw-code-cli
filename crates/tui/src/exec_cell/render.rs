@@ -30,9 +30,7 @@ pub(crate) const TOOL_CALL_MAX_LINES: usize = 2;
 const USER_SHELL_TOOL_CALL_MAX_LINES: usize = 50;
 const MAX_INTERACTION_PREVIEW_CHARS: usize = 80;
 
-/// TODO: Transcript functionality still not implemented.
-// const TRANSCRIPT_HINT: &str = "ctrl + t to view transcript";
-const TRANSCRIPT_HINT: &str = "...";
+const TRANSCRIPT_HINT: &str = "ctrl + t to view transcript";
 
 pub(crate) struct OutputLinesParams {
     pub(crate) line_limit: usize,

@@ -22,6 +22,7 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
 use crate::chatwidget::TuiSessionState;
 use crate::events::WorkerEvent;
+use crate::host_overlay::OverlayState;
 use crate::onboarding::save_last_used_model;
 use crate::onboarding::save_onboarding_config;
 use crate::onboarding::save_project_permission_preset;
@@ -57,6 +58,7 @@ struct InteractiveLoopState {
     // replacement session has been restored into widget state.
     session_switch_pending: bool,
     last_ctrl_c_at: Option<Instant>,
+    overlay: OverlayState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +308,16 @@ fn handle_tui_event(
         return Ok(LoopAction::ClearAndExit);
     };
 
+    if loop_state.overlay.is_active() {
+        if matches!(tui_event, TuiEvent::Draw) {
+            chat_widget.pre_draw_tick();
+        }
+        loop_state
+            .overlay
+            .handle_tui_event(tui_event, tui, chat_widget)?;
+        return Ok(LoopAction::Continue);
+    }
+
     match tui_event {
         TuiEvent::Draw => {
             if loop_state.session_switch_pending {
@@ -317,6 +329,7 @@ fn handle_tui_event(
 
             if !chat_widget.is_resume_browser_open()
                 && !loop_state.resume_browser_pending
+                && !loop_state.overlay.is_active()
                 && tui.is_alt_screen_active()
             {
                 tui.leave_alt_screen()?;
@@ -362,20 +375,16 @@ fn handle_tui_event(
                 return Ok(LoopAction::Continue);
             }
 
-            if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                if tui.is_alt_screen_active() {
-                    tui.leave_alt_screen()?;
-                } else {
-                    tui.enter_alt_screen()?;
-                }
+            if key.code == KeyCode::Char('t')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && !chat_widget.is_resume_browser_open()
+            {
+                loop_state.overlay.open_transcript(tui, chat_widget)?;
                 return Ok(LoopAction::Continue);
             }
 
             loop_state.last_ctrl_c_at = None;
             chat_widget.handle_key_event(key);
-        }
-        TuiEvent::Mouse(mouse_event) => {
-            chat_widget.handle_mouse_event(mouse_event);
         }
         TuiEvent::Paste(pasted) => {
             // Many terminals convert newlines to \r when pasting (e.g., iTerm2),
@@ -437,6 +446,12 @@ fn handle_app_event(
         handle_app_command(command, worker, chat_widget, tui, loop_state, context)?;
         return Ok(LoopAction::Continue);
     }
+
+    if let AppEvent::DiffResult(text) = app_event {
+        loop_state.overlay.open_diff(tui, chat_widget, text)?;
+        return Ok(LoopAction::Continue);
+    }
+
     chat_widget.handle_app_event(app_event);
 
     Ok(LoopAction::Continue)

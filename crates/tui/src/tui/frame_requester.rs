@@ -102,7 +102,6 @@ impl FrameScheduler {
             tokio::pin!(deadline);
 
             tokio::select! {
-                biased;
                 draw_at = self.receiver.recv() => {
                     let Some(draw_at) = draw_at else {
                         // All senders dropped; exit the scheduler.
@@ -114,10 +113,6 @@ impl FrameScheduler {
                     // Do not send a draw immediately here. By continuing the loop,
                     // we recompute the sleep target so the draw fires once via the
                     // sleep branch, coalescing multiple requests into a single draw.
-                    //
-                    // The select is biased toward the deadline branch, so once the
-                    // scheduled draw time is due it will not be starved by a hot
-                    // stream of additional frame requests.
                     continue;
                 }
                 _ = &mut deadline => {

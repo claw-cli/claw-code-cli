@@ -249,7 +249,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             }
             Event::Resize(_, _) => Some(TuiEvent::Draw),
             Event::Paste(pasted) => Some(TuiEvent::Paste(pasted)),
-            Event::Mouse(mouse_event) => Some(TuiEvent::Mouse(mouse_event)),
+            Event::Mouse(_) => None,
             Event::FocusGained => {
                 self.terminal_focused.store(true, Ordering::Relaxed);
                 self.needs_full_repaint.store(true, Ordering::Relaxed);
@@ -303,6 +303,9 @@ mod tests {
     use crossterm::event::KeyCode;
     use crossterm::event::KeyEvent;
     use crossterm::event::KeyModifiers;
+    use crossterm::event::MouseButton;
+    use crossterm::event::MouseEvent;
+    use crossterm::event::MouseEventKind;
     use pretty_assertions::assert_eq;
     use std::task::Context;
     use std::task::Poll;
@@ -411,6 +414,12 @@ mod tests {
         let mut stream = make_stream(broker, draw_rx, terminal_focused, needs_full_repaint);
 
         handle.send(Ok(Event::FocusLost));
+        handle.send(Ok(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })));
         handle.send(Ok(Event::Key(KeyEvent::new(
             KeyCode::Char('a'),
             KeyModifiers::NONE,
