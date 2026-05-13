@@ -75,6 +75,7 @@ use crate::streaming::commit_tick::CommitTickScope;
 use crate::streaming::commit_tick::run_commit_tick;
 use crate::streaming::controller::StreamController;
 use crate::theme::ThemeSet;
+use crate::tool_result_cell::ToolResultCell;
 use crate::tui::frame_requester::FrameRequester;
 use devo_utils::ansi_escape::ansi_escape_line;
 
@@ -1101,12 +1102,6 @@ impl ChatWidget {
         self.set_status_message("Select an action");
     }
 
-    pub(crate) fn handle_mouse_event(&mut self, _mouse: crossterm::event::MouseEvent) {
-        // Mouse events are only actionable in alt-screen mode.
-        // In inline mode, they are ignored.
-        self.frame_requester.schedule_frame();
-    }
-
     pub(crate) fn handle_paste(&mut self, text: String) {
         if self.resume_browser.is_some() {
             return;
@@ -1292,6 +1287,7 @@ impl ChatWidget {
                 };
                 self.active_tool_calls
                     .insert(tool_use_id.clone(), tool_call.clone());
+                self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
                 self.add_history_entry_without_redraw(Box::new(
                     history_cell::AgentMessageCell::new_with_prefix(
                         tool_call.lines,
@@ -1307,6 +1303,8 @@ impl ChatWidget {
                 if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
                     let line = Line::from(delta.clone()).patch_style(Self::tool_text_style());
                     tool_call.lines.push(line);
+                    self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                    self.frame_requester.schedule_frame();
                 }
             }
             WorkerEvent::ToolResult {
@@ -1336,21 +1334,17 @@ impl ChatWidget {
                     .filter(|tool_title| !tool_title.is_empty())
                     .unwrap_or(title);
 
-                let mut lines = Vec::new();
-                let mut preview_lines = self.tool_preview_lines(&preview);
-                if truncated && preview_lines.is_empty() {
-                    preview_lines.push(Line::from("…").patch_style(Self::tool_text_style()));
-                }
-                if !resolved_title.is_empty() {
-                    lines.push(Self::ran_tool_line(&resolved_title));
-                }
-                lines.extend(preview_lines);
-                if !lines.is_empty() {
-                    self.add_to_history(history_cell::AgentMessageCell::new_with_prefix(
-                        lines,
+                let title_line =
+                    (!resolved_title.is_empty()).then(|| Self::ran_tool_line(&resolved_title));
+                if title_line.is_some() || !preview.is_empty() || truncated {
+                    self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                    self.add_to_history(ToolResultCell::new(
+                        title_line,
+                        preview,
                         self.dot_prefix(dot_status),
-                        "  ",
-                        false,
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        truncated,
                     ));
                 }
                 self.set_status_message(if is_error {
@@ -2070,16 +2064,14 @@ impl ChatWidget {
                 ));
             }
             TranscriptItemKind::ToolResult => {
-                let mut lines = vec![Self::ran_tool_line(&item.title)];
-                lines.extend(self.tool_preview_lines(&item.body));
-                self.add_history_entry_without_redraw(Box::new(
-                    history_cell::AgentMessageCell::new_with_prefix(
-                        lines,
-                        Self::tool_dot_prefix(),
-                        "  ",
-                        false,
-                    ),
-                ));
+                self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                    (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                    item.body,
+                    Self::tool_dot_prefix(),
+                    Line::from("  "),
+                    Self::tool_text_style(),
+                    false,
+                )));
             }
             TranscriptItemKind::Error => self.add_history_entry_without_redraw(Box::new(
                 history_cell::new_error_event_with_hint(item.body, Some(item.title)),
@@ -2388,6 +2380,7 @@ impl ChatWidget {
             TextItemKind::Reasoning => self.reasoning_active_cell(&self.active_text_items[index]),
         };
         self.active_text_items[index].cell = cell;
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
     }
 
     fn assistant_active_cell(
@@ -2746,6 +2739,24 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
+    pub(crate) fn transcript_overlay_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let width = width.max(1);
+        let mut lines = Vec::new();
+        for cell in &self.history {
+            Self::extend_lines_with_separator(&mut lines, cell.transcript_lines(width));
+        }
+        Self::extend_lines_with_separator(&mut lines, self.live_transcript_lines(width));
+        Self::trim_trailing_blank_lines(&mut lines);
+        lines
+    }
+
+    pub(crate) fn transcript_overlay_has_live_tail(&self) -> bool {
+        self.active_cell.is_some()
+            || !self.active_text_items.is_empty()
+            || !self.active_tool_calls.is_empty()
+            || !self.pending_tool_calls.is_empty()
+    }
+
     pub(crate) fn external_editor_state(&self) -> ExternalEditorState {
         self.external_editor_state
     }
@@ -2791,6 +2802,46 @@ impl ChatWidget {
                     false,
                 )
                 .display_lines(width),
+            );
+        }
+        Self::trim_trailing_blank_lines(&mut lines);
+        lines
+    }
+
+    fn live_transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        if let Some(cell) = &self.active_cell {
+            Self::extend_lines_with_separator(&mut lines, cell.transcript_lines(width));
+        }
+        for item in &self.active_text_items {
+            if let Some(cell) = &item.cell {
+                Self::extend_lines_with_separator(&mut lines, cell.transcript_lines(width));
+            }
+        }
+        let mut tool_calls = self.active_tool_calls.values().collect::<Vec<_>>();
+        tool_calls.sort_by(|left, right| left.tool_use_id.cmp(&right.tool_use_id));
+        for tool_call in tool_calls {
+            Self::extend_lines_with_separator(
+                &mut lines,
+                history_cell::AgentMessageCell::new_with_prefix(
+                    tool_call.lines.clone(),
+                    Self::pending_dot_prefix(),
+                    "  ",
+                    false,
+                )
+                .transcript_lines(width),
+            );
+        }
+        for pending in &self.pending_tool_calls {
+            Self::extend_lines_with_separator(
+                &mut lines,
+                history_cell::AgentMessageCell::new_with_prefix(
+                    pending.lines.clone(),
+                    Self::pending_dot_prefix(),
+                    "  ",
+                    false,
+                )
+                .transcript_lines(width),
             );
         }
         Self::trim_trailing_blank_lines(&mut lines);
