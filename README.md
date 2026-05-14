@@ -17,8 +17,6 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md) | [Português do Brasil](./README.pt-BR.md) | [Deutsch](./README.de.md) | [Русский](./README.ru.md) | [Türkçe](./README.tr.md)
 
-## Demo
-
 <table>
   <tr>
     <td width="50%" align="center">
@@ -26,14 +24,14 @@
       <br />
       <sub>Ask Devo to quickly understand a repository.</sub>
       <br /><br />
-      <img width="632" height="480" alt="Image" src="https://github.com/user-attachments/assets/b2867013-c6e6-4a26-9956-5a8a6133b96c" />
+      <img width="100%" alt="Image" src="https://github.com/user-attachments/assets/b2867013-c6e6-4a26-9956-5a8a6133b96c" />
     </td>
     <td width="50%" align="center">
       <strong>中文支持</strong>
       <br />
       <sub>用中文回复问题</sub>
       <br /><br />
-      <img width="632" height="480" alt="Image" src="https://github.com/user-attachments/assets/bd7db80b-f31c-4da5-bf35-bf919385edf3" />
+      <img width="100%" alt="Image" src="https://github.com/user-attachments/assets/bd7db80b-f31c-4da5-bf35-bf919385edf3" />
     </td>
   </tr>
 </table>
