@@ -646,10 +646,8 @@ impl ChatWidget {
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
     ) {
-        self.history.push(self.build_current_header_box(
-            is_first_run,
-            startup_tooltip_override,
-        ));
+        self.history
+            .push(self.build_current_header_box(is_first_run, startup_tooltip_override));
     }
 
     fn build_current_header_box(

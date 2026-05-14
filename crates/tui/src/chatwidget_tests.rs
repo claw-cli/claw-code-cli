@@ -1925,8 +1925,8 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
     assert!(transcript_text.contains("old session line"));
     let old_line_index = find_row_index(&transcript_lines, "old session line")
         .expect("old session line remains in transcript");
-    let header_index = find_row_index(&transcript_lines, "Devo")
-        .expect("new session header is appended");
+    let header_index =
+        find_row_index(&transcript_lines, "Devo").expect("new session header is appended");
     assert!(header_index > old_line_index);
 }
 
