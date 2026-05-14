@@ -4,10 +4,10 @@ use anyhow::Result;
 use devo_utils::ansi_escape::ansi_escape_line;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use std::time::Duration;
 
 use crate::chatwidget::ChatWidget;
 use crate::pager_overlay::Overlay;
+use crate::pager_overlay::TranscriptOverlay;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
 
@@ -31,9 +31,10 @@ impl OverlayState {
             return Ok(());
         };
 
-        if matches!(tui_event, TuiEvent::Draw) {
-            let width = tui.terminal.size()?.width.max(1);
-            overlay.set_transcript_lines(chat_widget.transcript_overlay_lines(width));
+        if matches!(tui_event, TuiEvent::Draw)
+            && let Overlay::Transcript(transcript) = overlay
+        {
+            sync_transcript_overlay(transcript, tui, chat_widget)?;
         }
 
         overlay.handle_event(tui, tui_event)?;
@@ -41,9 +42,14 @@ impl OverlayState {
             self.overlay = None;
             tui.leave_alt_screen()?;
             tui.frame_requester().schedule_frame();
-        } else if chat_widget.transcript_overlay_has_live_tail() {
+        } else if let Overlay::Transcript(transcript) = overlay
+            && transcript.is_scrolled_to_bottom()
+            && chat_widget
+                .transcript_overlay_live_tail_key()
+                .is_some_and(|key| key.animation_tick.is_some())
+        {
             tui.frame_requester()
-                .schedule_frame_in(Duration::from_millis(50));
+                .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
         }
 
         Ok(())
@@ -57,7 +63,8 @@ impl OverlayState {
         let width = tui.terminal.size()?.width.max(1);
         tui.enter_alt_screen()?;
         self.overlay = Some(Overlay::new_transcript(
-            chat_widget.transcript_overlay_lines(width),
+            chat_widget.transcript_overlay_cells(width),
+            width,
         ));
         tui.frame_requester().schedule_frame();
         Ok(())
@@ -78,6 +85,23 @@ impl OverlayState {
         tui.frame_requester().schedule_frame();
         Ok(())
     }
+}
+
+fn sync_transcript_overlay(
+    transcript: &mut TranscriptOverlay,
+    tui: &mut Tui,
+    chat_widget: &ChatWidget,
+) -> Result<()> {
+    let width = tui.terminal.size()?.width.max(1);
+    let cell_count = chat_widget.transcript_overlay_cell_count();
+    if transcript.needs_committed_cells_sync(width, cell_count) {
+        transcript.replace_committed_cells(width, chat_widget.transcript_overlay_cells(width));
+    }
+    let live_tail_key = chat_widget.transcript_overlay_live_tail_key();
+    transcript.sync_live_tail(width, live_tail_key, |tail_width| {
+        chat_widget.transcript_overlay_live_tail_lines(tail_width)
+    });
+    Ok(())
 }
 
 fn diff_overlay_lines(text: &str) -> Vec<Line<'static>> {

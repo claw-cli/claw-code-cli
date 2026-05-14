@@ -137,6 +137,13 @@ pub(crate) struct ActiveCellTranscriptKey {
     pub(crate) animation_tick: Option<u64>,
 }
 
+/// Snapshot of one committed transcript cell for the Ctrl+T overlay.
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptOverlayCell {
+    pub(crate) lines: Vec<Line<'static>>,
+    pub(crate) is_stream_continuation: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct UserMessage {
     pub(crate) text: String,
@@ -2737,6 +2744,42 @@ impl ChatWidget {
             .as_ref()
             .map(|cell| cell.transcript_lines(width))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn transcript_overlay_cell_count(&self) -> usize {
+        self.history.len()
+    }
+
+    pub(crate) fn transcript_overlay_cells(&self, width: u16) -> Vec<TranscriptOverlayCell> {
+        let width = width.max(1);
+        self.history
+            .iter()
+            .map(|cell| TranscriptOverlayCell {
+                lines: cell.transcript_lines(width),
+                is_stream_continuation: cell.is_stream_continuation(),
+            })
+            .collect()
+    }
+
+    pub(crate) fn transcript_overlay_live_tail_key(&self) -> Option<ActiveCellTranscriptKey> {
+        if !self.transcript_overlay_has_live_tail() {
+            return None;
+        }
+
+        let active_cell = self.active_cell.as_ref();
+        Some(ActiveCellTranscriptKey {
+            revision: self.active_cell_revision,
+            is_stream_continuation: active_cell.is_some_and(|cell| cell.is_stream_continuation()),
+            animation_tick: active_cell.and_then(|cell| cell.transcript_animation_tick()),
+        })
+    }
+
+    pub(crate) fn transcript_overlay_live_tail_lines(
+        &self,
+        width: u16,
+    ) -> Option<Vec<Line<'static>>> {
+        self.transcript_overlay_has_live_tail()
+            .then(|| self.live_transcript_lines(width.max(1)))
     }
 
     pub(crate) fn transcript_overlay_lines(&self, width: u16) -> Vec<Line<'static>> {
