@@ -20,7 +20,7 @@
 <table>
   <tr>
     <td width="50%" align="center">
-      <strong>Explain codebase</strong>
+      <strong>Explain Codebase</strong>
       <br />
       <sub>Ask Devo to quickly understand a repository.</sub>
       <br /><br />
@@ -32,6 +32,22 @@
       <sub>用中文回复问题</sub>
       <br /><br />
       <img width="100%" alt="Image" src="https://github.com/user-attachments/assets/bd7db80b-f31c-4da5-bf35-bf919385edf3" />
+    </td>
+  </tr>
+  <tr>
+      <td width="50%" align="center">
+      <strong>Deepseek V4 (Cost-Effective)</strong>
+      <br />
+      <sub>Fully Support, input/output token, cached rate, context window usage.</sub>
+      <br /><br />
+      <img width="100%" alt="Image" src="https://github.com/user-attachments/assets/35639cae-9fd7-48ff-9b0f-d43b1aff86d8" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Safety First</strong>
+      <br />
+      <sub>Permission control for tool call.</sub>
+      <br /><br />
+      <img width="100%" alt="Image" src="https://github.com/user-attachments/assets/d70e30af-3194-4dba-b1bf-c0ba869b801f" />
     </td>
   </tr>
 </table>
