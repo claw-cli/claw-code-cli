@@ -5,13 +5,13 @@ use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
 
-use crate::ToolOutput;
+use crate::FunctionToolOutput;
 
 pub(crate) fn read_directory(
     path: &Path,
     limit: usize,
     offset: usize,
-) -> anyhow::Result<ToolOutput> {
+) -> anyhow::Result<FunctionToolOutput> {
     let mut items = std::fs::read_dir(path)?
         .flatten()
         .map(|entry| {
@@ -37,10 +37,7 @@ pub(crate) fn read_directory(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let output = [
-        format!("<path>{}</path>", path.display()),
-        "<type>directory</type>".to_string(),
-        "<entries>".to_string(),
+    let display_content = [
         sliced.join("\n"),
         if truncated {
             format!(
@@ -52,22 +49,34 @@ pub(crate) fn read_directory(
         } else {
             format!("\n({} entries)", items.len())
         },
+    ]
+    .join("\n");
+
+    let output = [
+        format!("<path>{}</path>", path.display()),
+        "<type>directory</type>".to_string(),
+        "<entries>".to_string(),
+        display_content.clone(),
         "</entries>".to_string(),
     ]
     .join("\n");
 
-    Ok(ToolOutput {
-        content: output,
-        is_error: false,
-        metadata: Some(json!({
+    Ok(FunctionToolOutput::success_with_metadata(
+        output,
+        json!({
             "preview": preview,
             "truncated": truncated,
             "loaded": []
-        })),
-    })
+        }),
+    )
+    .with_display_content(display_content))
 }
 
-pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Result<ToolOutput> {
+pub(crate) fn read_file(
+    path: &Path,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<FunctionToolOutput> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let start = offset.saturating_sub(1);
@@ -87,6 +96,7 @@ pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Res
             more = true;
             continue;
         }
+        // TODO: check the truncate policy
         if line.len() > 2000 {
             line.truncate(2000);
             line.push_str("... (line truncated to 2000 chars)");
@@ -102,46 +112,46 @@ pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Res
     }
 
     if count < offset && !(count == 0 && offset == 1) {
-        return Ok(ToolOutput::error(format!(
+        return Ok(FunctionToolOutput::error(format!(
             "Offset {} is out of range for this file ({} lines)",
             offset, count
         )));
     }
 
-    let mut output = format!(
-        "<path>{}</path>\n<type>file</type>\n<content>\n",
-        path.display()
-    );
+    let mut display_content = String::new();
     for (index, line) in raw.iter().enumerate() {
-        output.push_str(&format!("{}: {}\n", offset + index, line));
+        display_content.push_str(&format!("{}: {}\n", offset + index, line));
     }
 
     let last = offset + raw.len().saturating_sub(1);
     let next = last + 1;
     if cut {
-        output.push_str(&format!(
+        display_content.push_str(&format!(
             "\n(Output capped at 50 KB. Showing lines {}-{}. Use offset={} to continue.)",
             offset, last, next
         ));
     } else if more {
-        output.push_str(&format!(
+        display_content.push_str(&format!(
             "\n(Showing lines {}-{} of {}. Use offset={} to continue.)",
             offset, last, count, next
         ))
     } else {
-        output.push_str(&format!("\n(End of file - total {} lines)", count))
+        display_content.push_str(&format!("\n(End of file - total {} lines)", count))
     }
-    output.push_str("\n</content>");
+    let output = format!(
+        "<path>{}</path>\n<type>file</type>\n<content>\n{display_content}\n</content>",
+        path.display()
+    );
 
-    Ok(ToolOutput {
-        content: output,
-        is_error: false,
-        metadata: Some(json!({
+    Ok(FunctionToolOutput::success_with_metadata(
+        output,
+        json!({
             "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"),
             "truncated": cut || more,
             "loaded": []
-        })),
-    })
+        }),
+    )
+    .with_display_content(display_content))
 }
 
 pub(crate) fn is_binary_file(path: &Path) -> anyhow::Result<bool> {
@@ -249,6 +259,9 @@ pub(crate) fn missing_file_message(filepath: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContent;
+    use crate::invocation::ToolOutput;
+    use pretty_assertions::assert_eq;
     use std::env;
     use std::fs::File;
     use std::fs::{self};
@@ -277,6 +290,20 @@ mod tests {
         }
     }
 
+    fn output_text(output: &FunctionToolOutput) -> &str {
+        output.content.text_part().expect("text content")
+    }
+
+    fn output_metadata(output: &FunctionToolOutput) -> &serde_json::Value {
+        match &output.content {
+            ToolContent::Mixed {
+                json: Some(metadata),
+                ..
+            } => metadata,
+            content => panic!("expected mixed output metadata, got {content:?}"),
+        }
+    }
+
     #[test]
     fn read_directory_sorts_entries_and_reports_truncation() {
         let dir = create_temp_dir("dir");
@@ -285,16 +312,28 @@ mod tests {
         fs::create_dir_all(dir.join("subdir")).unwrap();
 
         let output = read_directory(&dir, 1, 2).unwrap();
-        assert!(output.content.contains("<type>directory</type>"));
-        assert!(output.content.contains("b.txt"));
+        let text = output_text(&output);
+        assert!(text.contains("<type>directory</type>"));
+        assert!(text.contains("b.txt"));
         assert!(
-            output.content.contains(
+            text.contains(
                 "(Showing 1 of 3 entries. Use 'offset' parameter to read beyond entry 3)"
             )
         );
+        assert_eq!(
+            output.display_content(),
+            Some(
+                "b.txt\n\n(Showing 1 of 3 entries. Use 'offset' parameter to read beyond entry 3)"
+            )
+        );
+        assert!(!output.display_content().unwrap().contains("<entries>"));
 
-        let metadata = output.metadata.unwrap();
-        assert!(metadata.get("truncated").and_then(|value| value.as_bool()) == Some(true));
+        assert_eq!(
+            output_metadata(&output)
+                .get("truncated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -305,16 +344,23 @@ mod tests {
 
         let output = read_file(&path, 2, 2).unwrap();
         assert!(!output.is_error);
-        assert!(output.content.contains("2: line2"));
-        assert!(output.content.contains("3: line3"));
-        assert!(
-            output
-                .content
-                .contains("(Showing lines 2-3 of 5. Use offset=4 to continue.)")
+        let text = output_text(&output);
+        assert!(text.contains("2: line2"));
+        assert!(text.contains("3: line3"));
+        assert!(text.contains("(Showing lines 2-3 of 5. Use offset=4 to continue.)"));
+        assert_eq!(
+            output.display_content(),
+            Some("2: line2\n3: line3\n\n(Showing lines 2-3 of 5. Use offset=4 to continue.)")
         );
+        assert!(!output.display_content().unwrap().contains("<content>"));
+        assert!(!output.display_content().unwrap().contains("<path>"));
 
-        let metadata = output.metadata.unwrap();
-        assert!(metadata.get("truncated").and_then(|value| value.as_bool()) == Some(true));
+        assert_eq!(
+            output_metadata(&output)
+                .get("truncated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -325,7 +371,12 @@ mod tests {
 
         let output = read_file(&path, 10, 5).unwrap();
         assert!(output.is_error);
-        assert!(output.content.contains("Offset 5 is out of range"));
+        assert!(
+            output
+                .content
+                .text_part()
+                .is_some_and(|text| text.contains("Offset 5 is out of range"))
+        );
     }
 
     #[test]

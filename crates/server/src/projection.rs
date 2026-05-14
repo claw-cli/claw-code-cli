@@ -137,6 +137,7 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             tool_call_id,
             tool_name,
             output,
+            display_content,
             is_error,
             ..
         }) => Some(SessionHistoryItem::new(
@@ -147,10 +148,10 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
                 SessionHistoryItemKind::ToolResult
             },
             summarize_tool_result(tool_name.as_deref(), *is_error),
-            match output {
+            display_content.clone().unwrap_or_else(|| match output {
                 serde_json::Value::String(text) => text.clone(),
                 other => other.to_string(),
-            },
+            }),
         )),
         TurnItem::CommandExecution(CommandExecutionItem {
             tool_call_id,
@@ -268,5 +269,45 @@ fn summarize_tool_result(tool_name: Option<&str>, is_error: bool) -> String {
         (Some(tool_name), false) => format!("{tool_name} output"),
         (None, true) => "Tool error".to_string(),
         (None, false) => "Tool output".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::history_item_from_turn_item;
+    use crate::session::SessionHistoryItemKind;
+    use devo_core::ToolResultItem;
+    use devo_core::TurnItem;
+
+    #[test]
+    fn history_projection_prefers_tool_result_display_content() {
+        let item = TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("read".to_string()),
+            output: serde_json::Value::String("<content>canonical</content>".to_string()),
+            display_content: Some("canonical".to_string()),
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        assert_eq!(history_item.kind, SessionHistoryItemKind::ToolResult);
+        assert_eq!(history_item.title, "read output");
+        assert_eq!(history_item.body, "canonical");
+    }
+
+    #[test]
+    fn history_projection_falls_back_to_tool_result_output() {
+        let item = TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("read".to_string()),
+            output: serde_json::Value::String("<content>canonical</content>".to_string()),
+            display_content: None,
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        assert_eq!(history_item.body, "<content>canonical</content>");
     }
 }

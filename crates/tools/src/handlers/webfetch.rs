@@ -124,6 +124,7 @@ impl ToolHandler for WebFetchHandler {
                     })),
                 },
                 is_error: false,
+                display_content: None,
             }));
         }
 
@@ -153,6 +154,7 @@ impl ToolHandler for WebFetchHandler {
                 json: Some(serde_json::json!({ "title": title, "mime": mime })),
             },
             is_error: false,
+            display_content: None,
         }))
     }
 }

@@ -15,6 +15,7 @@ type ProgressCallback = dyn Fn(&str, &str) + Send + Sync;
 type ProgressCallbackArc = Arc<ProgressCallback>;
 type PermissionFuture = futures::future::BoxFuture<'static, Result<(), String>>;
 type PermissionCheckFn = dyn Fn(ToolPermissionRequest) -> PermissionFuture + Send + Sync;
+const PROGRESS_DRAIN_GRACE_MS: u64 = 50;
 
 #[derive(Debug, Clone)]
 pub struct ToolCall {
@@ -28,6 +29,7 @@ pub struct ToolCallResult {
     pub tool_use_id: String,
     pub content: ToolContent,
     pub is_error: bool,
+    pub display_content: Option<String>,
 }
 
 impl ToolCallResult {
@@ -36,6 +38,7 @@ impl ToolCallResult {
             tool_use_id: tool_use_id.to_string(),
             content,
             is_error: false,
+            display_content: None,
         }
     }
 
@@ -44,6 +47,7 @@ impl ToolCallResult {
             tool_use_id: tool_use_id.to_string(),
             content: ToolContent::Text(message.to_string()),
             is_error: true,
+            display_content: None,
         }
     }
 }
@@ -168,26 +172,39 @@ impl ToolRuntime {
             input: call.input.clone(),
         };
 
-        let progress_sender = on_progress.as_ref().map(|cb| {
+        let (progress_sender, mut progress_task) = if let Some(cb) = on_progress.as_ref() {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             let call_id = call.id.clone();
             let cb = Arc::clone(cb);
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 while let Some(chunk) = rx.recv().await {
                     cb(&call_id, &chunk);
                 }
             });
-            tx
-        });
+            (Some(tx), Some(task))
+        } else {
+            (None, None)
+        };
 
-        match tool.handle(invocation, progress_sender).await {
+        let result = tool.handle(invocation, progress_sender).await;
+        if let Some(task) = progress_task.as_mut() {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(PROGRESS_DRAIN_GRACE_MS),
+                task,
+            )
+            .await;
+        }
+
+        match result {
             Ok(output) => {
                 let is_error = output.is_error();
+                let display_content = output.display_content().map(str::to_string);
                 let content = output.to_content();
                 ToolCallResult {
                     tool_use_id: call.id.clone(),
                     content,
                     is_error,
+                    display_content,
                 }
             }
             Err(e) => ToolCallResult::error(&call.id, &e.to_string()),

@@ -17,21 +17,20 @@ pub mod unified_exec;
 mod apply_patch;
 mod read;
 mod shell_exec;
-mod tool;
 
 // New re-exports
 pub use errors::*;
 pub use events::*;
 pub use handler_kind::ToolHandlerKind;
-pub use invocation::{FunctionToolOutput, ToolCallId, ToolContent, ToolInvocation, ToolName};
+pub use invocation::{
+    FunctionToolOutput, ToolCallId, ToolContent, ToolInvocation, ToolName, ToolOutput,
+};
 pub use json_schema::JsonSchema;
 pub use registry::*;
 pub use registry_plan::*;
 pub use router::*;
 pub use tool_handler::ToolHandler;
 pub use tool_spec::*;
-
-pub use tool::ToolOutput;
 
 /// Create a fully-configured tool registry with all built-in tools.
 /// This is the recommended way to bootstrap tools.

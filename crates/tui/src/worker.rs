@@ -693,7 +693,12 @@ async fn run_worker_inner(
                         session_id = None;
                         session_cwd = config.cwd.clone();
                         input_history_cursor = None;
+                        turn_count = 0;
+                        total_input_tokens = 0;
+                        total_output_tokens = 0;
+                        total_cache_read_tokens = 0;
                         last_query_total_tokens = 0;
+                        last_query_input_tokens = 0;
                         let _ = event_tx.send(WorkerEvent::NewSessionPrepared {
                             cwd: session_cwd.clone(),
                             model: model.clone(),
@@ -1615,7 +1620,9 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             let _ = event_tx.send(WorkerEvent::ToolResult {
                 tool_use_id: payload.tool_call_id,
                 title,
-                preview: render_json_value_text(&payload.content),
+                preview: payload
+                    .display_content
+                    .unwrap_or_else(|| render_json_value_text(&payload.content)),
                 is_error: payload.is_error,
                 truncated: false,
             });
@@ -2083,6 +2090,7 @@ mod tests {
     use devo_server::SessionMetadata;
     use devo_server::SessionRuntimeStatus;
 
+    use super::handle_completed_item;
     use super::normalize_display_output;
     use super::project_history_items;
     use super::summarize_tool_call;
@@ -2090,9 +2098,15 @@ mod tests {
     use crate::events::SessionListEntry;
     use crate::events::TranscriptItem;
     use crate::events::TranscriptItemKind;
+    use crate::events::WorkerEvent;
+    use devo_core::ItemId;
+    use devo_server::ItemEnvelope;
+    use devo_server::ItemEventPayload;
+    use devo_server::ItemKind;
     use devo_server::SessionHistoryItem;
     use devo_server::SessionHistoryItemKind;
     use devo_server::ToolCallPayload;
+    use devo_server::ToolResultPayload;
 
     #[test]
     fn bash_tool_summary_uses_command_text() {
@@ -2120,6 +2134,90 @@ mod tests {
         assert_eq!(
             truncate_tool_output(&content),
             "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\n… "
+        );
+    }
+
+    #[test]
+    fn completed_tool_result_uses_display_content_preview() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("read".to_string()),
+                        content: serde_json::Value::String(
+                            "<content>canonical</content>".to_string(),
+                        ),
+                        display_content: Some("canonical".to_string()),
+                        is_error: false,
+                        summary: "read output".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        assert_eq!(
+            event_rx.try_recv().expect("worker event"),
+            WorkerEvent::ToolResult {
+                tool_use_id: "call-1".to_string(),
+                title: "read output".to_string(),
+                preview: "canonical".to_string(),
+                is_error: false,
+                truncated: false,
+            }
+        );
+    }
+
+    #[test]
+    fn completed_tool_result_falls_back_to_content_preview() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("read".to_string()),
+                        content: serde_json::Value::String(
+                            "<content>canonical</content>".to_string(),
+                        ),
+                        display_content: None,
+                        is_error: false,
+                        summary: "read output".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        assert_eq!(
+            event_rx.try_recv().expect("worker event"),
+            WorkerEvent::ToolResult {
+                tool_use_id: "call-1".to_string(),
+                title: "read output".to_string(),
+                preview: "<content>canonical</content>".to_string(),
+                is_error: false,
+                truncated: false,
+            }
         );
     }
 

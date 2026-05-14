@@ -63,6 +63,7 @@ impl ToolHandler for PlanHandler {
                 })),
             },
             is_error: false,
+            display_content: None,
         }))
     }
 }

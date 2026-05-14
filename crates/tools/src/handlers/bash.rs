@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::errors::ToolExecutionError;
 use crate::events::ToolProgressSender;
 use crate::handler_kind::ToolHandlerKind;
-use crate::invocation::{FunctionToolOutput, ToolInvocation, ToolOutput};
+use crate::invocation::{ToolInvocation, ToolOutput};
 use crate::shell_exec::{
     ShellExecRequest, default_max_output_tokens, default_timeout_ms, default_yield_time_ms,
     execute_shell_command,
@@ -75,6 +75,6 @@ impl ToolHandler for BashHandler {
             message: e.to_string(),
         })?;
 
-        Ok(Box::new(FunctionToolOutput::from_output(output)))
+        Ok(Box::new(output))
     }
 }

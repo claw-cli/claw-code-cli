@@ -477,7 +477,7 @@ Here is architecture
 Notes
 
 - This section describes the intended improved tool architecture, not a strict mirror of the current implementation.
-- Both the older `Tool` / `ToolRegistry` / `ToolOutput` path and the current `spec.rs` path should be treated as transitional.
+- Tool execution output is standardized on `invocation::ToolOutput`, implemented by `FunctionToolOutput`; structured metadata is carried through `ToolContent::Mixed`.
 - The improved design may intentionally differ from `crates/tools/src/spec.rs` where the current shapes are too limited or too implementation-driven.
 - Streaming assembly stays in the adapter layer. Adapters accumulate provider deltas and only emit fully formed tool invocations into the runtime.
 - The runtime should not model partial tool calls.

@@ -23,6 +23,9 @@ pub struct ToolInvocation {
 pub trait ToolOutput: Send {
     fn to_content(self: Box<Self>) -> ToolContent;
     fn is_error(&self) -> bool;
+    fn display_content(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +39,14 @@ pub enum ToolContent {
 }
 
 impl ToolContent {
+    pub fn text_part(&self) -> Option<&str> {
+        match self {
+            ToolContent::Text(text) => Some(text),
+            ToolContent::Json(_) => None,
+            ToolContent::Mixed { text, .. } => text.as_deref(),
+        }
+    }
+
     pub fn into_string(self) -> String {
         match self {
             ToolContent::Text(t) => t,
@@ -57,6 +68,7 @@ impl ToolContent {
 pub struct FunctionToolOutput {
     pub content: ToolContent,
     pub is_error: bool,
+    pub display_content: Option<String>,
 }
 
 impl FunctionToolOutput {
@@ -64,6 +76,7 @@ impl FunctionToolOutput {
         FunctionToolOutput {
             content: ToolContent::Text(content.into()),
             is_error: false,
+            display_content: None,
         }
     }
 
@@ -71,24 +84,24 @@ impl FunctionToolOutput {
         FunctionToolOutput {
             content: ToolContent::Text(message.into()),
             is_error: true,
+            display_content: None,
         }
     }
 
-    pub fn from_output(output: crate::ToolOutput) -> Self {
+    pub fn success_with_metadata(content: impl Into<String>, metadata: serde_json::Value) -> Self {
         FunctionToolOutput {
-            content: if output.is_error {
-                ToolContent::Text(output.content)
-            } else {
-                match output.metadata {
-                    Some(meta) => ToolContent::Mixed {
-                        text: Some(output.content),
-                        json: Some(meta),
-                    },
-                    None => ToolContent::Text(output.content),
-                }
+            content: ToolContent::Mixed {
+                text: Some(content.into()),
+                json: Some(metadata),
             },
-            is_error: output.is_error,
+            is_error: false,
+            display_content: None,
         }
+    }
+
+    pub fn with_display_content(mut self, display_content: impl Into<String>) -> Self {
+        self.display_content = Some(display_content.into());
+        self
     }
 }
 
@@ -100,11 +113,16 @@ impl ToolOutput for FunctionToolOutput {
     fn is_error(&self) -> bool {
         self.is_error
     }
+
+    fn display_content(&self) -> Option<&str> {
+        self.display_content.as_deref()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn tool_name_newtype() {
@@ -125,12 +143,14 @@ mod tests {
     #[test]
     fn tool_content_text() {
         let c = ToolContent::Text("hello".into());
+        assert_eq!(c.text_part(), Some("hello"));
         assert_eq!(c.into_string(), "hello");
     }
 
     #[test]
     fn tool_content_json() {
         let c = ToolContent::Json(serde_json::json!({"key": "val"}));
+        assert_eq!(c.text_part(), None);
         assert!(c.into_string().contains("val"));
     }
 
@@ -140,6 +160,7 @@ mod tests {
             text: Some("text".into()),
             json: Some(serde_json::json!({"key": 1})),
         };
+        assert_eq!(c.text_part(), Some("text"));
         let s = c.into_string();
         assert!(s.contains("text"));
         assert!(s.contains("key"));
@@ -160,6 +181,7 @@ mod tests {
             text: None,
             json: Some(serde_json::json!(42)),
         };
+        assert_eq!(c.text_part(), None);
         assert_eq!(c.into_string(), "42");
     }
 
@@ -167,6 +189,7 @@ mod tests {
     fn function_tool_output_success() {
         let out = FunctionToolOutput::success("done");
         assert!(!out.is_error);
+        assert_eq!(out.display_content(), None);
         assert!(matches!(out.content, ToolContent::Text(ref t) if t == "done"));
     }
 
@@ -174,55 +197,37 @@ mod tests {
     fn function_tool_output_error() {
         let out = FunctionToolOutput::error("failed");
         assert!(out.is_error);
+        assert_eq!(out.display_content(), None);
         assert!(matches!(out.content, ToolContent::Text(ref t) if t == "failed"));
     }
 
     #[test]
-    fn function_tool_output_from_legacy_success_no_meta() {
-        let legacy = crate::ToolOutput {
-            content: "ok".into(),
-            is_error: false,
-            metadata: None,
-        };
-        let out = FunctionToolOutput::from_output(legacy);
+    fn function_tool_output_success_with_metadata() {
+        let out =
+            FunctionToolOutput::success_with_metadata("result", serde_json::json!({"key": "val"}));
         assert!(!out.is_error);
-        assert!(matches!(out.content, ToolContent::Text(ref t) if t == "ok"));
-    }
-
-    #[test]
-    fn function_tool_output_from_legacy_success_with_meta() {
-        let legacy = crate::ToolOutput {
-            content: "result".into(),
-            is_error: false,
-            metadata: Some(serde_json::json!({"key": "val"})),
-        };
-        let out = FunctionToolOutput::from_output(legacy);
-        assert!(!out.is_error);
+        assert_eq!(out.display_content(), None);
         match out.content {
             ToolContent::Mixed { text, json } => {
                 assert_eq!(text, Some("result".into()));
-                assert!(json.is_some());
+                assert_eq!(json, Some(serde_json::json!({"key": "val"})));
             }
             _ => panic!("expected Mixed"),
         }
     }
 
     #[test]
-    fn function_tool_output_from_legacy_error() {
-        let legacy = crate::ToolOutput {
-            content: "err".into(),
-            is_error: true,
-            metadata: None,
-        };
-        let out = FunctionToolOutput::from_output(legacy);
-        assert!(out.is_error);
-        assert!(matches!(out.content, ToolContent::Text(ref t) if t == "err"));
+    fn function_tool_output_with_display_content() {
+        let out = FunctionToolOutput::success("canonical").with_display_content("display");
+        assert_eq!(out.display_content(), Some("display"));
+        assert!(matches!(out.content, ToolContent::Text(ref text) if text == "canonical"));
     }
 
     #[test]
     fn tool_output_trait_impl() {
         let out = Box::new(FunctionToolOutput::success("trait test"));
         assert!(!out.is_error());
+        assert_eq!(out.display_content(), None);
         let content = out.to_content();
         assert!(matches!(content, ToolContent::Text(ref t) if t == "trait test"));
     }

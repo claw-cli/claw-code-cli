@@ -7,11 +7,13 @@
 🚧Early-stage project under active development — not production-ready yet.
 ⭐ Star us to follow 
 
-[![Status](https://img.shields.io/badge/status-designing-blue?style=flat-square)](https://github.com/)
+[![Stars](https://img.shields.io/github/stars/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/stargazers)
 [![Language](https://img.shields.io/badge/language-Rust-E57324?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Origin](https://img.shields.io/badge/origin-Claude_Code_TS-8A2BE2?style=flat-square)](https://docs.anthropic.com/en/docs/claude-code)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](./LICENSE)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](https://github.com/7df-lab/devo/pulls)
+[![CI](https://img.shields.io/github/actions/workflow/status/7df-lab/devo/ci.yml?branch=main&style=flat-square)](https://github.com/7df-lab/devo/actions)
+[![Release](https://img.shields.io/github/v/release/7df-lab/devo?style=flat-square)](https://github.com/7df-lab/devo/releases)
+
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md) | [한국어](./README.ko.md) | [Español](./README.es.md) | [Français](./README.fr.md) | [Português do Brasil](./README.pt-BR.md) | [Deutsch](./README.de.md) | [Русский](./README.ru.md) | [Türkçe](./README.tr.md)
 
@@ -52,7 +54,7 @@ irm 'https://raw.githubusercontent.com/7df-lab/devo/main/install.ps1' | iex
 > [!TIP]
 > `devo` can check for newer GitHub releases on startup and print the matching
 > upgrade command. You can disable or tune this with the `[updates]` section in
-> `DEVO_HOME/config.toml` or `<workspace>/.devo/config.toml`.
+> `DEVO_HOME/config.toml` (defaults to `~/.devo/config.toml` on macOS/linux, `C:\Users\yourname\.devo\config.toml` on Windows.) or `<workspace>/.devo/config.toml`.
 
 ## 🚀 Quick Start
 
@@ -80,7 +82,7 @@ Devo reads configuration from a TOML file, merged with higher-priority sources
 overriding lower-priority ones:
 
 1. Built-in defaults (compiled into the binary)
-2. `DEVO_HOME/config.toml` — user-level config (defaults to `~/.devo/config.toml`)
+2. `DEVO_HOME/config.toml` — user-level config (defaults to `~/.devo/config.toml` on macOS/linux, `C:\Users\yourname\.devo\config.toml` on Windows.)
 3. `<workspace>/.devo/config.toml` — project-level config
 4. CLI flags — command-line overrides
 
@@ -109,7 +111,8 @@ model = "deepseek-v4-pro"
 model = "deepseek-v4-flash"
 ```
 
-### Full Config Reference
+<details>
+<summary>Full Config Reference (click to expand)</summary>
 
 ```toml
 # ── Model Provider (required) ───────────────────────────────────
@@ -155,7 +158,7 @@ persist_ephemeral_sessions = false # optional
 
 [logging]
 level = "info"                     # optional, trace, debug, info, warn, error
-json = false                       # optional, emit JSON-formatted logs
+json = false                        # optional, emit JSON-formatted logs
 redact_secrets_in_logs = true      # optional
 
 [logging.file]
@@ -165,18 +168,18 @@ rotation = "Daily"                 # optional, Never | Minutely | Hourly | Daily
 max_files = 14                     # optional
 
 [skills]
-enabled = true                     # optional
-user_roots = ["skills"]            # optional, dirs to scan for user skills
-workspace_roots = ["skills"]       # optional, dirs to scan for workspace skills
-watch_for_changes = true           # optional
+enabled = true                      # optional
+user_roots = ["skills"]             # optional, dirs to scan for user skills
+workspace_roots = ["skills"]        # optional, dirs to scan for workspace skills
+watch_for_changes = true            # optional
 
 [updates]
-enabled = true                     # optional
-check_on_startup = true            # optional
-check_interval_hours = 24          # optional
-```
-
+enabled = true                       # optional
+check_on_startup = true              # optional
+check_interval_hours = 24            # optional
 ### Model Catalog (`~/.devo/models.json`)
+```
+</details>
 
 A separate JSON file defines available models and their capabilities. On first
 run, the built-in catalog is automatically copied to `~/.devo/models.json` so
@@ -213,6 +216,17 @@ with credentials in `config.toml`, not the full catalog.
 | Variable      | Purpose                                       |
 |---------------|-----------------------------------------------|
 | `DEVO_HOME`   | Override the config directory (default: `~/.devo`) |
+
+
+## Star us
+
+<a href="https://www.star-history.com/?repos=7df-lab%2Fdevo&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=7df-lab/devo&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=7df-lab/devo&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=7df-lab/devo&type=date&legend=top-left" />
+ </picture>
+</a>
 
 ## FAQ
 

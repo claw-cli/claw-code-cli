@@ -1860,7 +1860,7 @@ fn streaming_controller_is_initialized_and_commit_ticks_drain_lines() {
 }
 
 #[test]
-fn new_session_prepared_resets_session_identity_projection() {
+fn new_session_prepared_appends_header_after_existing_history_and_resets_status() {
     let initial_cwd = std::env::current_dir().expect("current directory is available");
     let resumed_cwd = initial_cwd.join("resumed");
     let model = Model {
@@ -1877,24 +1877,29 @@ fn new_session_prepared_resets_session_identity_projection() {
         model: Some("resumed-model".to_string()),
         thinking: None,
         reasoning_effort: None,
-        total_input_tokens: 3,
+        total_input_tokens: 30,
         total_output_tokens: 5,
-        total_cache_read_tokens: 0,
-        last_query_total_tokens: 8,
-        last_query_input_tokens: 3,
-        prompt_token_estimate: 3,
+        total_cache_read_tokens: 12,
+        last_query_total_tokens: 25,
+        last_query_input_tokens: 20,
+        prompt_token_estimate: 20,
         history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
+    widget.add_to_history(crate::history_cell::new_info_event(
+        "old session line".to_string(),
+        None,
+    ));
+
     widget.handle_worker_event(crate::events::WorkerEvent::NewSessionPrepared {
         cwd: initial_cwd.clone(),
         model: "new-session-model".to_string(),
         thinking: None,
         reasoning_effort: None,
-        last_query_total_tokens: 0,
-        last_query_input_tokens: 0,
-        total_cache_read_tokens: 0,
+        last_query_total_tokens: 25,
+        last_query_input_tokens: 20,
+        total_cache_read_tokens: 12,
     });
 
     assert_eq!(widget.current_cwd(), initial_cwd.as_path());
@@ -1902,6 +1907,52 @@ fn new_session_prepared_resets_session_identity_projection() {
         widget.current_model().map(|model| model.slug.as_str()),
         Some("new-session-model")
     );
+
+    let summary = widget.status_summary_text();
+    assert!(summary.contains("↑0"));
+    assert!(summary.contains("↺0 0%"));
+    assert!(summary.contains("↓0"));
+    assert!(summary.contains("0/190k"));
+
+    let transcript_lines = scrollback_plain_lines(
+        &widget
+            .transcript_overlay_lines(80)
+            .into_iter()
+            .map(crate::history_cell::ScrollbackLine::new)
+            .collect::<Vec<_>>(),
+    );
+    let transcript_text = transcript_lines.join("\n");
+    assert!(transcript_text.contains("old session line"));
+    let old_line_index = find_row_index(&transcript_lines, "old session line")
+        .expect("old session line remains in transcript");
+    let header_index =
+        find_row_index(&transcript_lines, "Devo").expect("new session header is appended");
+    assert!(header_index > old_line_index);
+}
+
+#[test]
+fn new_session_prepared_does_not_duplicate_startup_header_without_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd.clone());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::NewSessionPrepared {
+        cwd,
+        model: "new-session-model".to_string(),
+        thinking: None,
+        reasoning_effort: None,
+        last_query_total_tokens: 10,
+        last_query_input_tokens: 10,
+        total_cache_read_tokens: 4,
+    });
+
+    let rows = rendered_rows(&widget, 80, 16);
+    assert_eq!(rows.iter().filter(|row| row.contains("Devo")).count(), 1);
+    assert!(widget.status_summary_text().contains("↺0 0%"));
 }
 
 #[test]

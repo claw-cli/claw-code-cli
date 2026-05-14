@@ -55,7 +55,7 @@ impl ToolHandler for ReadHandler {
             let output = output.map_err(|e| ToolExecutionError::ExecutionFailed {
                 message: format!("{}", e),
             })?;
-            return Ok(Box::new(FunctionToolOutput::from_output(output)));
+            return Ok(Box::new(output));
         }
 
         let is_bin = is_binary_file(&path);
@@ -73,6 +73,6 @@ impl ToolHandler for ReadHandler {
         let output = output.map_err(|e| ToolExecutionError::ExecutionFailed {
             message: format!("{}", e),
         })?;
-        Ok(Box::new(FunctionToolOutput::from_output(output)))
+        Ok(Box::new(output))
     }
 }

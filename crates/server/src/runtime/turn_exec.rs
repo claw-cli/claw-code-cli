@@ -329,6 +329,7 @@ impl ServerRuntime {
                     QueryEvent::ToolResult {
                         tool_use_id,
                         content,
+                        display_content,
                         is_error,
                         summary,
                     } => {
@@ -399,12 +400,14 @@ impl ServerRuntime {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name: tool_name.clone(),
                                     output: serde_json::Value::String(content.clone()),
+                                    display_content: display_content.clone(),
                                     is_error,
                                 }),
                                 serde_json::to_value(ToolResultPayload {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name,
                                     content: serde_json::Value::String(content),
+                                    display_content,
                                     is_error,
                                     summary,
                                 })
