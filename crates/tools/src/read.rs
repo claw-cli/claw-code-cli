@@ -37,10 +37,7 @@ pub(crate) fn read_directory(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let output = [
-        format!("<path>{}</path>", path.display()),
-        "<type>directory</type>".to_string(),
-        "<entries>".to_string(),
+    let display_content = [
         sliced.join("\n"),
         if truncated {
             format!(
@@ -52,6 +49,14 @@ pub(crate) fn read_directory(
         } else {
             format!("\n({} entries)", items.len())
         },
+    ]
+    .join("\n");
+
+    let output = [
+        format!("<path>{}</path>", path.display()),
+        "<type>directory</type>".to_string(),
+        "<entries>".to_string(),
+        display_content.clone(),
         "</entries>".to_string(),
     ]
     .join("\n");
@@ -63,7 +68,8 @@ pub(crate) fn read_directory(
             "truncated": truncated,
             "loaded": []
         }),
-    ))
+    )
+    .with_display_content(display_content))
 }
 
 pub(crate) fn read_file(
@@ -112,30 +118,30 @@ pub(crate) fn read_file(
         )));
     }
 
-    let mut output = format!(
-        "<path>{}</path>\n<type>file</type>\n<content>\n",
-        path.display()
-    );
+    let mut display_content = String::new();
     for (index, line) in raw.iter().enumerate() {
-        output.push_str(&format!("{}: {}\n", offset + index, line));
+        display_content.push_str(&format!("{}: {}\n", offset + index, line));
     }
 
     let last = offset + raw.len().saturating_sub(1);
     let next = last + 1;
     if cut {
-        output.push_str(&format!(
+        display_content.push_str(&format!(
             "\n(Output capped at 50 KB. Showing lines {}-{}. Use offset={} to continue.)",
             offset, last, next
         ));
     } else if more {
-        output.push_str(&format!(
+        display_content.push_str(&format!(
             "\n(Showing lines {}-{} of {}. Use offset={} to continue.)",
             offset, last, count, next
         ))
     } else {
-        output.push_str(&format!("\n(End of file - total {} lines)", count))
+        display_content.push_str(&format!("\n(End of file - total {} lines)", count))
     }
-    output.push_str("\n</content>");
+    let output = format!(
+        "<path>{}</path>\n<type>file</type>\n<content>\n{display_content}\n</content>",
+        path.display()
+    );
 
     Ok(FunctionToolOutput::success_with_metadata(
         output,
@@ -144,7 +150,8 @@ pub(crate) fn read_file(
             "truncated": cut || more,
             "loaded": []
         }),
-    ))
+    )
+    .with_display_content(display_content))
 }
 
 pub(crate) fn is_binary_file(path: &Path) -> anyhow::Result<bool> {
@@ -253,6 +260,7 @@ pub(crate) fn missing_file_message(filepath: &str) -> String {
 mod tests {
     use super::*;
     use crate::ToolContent;
+    use crate::invocation::ToolOutput;
     use pretty_assertions::assert_eq;
     use std::env;
     use std::fs::File;
@@ -312,6 +320,13 @@ mod tests {
                 "(Showing 1 of 3 entries. Use 'offset' parameter to read beyond entry 3)"
             )
         );
+        assert_eq!(
+            output.display_content(),
+            Some(
+                "b.txt\n\n(Showing 1 of 3 entries. Use 'offset' parameter to read beyond entry 3)"
+            )
+        );
+        assert!(!output.display_content().unwrap().contains("<entries>"));
 
         assert_eq!(
             output_metadata(&output)
@@ -333,6 +348,12 @@ mod tests {
         assert!(text.contains("2: line2"));
         assert!(text.contains("3: line3"));
         assert!(text.contains("(Showing lines 2-3 of 5. Use offset=4 to continue.)"));
+        assert_eq!(
+            output.display_content(),
+            Some("2: line2\n3: line3\n\n(Showing lines 2-3 of 5. Use offset=4 to continue.)")
+        );
+        assert!(!output.display_content().unwrap().contains("<content>"));
+        assert!(!output.display_content().unwrap().contains("<path>"));
 
         assert_eq!(
             output_metadata(&output)

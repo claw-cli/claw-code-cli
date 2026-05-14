@@ -723,11 +723,13 @@ pub(crate) fn apply_turn_item(
             tool_call_id,
             tool_name,
             output,
+            display_content,
             is_error,
         }) => TurnItem::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.or_else(|| tool_names_by_id.get(&tool_call_id).cloned()),
             output,
+            display_content,
             is_error,
         }),
         TurnItem::CommandExecution(CommandExecutionItem {
@@ -793,6 +795,7 @@ pub(crate) fn apply_turn_item(
             tool_call_id,
             tool_name: _,
             output,
+            display_content: _,
             is_error,
         }) => {
             let content = match output {
@@ -912,11 +915,13 @@ fn apply_prompt_turn_item(
             tool_call_id,
             tool_name,
             output,
+            display_content,
             is_error,
         }) => TurnItem::ToolResult(ToolResultItem {
             tool_call_id: tool_call_id.clone(),
             tool_name: tool_name.or_else(|| tool_names_by_id.get(&tool_call_id).cloned()),
             output,
+            display_content,
             is_error,
         }),
         TurnItem::CommandExecution(CommandExecutionItem {
@@ -979,6 +984,7 @@ fn apply_prompt_turn_item(
             tool_call_id,
             tool_name: _,
             output,
+            display_content: _,
             is_error,
         }) => {
             let content = match output {
@@ -1278,6 +1284,7 @@ mod tests {
                 tool_call_id: "call-1".to_string(),
                 tool_name: None,
                 output: serde_json::Value::String("hello".to_string()),
+                display_content: None,
                 is_error: false,
             }),
         );
@@ -1285,6 +1292,49 @@ mod tests {
         assert_eq!(history_items.len(), 2);
         assert_eq!(history_items[0].title, "read /tmp/test.txt");
         assert_eq!(history_items[1].title, "read output");
+    }
+
+    #[test]
+    fn replay_uses_display_content_for_history_but_canonical_output_for_prompt() {
+        let mut messages = Vec::new();
+        let mut history_items = Vec::new();
+        let mut tool_names_by_id = HashMap::new();
+
+        apply_turn_item(
+            &mut messages,
+            &mut history_items,
+            &mut tool_names_by_id,
+            TurnItem::ToolCall(ToolCallItem {
+                tool_call_id: "call-1".to_string(),
+                tool_name: "read".to_string(),
+                input: serde_json::json!({"filePath":"/tmp/test.txt"}),
+            }),
+        );
+        apply_turn_item(
+            &mut messages,
+            &mut history_items,
+            &mut tool_names_by_id,
+            TurnItem::ToolResult(ToolResultItem {
+                tool_call_id: "call-1".to_string(),
+                tool_name: Some("read".to_string()),
+                output: serde_json::Value::String("<content>canonical</content>".to_string()),
+                display_content: Some("canonical".to_string()),
+                is_error: false,
+            }),
+        );
+
+        assert_eq!(history_items[1].body, "canonical");
+        assert_eq!(
+            messages.last(),
+            Some(&Message {
+                role: devo_core::Role::User,
+                content: vec![devo_core::ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "<content>canonical</content>".to_string(),
+                    is_error: false,
+                }],
+            })
+        );
     }
 
     #[test]

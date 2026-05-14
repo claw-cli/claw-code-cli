@@ -142,6 +142,9 @@ pub enum ToolExecutionOutcome {
 ```rust
 pub struct ToolResultPayload {
     pub content: ToolContent,
+    /// Optional UI-only text. Model replay and persisted canonical output must
+    /// continue using `content`; clients may use this for cleaner display.
+    pub display_content: Option<String>,
     pub metadata: ToolResultMetadata,
 }
 
@@ -158,6 +161,10 @@ pub enum ToolContent {
 Current implementation note: tool handlers return `Box<dyn ToolOutput>` from
 `invocation.rs`; `FunctionToolOutput` is the standard concrete implementation,
 and legacy text-plus-metadata results should be represented as `ToolContent::Mixed`.
+`display_content` is best-effort display text, not a replacement for canonical
+tool content. The `read` tool uses it to show file bodies without `<content>` and
+directory listings without `<entries>`, while keeping the full tagged output for
+the model, history replay, and provider context.
 
 ## Tool Trait Contract
 

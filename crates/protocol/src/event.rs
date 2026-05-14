@@ -32,6 +32,8 @@ pub struct ToolResultPayload {
     pub tool_call_id: String,
     pub tool_name: Option<String>,
     pub content: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_content: Option<String>,
     pub is_error: bool,
     #[serde(default)]
     pub summary: String,
@@ -320,6 +322,35 @@ mod tests {
         let restored: InputQueueUpdatedPayload = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored.pending_count, 3);
         assert_eq!(restored.pending_texts, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn tool_result_payload_display_content_is_optional() {
+        let payload: ToolResultPayload = serde_json::from_str(
+            r#"{
+                "tool_call_id": "call-1",
+                "tool_name": "read",
+                "content": "canonical",
+                "is_error": false
+            }"#,
+        )
+        .expect("deserialize legacy payload");
+        assert_eq!(payload.display_content, None);
+        assert_eq!(payload.summary, "");
+
+        let payload = ToolResultPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("read".to_string()),
+            content: serde_json::Value::String("canonical".to_string()),
+            display_content: Some("display".to_string()),
+            is_error: false,
+            summary: "read output".to_string(),
+        };
+        let json = serde_json::to_value(&payload).expect("serialize payload");
+        assert_eq!(
+            json.get("display_content"),
+            Some(&serde_json::Value::String("display".to_string()))
+        );
     }
 
     #[test]

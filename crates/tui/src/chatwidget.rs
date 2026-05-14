@@ -646,8 +646,19 @@ impl ChatWidget {
         is_first_run: bool,
         startup_tooltip_override: Option<String>,
     ) {
+        self.history.push(self.build_current_header_box(
+            is_first_run,
+            startup_tooltip_override,
+        ));
+    }
+
+    fn build_current_header_box(
+        &self,
+        is_first_run: bool,
+        startup_tooltip_override: Option<String>,
+    ) -> Box<dyn HistoryCell> {
         let accent = self.active_accent_color();
-        self.history.push(Self::build_header_box(
+        Self::build_header_box(
             &self.session.cwd,
             self.session.model.as_ref(),
             self.thinking_selection.as_deref(),
@@ -655,7 +666,15 @@ impl ChatWidget {
             startup_tooltip_override,
             accent,
             self.startup_header_mascot_frame_index,
-        ));
+        )
+    }
+
+    fn history_has_non_header_content(&self) -> bool {
+        self.history.iter().any(|cell| {
+            cell.as_any()
+                .downcast_ref::<history_cell::SessionInfoCell>()
+                .is_none()
+        })
     }
 
     fn rebuild_restored_session_history(
@@ -1546,27 +1565,35 @@ impl ChatWidget {
                 model,
                 thinking,
                 reasoning_effort,
-                last_query_total_tokens,
-                last_query_input_tokens,
-                total_cache_read_tokens,
+                last_query_total_tokens: _,
+                last_query_input_tokens: _,
+                total_cache_read_tokens: _,
             } => {
                 self.resume_browser_loading = false;
                 self.session.cwd = cwd;
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
+                let should_append_header = self.history_has_non_header_content();
+                self.active_cell = None;
+                self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                self.active_tool_calls.clear();
+                self.pending_tool_calls.clear();
                 self.active_text_items.clear();
                 self.stream_chunking_policy.reset();
-                self.history.clear();
-                self.next_history_flush_index = 0;
                 self.busy = false;
                 self.turn_count = 0;
                 self.total_input_tokens = 0;
                 self.total_output_tokens = 0;
-                self.total_cache_read_tokens = total_cache_read_tokens;
-                self.last_query_total_tokens = last_query_total_tokens;
-                self.last_query_input_tokens = last_query_input_tokens;
+                self.total_cache_read_tokens = 0;
+                self.last_query_total_tokens = 0;
+                self.last_query_input_tokens = 0;
                 self.prompt_token_estimate = 0;
+                if should_append_header {
+                    self.push_session_header(/*is_first_run*/ false, None);
+                } else {
+                    self.refresh_header_box();
+                }
                 self.set_status_message("New session ready; send a prompt to start it");
             }
             WorkerEvent::SessionSwitched {

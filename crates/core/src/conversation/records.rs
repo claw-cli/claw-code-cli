@@ -153,6 +153,9 @@ pub struct ToolResultItem {
     pub tool_name: Option<String>,
     /// The normalized structured output returned by the tool.
     pub output: serde_json::Value,
+    /// Optional UI-only text for displaying the result without changing replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_content: Option<String>,
     /// Whether the result represents an error outcome.
     pub is_error: bool,
 }

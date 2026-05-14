@@ -510,6 +510,49 @@ mod tests {
         assert_eq!(chunks.join(""), text);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_command_streams_progress_before_final_output() {
+        let root = std::env::temp_dir().join(format!("devo-exec-stream-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp test dir");
+        let handler = ExecCommandHandler::new(Arc::new(ProcessStore::new()));
+        let invocation = ToolInvocation {
+            call_id: crate::invocation::ToolCallId("call-1".to_string()),
+            tool_name: crate::invocation::ToolName("exec_command".into()),
+            session_id: "session-1".to_string(),
+            cwd: root.clone(),
+            input: serde_json::json!({
+                "cmd": "printf 'first\\n'; sleep 0.05; printf 'second\\n'",
+                "login": false,
+                "yield_time_ms": 1000,
+                "max_output_tokens": 1000,
+            }),
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move { handler.handle(invocation, Some(tx)).await });
+
+        let first_chunk = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for streamed output")
+            .expect("progress channel should produce a chunk");
+        assert!(
+            first_chunk.contains("first"),
+            "first streamed chunk should contain initial output: {first_chunk:?}"
+        );
+
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("timed out waiting for exec command")
+            .expect("exec command task should not panic")
+            .expect("handle exec command")
+            .to_content()
+            .into_string();
+
+        assert!(output.contains("first"));
+        assert!(output.contains("second"));
+        std::fs::remove_dir_all(root).expect("cleanup temp test dir");
+    }
+
     #[test]
     fn exec_command_args_missing_cmd() {
         let args = serde_json::json!({});

@@ -207,6 +207,11 @@ pub struct ItemRecord {
 }
 ```
 
+Generic `ToolResultItem` records store canonical tool output for replay and may
+also carry optional `display_content` for transcript projection. When present,
+clients should use `display_content` only for UI rendering; prompt rebuilding,
+provider history, and persisted canonical semantics continue to use `output`.
+
 ### Rollout Line
 
 Primary persisted history must be written as a single append-only rollout stream.

@@ -95,6 +95,7 @@ pub enum QueryEvent {
     ToolResult {
         tool_use_id: String,
         content: String,
+        display_content: Option<String>,
         is_error: bool,
         /// Human-readable summary for client-side rendering (e.g. "bash: npm run dev").
         summary: String,
@@ -807,8 +808,21 @@ pub async fn query(
             return Ok(());
         }
 
-        // Execute tool calls
-        let results = runtime.execute_batch(&tool_calls).await;
+        // Execute tool calls. When a caller is observing query events, wire
+        // tool progress into the same event stream so long-running commands can
+        // render live output before the final ToolResult arrives.
+        let results = if let Some(progress_events) = on_event.clone() {
+            runtime
+                .execute_batch_streaming(&tool_calls, move |tool_use_id, content| {
+                    progress_events(QueryEvent::ToolProgress {
+                        tool_use_id: tool_use_id.to_string(),
+                        content: content.to_string(),
+                    });
+                })
+                .await
+        } else {
+            runtime.execute_batch(&tool_calls).await
+        };
 
         // Build tool call name -> input map for computing summaries
         let tool_call_map: std::collections::HashMap<&str, (&str, &serde_json::Value)> = tool_calls
@@ -823,6 +837,7 @@ pub async fn query(
             .map(|r| {
                 let content_str = r.content.into_string();
                 let compacted_content = micro_compact(content_str);
+                let compacted_display_content = r.display_content.map(micro_compact);
                 let summary = tool_call_map
                     .get(r.tool_use_id.as_str())
                     .map(|(name, input)| {
@@ -832,6 +847,7 @@ pub async fn query(
                 emit(QueryEvent::ToolResult {
                     tool_use_id: r.tool_use_id.clone(),
                     content: compacted_content.clone(),
+                    display_content: compacted_display_content,
                     is_error: r.is_error,
                     summary: summary.clone(),
                 });
@@ -1184,7 +1200,6 @@ mod tests {
     }
 
     #[async_trait]
-    #[async_trait]
     impl ToolHandler for MutatingTool {
         fn tool_kind(&self) -> ToolHandlerKind {
             ToolHandlerKind::Write
@@ -1196,6 +1211,45 @@ mod tests {
             _progress: Option<devo_tools::events::ToolProgressSender>,
         ) -> Result<Box<dyn ToolOutput>, ToolExecutionError> {
             Ok(Box::new(FunctionToolOutput::success("ok")))
+        }
+    }
+
+    struct DisplayContentTool;
+
+    #[async_trait]
+    impl ToolHandler for DisplayContentTool {
+        fn tool_kind(&self) -> ToolHandlerKind {
+            ToolHandlerKind::Read
+        }
+
+        async fn handle(
+            &self,
+            _invocation: ToolInvocation,
+            _progress: Option<devo_tools::events::ToolProgressSender>,
+        ) -> Result<Box<dyn ToolOutput>, ToolExecutionError> {
+            Ok(Box::new(
+                FunctionToolOutput::success("canonical").with_display_content("display"),
+            ))
+        }
+    }
+
+    struct StreamingMutatingTool;
+
+    #[async_trait]
+    impl ToolHandler for StreamingMutatingTool {
+        fn tool_kind(&self) -> ToolHandlerKind {
+            ToolHandlerKind::Write
+        }
+
+        async fn handle(
+            &self,
+            _invocation: ToolInvocation,
+            progress: Option<devo_tools::events::ToolProgressSender>,
+        ) -> Result<Box<dyn ToolOutput>, ToolExecutionError> {
+            if let Some(sender) = progress {
+                let _ = sender.send("stream chunk\n".to_string());
+            }
+            Ok(Box::new(FunctionToolOutput::success("stream complete")))
         }
     }
 
@@ -1809,5 +1863,136 @@ mod tests {
         for summary in summaries.iter() {
             assert!(!summary.is_empty(), "summary should not be empty");
         }
+    }
+
+    #[tokio::test]
+    async fn query_emits_tool_result_display_content() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler("mutating_tool", Arc::new(DisplayContentTool));
+        builder.push_spec(ToolSpec {
+            name: "mutating_tool".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![],
+            supports_parallel: false,
+        });
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("run the tool"));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+        let callback = Arc::new(move |event: QueryEvent| {
+            if let QueryEvent::ToolResult {
+                content,
+                display_content,
+                ..
+            } = event
+            {
+                seen_clone.lock().unwrap().push((content, display_content));
+            }
+        });
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                thinking_selection: None,
+            },
+            Arc::new(SingleToolUseProvider {
+                requests: AtomicUsize::new(0),
+            }),
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should complete");
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[(String::from("canonical"), Some(String::from("display")))]
+        );
+    }
+
+    #[tokio::test]
+    async fn query_emits_tool_progress_before_tool_result() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler("mutating_tool", Arc::new(StreamingMutatingTool));
+        builder.push_spec(ToolSpec {
+            name: "mutating_tool".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::Mutating,
+            capability_tags: vec![],
+            supports_parallel: false,
+        });
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("run the tool"));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+        let callback = Arc::new(move |event: QueryEvent| {
+            seen_clone.lock().unwrap().push(event);
+        });
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                thinking_selection: None,
+            },
+            Arc::new(SingleToolUseProvider {
+                requests: AtomicUsize::new(0),
+            }),
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should complete");
+
+        let events = seen.lock().unwrap();
+        let progress_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    QueryEvent::ToolProgress {
+                        tool_use_id,
+                        content,
+                    } if tool_use_id == "tool-1" && content == "stream chunk\n"
+                )
+            })
+            .expect("tool progress event should be emitted");
+        let result_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    QueryEvent::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } if tool_use_id == "tool-1"
+                        && content == "stream complete"
+                        && !is_error
+                )
+            })
+            .expect("tool result event should be emitted");
+
+        assert!(
+            progress_index < result_index,
+            "tool progress should arrive before final result"
+        );
     }
 }
