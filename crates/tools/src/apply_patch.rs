@@ -6,13 +6,13 @@ use serde_json::json;
 use tokio::fs;
 use tracing::debug;
 
-use crate::ToolOutput;
+use crate::FunctionToolOutput;
 
 pub(crate) async fn exec_apply_patch(
     cwd: &std::path::Path,
     session_id: &str,
     input: serde_json::Value,
-) -> anyhow::Result<ToolOutput> {
+) -> anyhow::Result<FunctionToolOutput> {
     let patch_text = input["patchText"].as_str().unwrap_or("");
     debug!(
         tool = "apply_patch",
@@ -25,7 +25,7 @@ pub(crate) async fn exec_apply_patch(
     );
     if patch_text.trim().is_empty() {
         debug!("rejecting apply_patch request because patchText is empty");
-        return Ok(ToolOutput::error("patchText is required"));
+        return Ok(FunctionToolOutput::error("patchText is required"));
     }
 
     let patch = parse_patch(patch_text)?;
@@ -38,10 +38,10 @@ pub(crate) async fn exec_apply_patch(
             .to_string();
         if normalized == "*** Begin Patch\n*** End Patch" {
             debug!("rejecting apply_patch request because patch contained no changes");
-            return Ok(ToolOutput::error("patch rejected: empty patch"));
+            return Ok(FunctionToolOutput::error("patch rejected: empty patch"));
         }
         debug!("rejecting apply_patch request because no hunks were found");
-        return Ok(ToolOutput::error(
+        return Ok(FunctionToolOutput::error(
             "apply_patch verification failed: no hunks found",
         ));
     }
@@ -124,18 +124,17 @@ pub(crate) async fn exec_apply_patch(
         summary = ?summary,
         "apply_patch completed successfully"
     );
-    Ok(ToolOutput {
-        content: format!(
+    Ok(FunctionToolOutput::success_with_metadata(
+        format!(
             "Success. Updated the following files:\n{}",
             summary.join("\n")
         ),
-        is_error: false,
-        metadata: Some(json!({
+        json!({
             "diff": total_diff,
             "files": files,
             "diagnostics": {},
-        })),
-    })
+        }),
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -710,6 +709,8 @@ mod tests {
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
+    use crate::ToolContent;
+
     use super::HunkLine;
     use super::PatchHunk;
     use super::PatchKind;
@@ -940,15 +941,12 @@ hello
         .expect("execute apply_patch");
 
         assert!(!output.is_error);
-        assert!(
-            output
-                .content
-                .contains("Success. Updated the following files:")
-        );
-        assert!(output.content.contains("A add.txt"));
-        assert!(output.content.contains("M update.txt"));
-        assert!(output.content.contains("D delete.txt"));
-        assert!(output.content.contains("M moved/to.txt"));
+        let text = output.content.text_part().expect("text content");
+        assert!(text.contains("Success. Updated the following files:"));
+        assert!(text.contains("A add.txt"));
+        assert!(text.contains("M update.txt"));
+        assert!(text.contains("D delete.txt"));
+        assert!(text.contains("M moved/to.txt"));
 
         assert_eq!(
             std::fs::read_to_string(cwd.join("add.txt")).expect("read added file"),
@@ -965,7 +963,13 @@ hello
             "after\n"
         );
 
-        let metadata = output.metadata.expect("metadata");
+        let ToolContent::Mixed {
+            json: Some(metadata),
+            ..
+        } = &output.content
+        else {
+            panic!("expected mixed output metadata, got {:?}", output.content);
+        };
         let files = metadata["files"].as_array().expect("files metadata");
         assert_eq!(files.len(), 4);
         assert_eq!(files[0]["additions"], 1);

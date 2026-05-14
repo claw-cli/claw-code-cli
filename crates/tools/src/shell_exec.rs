@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tracing::info;
 
-use crate::ToolOutput;
+use crate::FunctionToolOutput;
 use crate::events::ToolProgressSender;
 
 const MAX_METADATA_LENGTH: usize = 30_000;
@@ -83,7 +83,7 @@ Examples of valid command strings:
 pub(crate) async fn execute_shell_command(
     request: ShellExecRequest,
     progress: Option<ToolProgressSender>,
-) -> anyhow::Result<ToolOutput> {
+) -> anyhow::Result<FunctionToolOutput> {
     let ShellExecRequest {
         command,
         workdir,
@@ -97,7 +97,7 @@ pub(crate) async fn execute_shell_command(
     } = request;
 
     if !workdir.exists() {
-        return Ok(ToolOutput::error(format!(
+        return Ok(FunctionToolOutput::error(format!(
             "working directory does not exist: {}",
             workdir.display()
         )));
@@ -163,38 +163,28 @@ pub(crate) async fn execute_shell_command(
             }
             let result_text = truncate_output(&result_text, max_output_tokens);
             if output.status.success() {
-                Ok(ToolOutput {
-                    content: result_text.clone(),
-                    is_error: false,
-                    metadata: Some(json!({
+                Ok(FunctionToolOutput::success_with_metadata(
+                    result_text.clone(),
+                    json!({
                         "output": preview(&result_text),
                         "command": command_preview,
                         "exit": output.status.code(),
                         "description": description,
                         "cwd": workdir,
                         "yield_time_ms": yield_time_ms,
-                    })),
-                })
+                    }),
+                ))
             } else {
                 let code = output.status.code().unwrap_or(-1);
-                Ok(ToolOutput {
-                    content: format!("exit code {code}\n{result_text}"),
-                    is_error: true,
-                    metadata: Some(json!({
-                        "output": preview(&result_text),
-                        "command": command_preview,
-                        "exit": code,
-                        "description": description,
-                        "cwd": workdir,
-                        "yield_time_ms": yield_time_ms,
-                    })),
-                })
+                Ok(FunctionToolOutput::error(format!(
+                    "exit code {code}\n{result_text}"
+                )))
             }
         }
-        Ok(Err(error)) => Ok(ToolOutput::error(format!(
+        Ok(Err(error)) => Ok(FunctionToolOutput::error(format!(
             "failed to spawn process: {error}"
         ))),
-        Err(_) => Ok(ToolOutput::error(format!(
+        Err(_) => Ok(FunctionToolOutput::error(format!(
             "command timed out after {timeout_ms}ms"
         ))),
     }
@@ -304,7 +294,7 @@ fn platform_shell(login: bool) -> ShellSpec {
 async fn run_with_pty(
     config: PtyRunConfig,
     progress: Option<ToolProgressSender>,
-) -> anyhow::Result<ToolOutput> {
+) -> anyhow::Result<FunctionToolOutput> {
     let PtyRunConfig {
         shell,
         command_to_run,
@@ -402,30 +392,24 @@ async fn run_with_pty(
     text = truncate_output(&text, max_output_tokens);
 
     if timed_out {
-        return Ok(ToolOutput {
-            content: format!("command timed out after {timeout_ms}ms\n{text}"),
-            is_error: true,
-            metadata: Some(json!({
-                "output": preview(&text),
-                "command": command_to_run,
-                "exit": exit_code,
-                "description": description,
-                "cwd": workdir,
-                "yield_time_ms": yield_time_ms,
-                "tty": true,
-            })),
-        });
+        return Ok(FunctionToolOutput::error(format!(
+            "command timed out after {timeout_ms}ms\n{text}"
+        )));
     }
 
     let is_error = exit_code.unwrap_or(1) != 0;
-    Ok(ToolOutput {
-        content: if is_error {
-            format!("exit code {}\n{}", exit_code.unwrap_or(-1), text)
-        } else {
-            text.clone()
-        },
-        is_error,
-        metadata: Some(json!({
+    let content = if is_error {
+        format!("exit code {}\n{}", exit_code.unwrap_or(-1), text)
+    } else {
+        text.clone()
+    };
+    if is_error {
+        return Ok(FunctionToolOutput::error(content));
+    }
+
+    Ok(FunctionToolOutput::success_with_metadata(
+        content,
+        json!({
             "output": preview(&text),
             "command": command_to_run,
             "exit": exit_code,
@@ -433,13 +417,15 @@ async fn run_with_pty(
             "cwd": workdir,
             "yield_time_ms": yield_time_ms,
             "tty": true,
-        })),
-    })
+        }),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContent;
+    use pretty_assertions::assert_eq;
 
     #[tokio::test]
     async fn execute_shell_command_non_tty_sends_progress() {
@@ -488,6 +474,61 @@ mod tests {
         )
         .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_shell_command_success_metadata_is_mixed() {
+        let result = execute_shell_command(
+            ShellExecRequest {
+                command: "echo metadata_test".to_string(),
+                workdir: std::env::current_dir().unwrap_or_default(),
+                description: "metadata test".into(),
+                shell_override: None,
+                tty: false,
+                login: false,
+                timeout_ms: 5000,
+                yield_time_ms: 100,
+                max_output_tokens: 100,
+            },
+            None,
+        )
+        .await
+        .expect("execute shell command");
+
+        assert!(!result.is_error);
+        match result.content {
+            ToolContent::Mixed {
+                text: Some(text),
+                json: Some(metadata),
+            } => {
+                assert!(text.contains("metadata_test"));
+                assert_eq!(metadata["description"], "metadata test");
+            }
+            content => panic!("expected mixed success output, got {content:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_shell_command_error_output_is_text_only() {
+        let result = execute_shell_command(
+            ShellExecRequest {
+                command: "exit 7".to_string(),
+                workdir: std::env::current_dir().unwrap_or_default(),
+                description: "error test".into(),
+                shell_override: None,
+                tty: false,
+                login: false,
+                timeout_ms: 5000,
+                yield_time_ms: 100,
+                max_output_tokens: 100,
+            },
+            None,
+        )
+        .await
+        .expect("execute shell command");
+
+        assert!(result.is_error);
+        assert!(matches!(result.content, ToolContent::Text(text) if text.contains("exit code 7")));
     }
 
     use super::{merge_streams, platform_shell_program, preview, resolve_shell, truncate_output};

@@ -5,13 +5,13 @@ use std::io::BufReader;
 use std::io::Read;
 use std::path::Path;
 
-use crate::ToolOutput;
+use crate::FunctionToolOutput;
 
 pub(crate) fn read_directory(
     path: &Path,
     limit: usize,
     offset: usize,
-) -> anyhow::Result<ToolOutput> {
+) -> anyhow::Result<FunctionToolOutput> {
     let mut items = std::fs::read_dir(path)?
         .flatten()
         .map(|entry| {
@@ -56,18 +56,21 @@ pub(crate) fn read_directory(
     ]
     .join("\n");
 
-    Ok(ToolOutput {
-        content: output,
-        is_error: false,
-        metadata: Some(json!({
+    Ok(FunctionToolOutput::success_with_metadata(
+        output,
+        json!({
             "preview": preview,
             "truncated": truncated,
             "loaded": []
-        })),
-    })
+        }),
+    ))
 }
 
-pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Result<ToolOutput> {
+pub(crate) fn read_file(
+    path: &Path,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<FunctionToolOutput> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let start = offset.saturating_sub(1);
@@ -87,6 +90,7 @@ pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Res
             more = true;
             continue;
         }
+        // TODO: check the truncate policy
         if line.len() > 2000 {
             line.truncate(2000);
             line.push_str("... (line truncated to 2000 chars)");
@@ -102,7 +106,7 @@ pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Res
     }
 
     if count < offset && !(count == 0 && offset == 1) {
-        return Ok(ToolOutput::error(format!(
+        return Ok(FunctionToolOutput::error(format!(
             "Offset {} is out of range for this file ({} lines)",
             offset, count
         )));
@@ -133,15 +137,14 @@ pub(crate) fn read_file(path: &Path, limit: usize, offset: usize) -> anyhow::Res
     }
     output.push_str("\n</content>");
 
-    Ok(ToolOutput {
-        content: output,
-        is_error: false,
-        metadata: Some(json!({
+    Ok(FunctionToolOutput::success_with_metadata(
+        output,
+        json!({
             "preview": raw.iter().take(20).cloned().collect::<Vec<_>>().join("\n"),
             "truncated": cut || more,
             "loaded": []
-        })),
-    })
+        }),
+    ))
 }
 
 pub(crate) fn is_binary_file(path: &Path) -> anyhow::Result<bool> {
@@ -249,6 +252,8 @@ pub(crate) fn missing_file_message(filepath: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolContent;
+    use pretty_assertions::assert_eq;
     use std::env;
     use std::fs::File;
     use std::fs::{self};
@@ -277,6 +282,20 @@ mod tests {
         }
     }
 
+    fn output_text(output: &FunctionToolOutput) -> &str {
+        output.content.text_part().expect("text content")
+    }
+
+    fn output_metadata(output: &FunctionToolOutput) -> &serde_json::Value {
+        match &output.content {
+            ToolContent::Mixed {
+                json: Some(metadata),
+                ..
+            } => metadata,
+            content => panic!("expected mixed output metadata, got {content:?}"),
+        }
+    }
+
     #[test]
     fn read_directory_sorts_entries_and_reports_truncation() {
         let dir = create_temp_dir("dir");
@@ -285,16 +304,21 @@ mod tests {
         fs::create_dir_all(dir.join("subdir")).unwrap();
 
         let output = read_directory(&dir, 1, 2).unwrap();
-        assert!(output.content.contains("<type>directory</type>"));
-        assert!(output.content.contains("b.txt"));
+        let text = output_text(&output);
+        assert!(text.contains("<type>directory</type>"));
+        assert!(text.contains("b.txt"));
         assert!(
-            output.content.contains(
+            text.contains(
                 "(Showing 1 of 3 entries. Use 'offset' parameter to read beyond entry 3)"
             )
         );
 
-        let metadata = output.metadata.unwrap();
-        assert!(metadata.get("truncated").and_then(|value| value.as_bool()) == Some(true));
+        assert_eq!(
+            output_metadata(&output)
+                .get("truncated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -305,16 +329,17 @@ mod tests {
 
         let output = read_file(&path, 2, 2).unwrap();
         assert!(!output.is_error);
-        assert!(output.content.contains("2: line2"));
-        assert!(output.content.contains("3: line3"));
-        assert!(
-            output
-                .content
-                .contains("(Showing lines 2-3 of 5. Use offset=4 to continue.)")
-        );
+        let text = output_text(&output);
+        assert!(text.contains("2: line2"));
+        assert!(text.contains("3: line3"));
+        assert!(text.contains("(Showing lines 2-3 of 5. Use offset=4 to continue.)"));
 
-        let metadata = output.metadata.unwrap();
-        assert!(metadata.get("truncated").and_then(|value| value.as_bool()) == Some(true));
+        assert_eq!(
+            output_metadata(&output)
+                .get("truncated")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 
     #[test]
@@ -325,7 +350,12 @@ mod tests {
 
         let output = read_file(&path, 10, 5).unwrap();
         assert!(output.is_error);
-        assert!(output.content.contains("Offset 5 is out of range"));
+        assert!(
+            output
+                .content
+                .text_part()
+                .is_some_and(|text| text.contains("Offset 5 is out of range"))
+        );
     }
 
     #[test]

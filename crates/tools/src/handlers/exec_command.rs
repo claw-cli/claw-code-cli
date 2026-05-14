@@ -95,7 +95,9 @@ impl ToolHandler for ExecCommandHandler {
             .map_err(|e| ToolExecutionError::ExecutionFailed {
                 message: e.to_string(),
             })?;
-            let content = format_apply_patch_intercept_response(&output.content);
+            let content = format_apply_patch_intercept_response(
+                output.content.text_part().unwrap_or_default(),
+            );
             let output = if output.is_error {
                 FunctionToolOutput::error(content)
             } else {

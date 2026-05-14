@@ -4,7 +4,7 @@ use crate::apply_patch::exec_apply_patch;
 use crate::errors::ToolExecutionError;
 use crate::events::ToolProgressSender;
 use crate::handler_kind::ToolHandlerKind;
-use crate::invocation::{FunctionToolOutput, ToolInvocation, ToolOutput};
+use crate::invocation::{ToolInvocation, ToolOutput};
 use crate::tool_handler::ToolHandler;
 
 pub struct ApplyPatchHandler;
@@ -25,6 +25,6 @@ impl ToolHandler for ApplyPatchHandler {
             .map_err(|e| ToolExecutionError::ExecutionFailed {
                 message: e.to_string(),
             })?;
-        Ok(Box::new(FunctionToolOutput::from_output(output)))
+        Ok(Box::new(output))
     }
 }

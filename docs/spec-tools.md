@@ -155,6 +155,10 @@ pub enum ToolContent {
 }
 ```
 
+Current implementation note: tool handlers return `Box<dyn ToolOutput>` from
+`invocation.rs`; `FunctionToolOutput` is the standard concrete implementation,
+and legacy text-plus-metadata results should be represented as `ToolContent::Mixed`.
+
 ## Tool Trait Contract
 
 ```rust
