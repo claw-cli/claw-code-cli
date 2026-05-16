@@ -185,6 +185,7 @@ pub(crate) fn truncated_tool_output_preview(
     preview: &str,
     width: u16,
     max_rows: usize,
+    line_limit: usize,
 ) -> Vec<Line<'static>> {
     let raw_output = output_lines(
         Some(&CommandOutput {
@@ -193,7 +194,7 @@ pub(crate) fn truncated_tool_output_preview(
             formatted_output: preview.to_string(),
         }),
         OutputLinesParams {
-            line_limit: TOOL_CALL_MAX_LINES,
+            line_limit,
             only_err: false,
             include_angle_pipe: false,
             include_prefix: false,

@@ -358,6 +358,20 @@ fn handle_tui_event(
             })?;
         }
         TuiEvent::Key(key) => {
+            if matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char('\n' | '\r') | KeyCode::Modifier(_)
+            ) || (matches!(key.code, KeyCode::Char('j' | 'm'))
+                && key.modifiers.contains(KeyModifiers::CONTROL))
+            {
+                tracing::debug!(
+                    code = ?key.code,
+                    modifiers = ?key.modifiers,
+                    kind = ?key.kind,
+                    state = ?key.state,
+                    "received enter-like key event"
+                );
+            }
             // Keep Ctrl-C available for terminal copy workflows while work is
             // active. Cancellation is owned by the bottom pane's Esc flow.
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {

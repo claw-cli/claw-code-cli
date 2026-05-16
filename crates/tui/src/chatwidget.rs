@@ -859,6 +859,10 @@ impl ChatWidget {
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if matches!(key.kind, KeyEventKind::Release) && matches!(key.code, KeyCode::Modifier(_))
+            {
+                let _ = self.bottom_pane.handle_key_event(key);
+            }
             return;
         }
         if self.resume_browser.is_some() {
@@ -2473,7 +2477,8 @@ impl ChatWidget {
 
     fn tool_preview_lines(&self, preview: &str) -> Vec<Line<'static>> {
         let width = self.last_known_width().saturating_sub(2).max(1);
-        let mut preview_lines = truncated_tool_output_preview(preview, width, 2);
+        let mut preview_lines =
+            truncated_tool_output_preview(preview, width, 2, crate::exec_cell::TOOL_CALL_MAX_LINES);
         for line in &mut preview_lines {
             line.spans = line
                 .spans

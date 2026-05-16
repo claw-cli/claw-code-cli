@@ -808,27 +808,51 @@ pub async fn query(
             return Ok(());
         }
 
+        let tool_result_summaries: std::collections::HashMap<String, String> = tool_calls
+            .iter()
+            .map(|call| {
+                (
+                    call.id.clone(),
+                    devo_tools::tool_summary::tool_summary(&call.name, &call.input, &session.cwd),
+                )
+            })
+            .collect();
+
         // Execute tool calls. When a caller is observing query events, wire
-        // tool progress into the same event stream so long-running commands can
-        // render live output before the final ToolResult arrives.
+        // tool progress and per-call completion into the same event stream so
+        // long-running and parallel tools can render before the whole batch ends.
         let results = if let Some(progress_events) = on_event.clone() {
+            let completion_events = Arc::clone(&progress_events);
+            let summaries = Arc::new(tool_result_summaries.clone());
             runtime
-                .execute_batch_streaming(&tool_calls, move |tool_use_id, content| {
-                    progress_events(QueryEvent::ToolProgress {
-                        tool_use_id: tool_use_id.to_string(),
-                        content: content.to_string(),
-                    });
-                })
+                .execute_batch_streaming_with_completion(
+                    &tool_calls,
+                    move |tool_use_id, content| {
+                        progress_events(QueryEvent::ToolProgress {
+                            tool_use_id: tool_use_id.to_string(),
+                            content: content.to_string(),
+                        });
+                    },
+                    move |result| {
+                        let content = micro_compact(result.content.clone().into_string());
+                        let display_content = result.display_content.clone().map(micro_compact);
+                        let summary = summaries
+                            .get(result.tool_use_id.as_str())
+                            .cloned()
+                            .unwrap_or_default();
+                        completion_events(QueryEvent::ToolResult {
+                            tool_use_id: result.tool_use_id.clone(),
+                            content,
+                            display_content,
+                            is_error: result.is_error,
+                            summary,
+                        });
+                    },
+                )
                 .await
         } else {
             runtime.execute_batch(&tool_calls).await
         };
-
-        // Build tool call name -> input map for computing summaries
-        let tool_call_map: std::collections::HashMap<&str, (&str, &serde_json::Value)> = tool_calls
-            .iter()
-            .map(|c| (c.id.as_str(), (c.name.as_str(), &c.input)))
-            .collect();
 
         // Build tool result message (user role, per Anthropic API convention)
         // Apply micro-compact to large tool results
@@ -837,20 +861,6 @@ pub async fn query(
             .map(|r| {
                 let content_str = r.content.into_string();
                 let compacted_content = micro_compact(content_str);
-                let compacted_display_content = r.display_content.map(micro_compact);
-                let summary = tool_call_map
-                    .get(r.tool_use_id.as_str())
-                    .map(|(name, input)| {
-                        devo_tools::tool_summary::tool_summary(name, input, &session.cwd)
-                    })
-                    .unwrap_or_default();
-                emit(QueryEvent::ToolResult {
-                    tool_use_id: r.tool_use_id.clone(),
-                    content: compacted_content.clone(),
-                    display_content: compacted_display_content,
-                    is_error: r.is_error,
-                    summary: summary.clone(),
-                });
                 ContentBlock::ToolResult {
                     tool_use_id: r.tool_use_id,
                     content: compacted_content,
@@ -991,6 +1001,10 @@ mod tests {
         requests: AtomicUsize,
     }
 
+    struct ParallelToolUseProvider {
+        requests: AtomicUsize,
+    }
+
     #[async_trait]
     impl devo_provider::ModelProviderSDK for SingleToolUseProvider {
         async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
@@ -1052,6 +1066,85 @@ mod tests {
 
         fn name(&self) -> &str {
             "test-provider"
+        }
+    }
+
+    #[async_trait]
+    impl devo_provider::ModelProviderSDK for ParallelToolUseProvider {
+        async fn completion(&self, _request: ModelRequest) -> Result<ModelResponse> {
+            unreachable!("tests stream responses only")
+        }
+
+        async fn completion_stream(
+            &self,
+            _request: ModelRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+            let request_number = self.requests.fetch_add(1, Ordering::SeqCst);
+
+            let events = if request_number == 0 {
+                vec![
+                    Ok(StreamEvent::ToolCallStart {
+                        index: 0,
+                        id: "slow".into(),
+                        name: "parallel_tool".into(),
+                        input: json!({
+                            "delay_ms": 50,
+                            "output": "slow complete",
+                        }),
+                    }),
+                    Ok(StreamEvent::ToolCallStart {
+                        index: 1,
+                        id: "fast".into(),
+                        name: "parallel_tool".into(),
+                        input: json!({
+                            "delay_ms": 5,
+                            "output": "fast complete",
+                        }),
+                    }),
+                    Ok(StreamEvent::MessageDone {
+                        response: ModelResponse {
+                            id: "resp-1".into(),
+                            content: vec![
+                                ResponseContent::ToolUse {
+                                    id: "slow".into(),
+                                    name: "parallel_tool".into(),
+                                    input: json!({
+                                        "delay_ms": 50,
+                                        "output": "slow complete",
+                                    }),
+                                },
+                                ResponseContent::ToolUse {
+                                    id: "fast".into(),
+                                    name: "parallel_tool".into(),
+                                    input: json!({
+                                        "delay_ms": 5,
+                                        "output": "fast complete",
+                                    }),
+                                },
+                            ],
+                            stop_reason: Some(StopReason::ToolUse),
+                            usage: Usage::default(),
+                            metadata: Default::default(),
+                        },
+                    }),
+                ]
+            } else {
+                vec![Ok(StreamEvent::MessageDone {
+                    response: ModelResponse {
+                        id: "resp-2".into(),
+                        content: vec![ResponseContent::Text("done".into())],
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Usage::default(),
+                        metadata: Default::default(),
+                    },
+                })]
+            };
+
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+
+        fn name(&self) -> &str {
+            "parallel-tool-provider"
         }
     }
 
@@ -1235,6 +1328,8 @@ mod tests {
 
     struct StreamingMutatingTool;
 
+    struct ParallelDelayTool;
+
     #[async_trait]
     impl ToolHandler for StreamingMutatingTool {
         fn tool_kind(&self) -> ToolHandlerKind {
@@ -1250,6 +1345,32 @@ mod tests {
                 let _ = sender.send("stream chunk\n".to_string());
             }
             Ok(Box::new(FunctionToolOutput::success("stream complete")))
+        }
+    }
+
+    #[async_trait]
+    impl ToolHandler for ParallelDelayTool {
+        fn tool_kind(&self) -> ToolHandlerKind {
+            ToolHandlerKind::Read
+        }
+
+        async fn handle(
+            &self,
+            invocation: ToolInvocation,
+            _progress: Option<devo_tools::events::ToolProgressSender>,
+        ) -> Result<Box<dyn ToolOutput>, ToolExecutionError> {
+            let delay_ms = invocation
+                .input
+                .get("delay_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            let output = invocation
+                .input
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Ok(Box::new(FunctionToolOutput::success(output)))
         }
     }
 
@@ -1994,5 +2115,84 @@ mod tests {
             progress_index < result_index,
             "tool progress should arrive before final result"
         );
+    }
+
+    #[tokio::test]
+    async fn query_emits_parallel_tool_results_as_each_tool_finishes() {
+        let mut builder = ToolRegistryBuilder::new();
+        builder.register_handler("parallel_tool", Arc::new(ParallelDelayTool));
+        builder.push_spec(ToolSpec {
+            name: "parallel_tool".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![],
+            supports_parallel: true,
+        });
+        let registry = Arc::new(builder.build());
+        let runtime = ToolRuntime::new_without_permissions(Arc::clone(&registry));
+
+        let mut session = SessionState::new(SessionConfig::default(), std::env::temp_dir());
+        session.push_message(Message::user("run the tools"));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen);
+        let callback = Arc::new(move |event: QueryEvent| match event {
+            QueryEvent::ToolUseStart { id, .. } => {
+                seen_clone
+                    .lock()
+                    .expect("lock events")
+                    .push(format!("start:{id}"));
+            }
+            QueryEvent::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => {
+                seen_clone
+                    .lock()
+                    .expect("lock events")
+                    .push(format!("result:{tool_use_id}:{content}"));
+            }
+            _ => {}
+        });
+
+        query(
+            &mut session,
+            &TurnConfig {
+                model: Model::default(),
+                thinking_selection: None,
+            },
+            Arc::new(ParallelToolUseProvider {
+                requests: AtomicUsize::new(0),
+            }),
+            registry,
+            &runtime,
+            Some(callback),
+        )
+        .await
+        .expect("query should complete");
+
+        assert_eq!(
+            seen.lock().expect("lock events").as_slice(),
+            &[
+                "start:slow".to_string(),
+                "start:fast".to_string(),
+                "result:fast:fast complete".to_string(),
+                "result:slow:slow complete".to_string(),
+            ]
+        );
+
+        let tool_result_ids = session
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_result_ids, vec!["slow", "fast"]);
     }
 }
