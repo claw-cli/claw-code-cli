@@ -5,7 +5,6 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
-use crossterm::event::ModifierKeyCode;
 use devo_protocol::user_input::TextElement;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -254,7 +253,6 @@ pub(crate) struct BottomPane {
     animations_enabled: bool,
     has_input_focus: bool,
     allow_empty_submit: bool,
-    held_enter_modifiers: KeyModifiers,
     external_history_active: bool,
     external_history_draft: Option<String>,
     accent_color: Color,
@@ -301,7 +299,6 @@ impl BottomPane {
             animations_enabled,
             has_input_focus,
             allow_empty_submit: false,
-            held_enter_modifiers: KeyModifiers::NONE,
             external_history_active: false,
             external_history_draft: None,
             accent_color: Color::Cyan,
@@ -314,7 +311,7 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub(crate) fn handle_key_event(&mut self, mut key: KeyEvent) -> InputResult {
+    pub(crate) fn handle_key_event(&mut self, key: KeyEvent) -> InputResult {
         // Route to onboarding first — it takes priority over views and composer.
         if let Some(handle) = self.onboarding.as_mut() {
             handle.handle_key_event(key);
@@ -324,13 +321,6 @@ impl BottomPane {
 
         if !self.view_stack.is_empty() {
             return self.handle_view_key_event(key);
-        }
-
-        if self.track_enter_modifier_key(key) {
-            return InputResult::None;
-        }
-        if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE {
-            key.modifiers = self.held_enter_modifiers;
         }
 
         if key.code == KeyCode::Esc
@@ -380,36 +370,6 @@ impl BottomPane {
             self.request_redraw_in(ChatComposer::recommended_paste_flush_delay());
         }
         self.map_composer_input_result(input_result)
-    }
-
-    fn track_enter_modifier_key(&mut self, key: KeyEvent) -> bool {
-        let KeyCode::Modifier(modifier) = key.code else {
-            return false;
-        };
-        let tracked_modifier = match modifier {
-            ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift => KeyModifiers::SHIFT,
-            ModifierKeyCode::LeftControl | ModifierKeyCode::RightControl => KeyModifiers::CONTROL,
-            ModifierKeyCode::LeftAlt
-            | ModifierKeyCode::LeftSuper
-            | ModifierKeyCode::LeftHyper
-            | ModifierKeyCode::LeftMeta
-            | ModifierKeyCode::RightAlt
-            | ModifierKeyCode::RightSuper
-            | ModifierKeyCode::RightHyper
-            | ModifierKeyCode::RightMeta
-            | ModifierKeyCode::IsoLevel3Shift
-            | ModifierKeyCode::IsoLevel5Shift => return false,
-        };
-
-        match key.kind {
-            KeyEventKind::Press | KeyEventKind::Repeat => {
-                self.held_enter_modifiers.insert(tracked_modifier);
-            }
-            KeyEventKind::Release => {
-                self.held_enter_modifiers.remove(tracked_modifier);
-            }
-        }
-        true
     }
 
     pub fn handle_paste(&mut self, pasted: String) {

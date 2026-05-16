@@ -859,10 +859,6 @@ impl ChatWidget {
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-            if matches!(key.kind, KeyEventKind::Release) && matches!(key.code, KeyCode::Modifier(_))
-            {
-                let _ = self.bottom_pane.handle_key_event(key);
-            }
             return;
         }
         if self.resume_browser.is_some() {

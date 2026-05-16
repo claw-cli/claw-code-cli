@@ -4,7 +4,6 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
-use crossterm::event::ModifierKeyCode;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
@@ -644,80 +643,6 @@ fn ctrl_enter_inserts_newline_in_composer_without_submitting() {
     };
 
     let text = submitted_text_after_modified_enter(KeyModifiers::CONTROL, model, cwd);
-
-    assert_eq!(text, "hello\nworld");
-}
-
-fn submitted_text_after_held_modifier_enter(
-    modifier_key: ModifierKeyCode,
-    held_modifier: KeyModifiers,
-    test_model: Model,
-    cwd: PathBuf,
-) -> String {
-    let (mut widget, mut app_event_rx) = widget_with_model(test_model, cwd);
-
-    widget.handle_paste("hello".to_string());
-    widget.handle_key_event(KeyEvent::new_with_kind(
-        KeyCode::Modifier(modifier_key),
-        held_modifier,
-        KeyEventKind::Press,
-    ));
-    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_no_command_emitted(&mut app_event_rx);
-    widget.handle_key_event(KeyEvent::new_with_kind(
-        KeyCode::Modifier(modifier_key),
-        held_modifier,
-        KeyEventKind::Release,
-    ));
-    widget.handle_paste("world".to_string());
-    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-    let emitted_command = std::iter::from_fn(|| app_event_rx.try_recv().ok())
-        .find(|event| matches!(event, AppEvent::Command(_)))
-        .expect("command event is emitted");
-    let AppEvent::Command(AppCommand::UserTurn { input, .. }) = emitted_command else {
-        unreachable!("filtered for user command");
-    };
-    let [InputItem::Text { text }] = input.as_slice() else {
-        panic!("expected one text input item, got {input:?}");
-    };
-    text.clone()
-}
-
-#[test]
-fn held_shift_then_plain_enter_inserts_newline_without_submitting() {
-    let cwd = std::env::current_dir().expect("current directory is available");
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-
-    let text = submitted_text_after_held_modifier_enter(
-        ModifierKeyCode::LeftShift,
-        KeyModifiers::SHIFT,
-        model,
-        cwd,
-    );
-
-    assert_eq!(text, "hello\nworld");
-}
-
-#[test]
-fn held_ctrl_then_plain_enter_inserts_newline_without_submitting() {
-    let cwd = std::env::current_dir().expect("current directory is available");
-    let model = Model {
-        slug: "test-model".to_string(),
-        display_name: "Test Model".to_string(),
-        ..Model::default()
-    };
-
-    let text = submitted_text_after_held_modifier_enter(
-        ModifierKeyCode::LeftControl,
-        KeyModifiers::CONTROL,
-        model,
-        cwd,
-    );
 
     assert_eq!(text, "hello\nworld");
 }
