@@ -374,6 +374,20 @@ pub(crate) struct ChatWidget {
 }
 
 impl ChatWidget {
+    fn format_git_diff_result(result: std::io::Result<(bool, String)>) -> String {
+        match result {
+            Ok((true, diff_text)) => {
+                if diff_text.trim().is_empty() {
+                    "No changes detected.".to_string()
+                } else {
+                    diff_text
+                }
+            }
+            Ok((false, _)) => "`/diff` — _not inside a git repository_".to_string(),
+            Err(e) => format!("Failed to compute diff: {e}"),
+        }
+    }
+
     pub(crate) fn should_auto_show_git_diff(tool_title: &str, is_error: bool) -> bool {
         if is_error {
             return false;
@@ -1422,6 +1436,7 @@ impl ChatWidget {
                 self.bottom_pane.set_task_running(true);
             }
             WorkerEvent::TextItemStarted { item_id, kind } => {
+                self.flush_active_cell();
                 self.start_text_item(ActiveTextItemId::Server(item_id), kind);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
@@ -1452,6 +1467,7 @@ impl ChatWidget {
             }
             WorkerEvent::TextDelta(text) => {
                 if !self.has_server_active_item(TextItemKind::Assistant) {
+                    self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
@@ -1462,6 +1478,7 @@ impl ChatWidget {
             }
             WorkerEvent::ReasoningDelta(text) => {
                 if !self.has_server_active_item(TextItemKind::Reasoning) {
+                    self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
@@ -1626,32 +1643,47 @@ impl ChatWidget {
                     });
 
                 if resolved_title.exec_like
-                    && let Some(cell) = self
+                {
+                    let output = CommandOutput {
+                        exit_code: if is_error { 1 } else { 0 },
+                        aggregated_output: preview.clone(),
+                        formatted_output: preview.clone(),
+                    };
+                    let duration = std::time::Duration::from_millis(0);
+                    if let Some(cell) = self
                         .active_cell
                         .as_mut()
                         .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
-                {
-                    let completed = cell.complete_call(
-                        &tool_use_id,
-                        CommandOutput {
-                            exit_code: if is_error { 1 } else { 0 },
-                            aggregated_output: preview.clone(),
-                            formatted_output: preview.clone(),
-                        },
-                        std::time::Duration::from_millis(0),
-                    );
-                    if completed {
-                        if cell.is_exploring_cell() {
-                            self.active_cell_revision =
-                                self.active_cell_revision.wrapping_add(1);
-                            self.frame_requester.schedule_frame();
-                        } else if cell.should_flush() {
-                            self.flush_active_cell();
-                        } else {
-                            self.active_cell_revision =
-                                self.active_cell_revision.wrapping_add(1);
-                            self.frame_requester.schedule_frame();
+                    {
+                        let completed = cell.complete_call(&tool_use_id, output.clone(), duration);
+                        if completed {
+                            if cell.is_exploring_cell() {
+                                self.active_cell_revision =
+                                    self.active_cell_revision.wrapping_add(1);
+                                self.frame_requester.schedule_frame();
+                            } else if cell.should_flush() {
+                                self.flush_active_cell();
+                            } else {
+                                self.active_cell_revision =
+                                    self.active_cell_revision.wrapping_add(1);
+                                self.frame_requester.schedule_frame();
+                            }
+                            self.set_status_message(if is_error {
+                                "Tool returned an error"
+                            } else {
+                                "Tool completed"
+                            });
+                            return;
                         }
+                    }
+                    if let Some(cell) = self.history.iter_mut().rev().find_map(|cell| {
+                        cell.as_any_mut().downcast_mut::<ExecCell>().and_then(|cell| {
+                            cell.complete_call(&tool_use_id, output.clone(), duration)
+                                .then_some(cell)
+                        })
+                    }) {
+                        let _ = cell;
+                        self.frame_requester.schedule_frame();
                         self.set_status_message(if is_error {
                             "Tool returned an error"
                         } else {
@@ -1684,16 +1716,7 @@ impl ChatWidget {
                 if Self::should_auto_show_git_diff(&resolved_title, is_error) {
                     let tx = self.app_event_tx.clone();
                     tokio::spawn(async move {
-                        let text = match get_git_diff().await {
-                            Ok((is_git_repo, diff_text)) => {
-                                if is_git_repo {
-                                    diff_text
-                                } else {
-                                    "`/diff` — _not inside a git repository_".to_string()
-                                }
-                            }
-                            Err(e) => format!("Failed to compute diff: {e}"),
-                        };
+                        let text = Self::format_git_diff_result(get_git_diff().await);
                         tx.send(AppEvent::DiffResult(text));
                     });
                 }
@@ -2263,16 +2286,7 @@ impl ChatWidget {
                 self.set_status_message("Computing diff");
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
-                    let text = match get_git_diff().await {
-                        Ok((is_git_repo, diff_text)) => {
-                            if is_git_repo {
-                                diff_text
-                            } else {
-                                "`/diff` — _not inside a git repository_".to_string()
-                            }
-                        }
-                        Err(e) => format!("Failed to compute diff: {e}"),
-                    };
+                    let text = Self::format_git_diff_result(get_git_diff().await);
                     tx.send(AppEvent::DiffResult(text));
                 });
             }
@@ -3297,6 +3311,9 @@ impl ChatWidget {
 
     fn active_viewport_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        if let Some(cell) = &self.active_cell {
+            Self::extend_lines_with_separator(&mut lines, cell.display_lines(width));
+        }
         for item in &self.active_text_items {
             if let Some(cell) = &item.cell {
                 Self::extend_lines_with_separator(&mut lines, cell.display_lines(width));

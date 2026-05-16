@@ -139,6 +139,17 @@ fn trim_trailing_blank_scrollback_lines(
     lines
 }
 
+fn line_texts(lines: Vec<ratatui::text::Line<'static>>) -> Vec<String> {
+    lines.into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
 fn indices_containing(lines: &[String], needles: &[&str]) -> Vec<usize> {
     needles
         .iter()
@@ -149,6 +160,31 @@ fn indices_containing(lines: &[String], needles: &[&str]) -> Vec<usize> {
                 .unwrap_or_else(|| panic!("missing {needle} in:\n{}", lines.join("\n")))
         })
         .collect()
+}
+
+#[test]
+fn user_prompt_multiline_has_no_extra_blank_prefix_rows_and_consistent_prefix_text() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("line one\nline two\nline three".to_string());
+
+    let transcript = line_texts(widget.transcript_overlay_lines(80));
+    let user_lines: Vec<String> = transcript
+        .into_iter()
+        .filter(|line| line.starts_with("▌ "))
+        .collect();
+
+    assert_eq!(user_lines.len(), 5, "unexpected user prompt rows: {user_lines:?}");
+    assert_eq!(user_lines[0], "▌ ");
+    assert_eq!(user_lines[1], "▌ line one");
+    assert_eq!(user_lines[2], "▌ line two");
+    assert_eq!(user_lines[3], "▌ line three");
+    assert_eq!(user_lines[4], "▌ ");
 }
 
 #[test]
@@ -1252,7 +1288,7 @@ fn batched_history_inserts_separator_and_trailing_blank_lines() {
 }
 
 #[test]
-fn session_switch_restores_header_and_double_blank_line_before_user_input() {
+fn session_switch_restores_header_and_spacing_before_user_input() {
     let initial_cwd = std::env::current_dir().expect("current directory is available");
     let resumed_cwd = initial_cwd.join("resumed");
     let model = Model {
@@ -1322,11 +1358,13 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
     assert!(!committed_text.contains("session 1 lingering line"));
     assert!(
         committed_rows
-            .windows(3)
+            .windows(5)
             .any(|window| window[0].trim_end() == "▌"
                 && window[1].contains("hello")
-                && window[2].trim_end() == "▌"),
-        "expected blank line spacing with colored bar before restored user input: {committed_lines:?}"
+                && window[2].trim_end() == "▌"
+                && window[3].trim().is_empty()
+                && window[4].contains("world")),
+        "expected restored spaced user prompt before assistant response: {committed_lines:?}"
     );
 }
 
@@ -2984,6 +3022,371 @@ fn grep_tool_call_renders_as_explored_group_in_viewport() {
     assert!(
         display.contains("Search rebuild_restored_session in crates/tui/src"),
         "expected search summary, got:\n{display}"
+    );
+}
+
+#[test]
+fn merged_explored_group_becomes_explored_after_all_results_arrive() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/plan.rs in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'plan' in crates".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob **/plan.rs in crates".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("▌ Explored"),
+        "expected merged explored group to become completed, got:\n{display}"
+    );
+    assert!(
+        !display.contains("▌ Exploring"),
+        "merged explored group should not stay active after all completions:\n{display}"
+    );
+}
+
+#[test]
+fn live_viewport_shows_explored_group_while_active() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/plan.rs in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+
+    let display = widget
+        .active_viewport_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("▌ Exploring") || display.contains("▌ Explored"),
+        "live viewport should show explored exec cell:\n{display}"
+    );
+    assert!(
+        display.contains("Search plan in crates"),
+        "live viewport should include search summary:\n{display}"
+    );
+    assert!(
+        display.contains("List crates"),
+        "live viewport should include list summary:\n{display}"
+    );
+}
+
+#[test]
+fn reasoning_start_closes_current_explored_group() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: devo_core::ItemId::new(),
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/plan.rs in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+
+    let transcript = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        transcript.matches("Explored").count() + transcript.matches("Exploring").count(),
+        2,
+        "reasoning boundary should split explored groups:\n{transcript}"
+    );
+}
+
+#[test]
+fn assistant_text_start_closes_current_explored_group() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: devo_core::ItemId::new(),
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/plan.rs in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+
+    let transcript = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        transcript.matches("Explored").count() + transcript.matches("Exploring").count(),
+        2,
+        "assistant text boundary should split explored groups:\n{transcript}"
+    );
+}
+
+#[test]
+fn merged_explored_group_stays_completed_when_tool_results_arrive_after_tool_call_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/plan.rs in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'plan' in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob **/plan.rs in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep output".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob output".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("▌ Explored"),
+        "tool result follow-up events should not reactivate explored group:\n{display}"
+    );
+    assert!(
+        !display.contains("▌ Exploring"),
+        "tool result follow-up events should not leave explored group active:\n{display}"
+    );
+}
+
+#[test]
+fn explored_group_in_history_can_finish_late_completions() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/plan.rs in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'plan' in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-3".to_string(),
+        summary: "write src/main.rs".to_string(),
+        parsed_commands: None,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob **/plan.rs in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let history_blob = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        history_blob.contains("▌ Explored"),
+        "late completion should finish explored cell already flushed to history:\n{history_blob}"
+    );
+    assert!(
+        !history_blob.contains("▌ Exploring"),
+        "flushed explored cell should not stay active after late completion:\n{history_blob}"
     );
 }
 

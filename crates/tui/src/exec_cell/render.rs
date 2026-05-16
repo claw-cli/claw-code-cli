@@ -251,6 +251,9 @@ impl HistoryCell for ExecCell {
     }
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if self.is_exploring_cell() {
+            return self.exploring_display_lines(width);
+        }
         let mut lines: Vec<Line<'static>> = vec![];
         for (i, call) in self.iter_calls().enumerate() {
             if i > 0 {
