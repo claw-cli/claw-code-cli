@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-
 use super::*;
+use crate::{FileChangePayload, TurnPlanStepPayload, TurnPlanUpdatedPayload};
 
 struct PendingToolCall {
     item_id: ItemId,
@@ -59,6 +59,14 @@ fn is_unified_exec_tool(name: &str) -> bool {
     matches!(name, "exec_command" | "write_stdin")
 }
 
+fn is_file_change_tool(name: &str) -> bool {
+    matches!(name, "apply_patch")
+}
+
+fn is_plan_tool(name: &str) -> bool {
+    matches!(name, "update_plan")
+}
+
 fn command_display_from_input(tool_name: &str, input: &serde_json::Value) -> String {
     match tool_name {
         "exec_command" => input
@@ -83,7 +91,89 @@ fn command_display_from_input(tool_name: &str, input: &serde_json::Value) -> Str
                 format!("write_stdin session {session_id}")
             }
         }
+        "read" => {
+            let path = input
+                .get("filePath")
+                .or_else(|| input.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            format!("read {path}")
+        }
+        "glob" => {
+            let pattern = input
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let path = input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if path.is_empty() {
+                format!("glob {pattern}")
+            } else {
+                format!("glob {pattern} in {path}")
+            }
+        }
+        "grep" => {
+            let pattern = input
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let path = input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if path.is_empty() {
+                format!("grep {pattern}")
+            } else {
+                format!("grep {pattern} in {path}")
+            }
+        }
         _ => String::new(),
+    }
+}
+
+fn command_actions_from_tool_input(
+    tool_name: &str,
+    command: &str,
+    input: &serde_json::Value,
+) -> Vec<devo_protocol::parse_command::ParsedCommand> {
+    match tool_name {
+        "read" => {
+            let path = input
+                .get("filePath")
+                .or_else(|| input.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.to_string());
+            vec![devo_protocol::parse_command::ParsedCommand::Read {
+                cmd: command.to_string(),
+                name,
+                path: std::path::PathBuf::from(path),
+            }]
+        }
+        "glob" => vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: command.to_string(),
+            path: input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        }],
+        "grep" => vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: command.to_string(),
+            query: input
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+            path: input
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned),
+        }],
+        _ => Vec::new(),
     }
 }
 
@@ -131,6 +221,7 @@ impl ServerRuntime {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<QueryEvent>();
         let runtime = Arc::clone(&self);
         let turn_for_events = turn.clone();
+        let turn_for_plan_updates = turn.clone();
         let event_session_arc = Arc::clone(&session_arc);
         let event_task = tokio::spawn(async move {
             // This task owns the streamed model output. It turns raw query
@@ -285,25 +376,44 @@ impl ServerRuntime {
                         }
                         let is_command_execution = is_unified_exec_tool(&name);
                         let command = command_display_from_input(&name, &input);
-                        let item_kind = if is_command_execution {
+                        let item_kind = if is_file_change_tool(&name) {
+                            ItemKind::FileChange
+                        } else if is_command_execution {
                             ItemKind::CommandExecution
+                        } else if is_plan_tool(&name) {
+                            ItemKind::Plan
                         } else {
                             ItemKind::ToolCall
                         };
-                        let started_payload = if is_command_execution {
+                        let started_payload = if is_file_change_tool(&name) {
+                            serde_json::to_value(FileChangePayload {
+                                tool_call_id: id.clone(),
+                                changes: Vec::new(),
+                                is_error: false,
+                            })
+                            .expect("serialize file change payload")
+                        } else if is_command_execution {
                             serde_json::to_value(CommandExecutionPayload {
                                 tool_call_id: id.clone(),
                                 tool_name: name.clone(),
                                 command: command.clone(),
+                                source: devo_protocol::protocol::ExecCommandSource::Agent,
+                                command_actions: command_actions_from_tool_input(&name, &command, &input),
                                 output: None,
                                 is_error: false,
                             })
                             .expect("serialize command execution payload")
+                        } else if is_plan_tool(&name) {
+                            serde_json::json!({
+                                "title": "Plan",
+                                "text": ""
+                            })
                         } else {
                             serde_json::to_value(ToolCallPayload {
                                 tool_call_id: id.clone(),
                                 tool_name: name.clone(),
                                 parameters: input.clone(),
+                                command_actions: command_actions_from_tool_input(&name, &command, &input),
                             })
                             .expect("serialize tool call payload")
                         };
@@ -337,14 +447,151 @@ impl ServerRuntime {
                         // First complete the pending ToolCall item so its item/completed
                         // arrives before the ToolResult item/completed.
                         if let Some(pending) = pending_tool_calls.remove(&tool_use_id) {
+                            if let Some(tool_name) = tool_name.clone()
+                                && is_plan_tool(&tool_name)
+                            {
+                                let output_json = match content.clone() {
+                                    devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
+                                    devo_tools::ToolContent::Json(json) => json,
+                                    devo_tools::ToolContent::Mixed { text, json } => {
+                                        json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                    }
+                                };
+                                let explanation = output_json
+                                    .get("explanation")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(ToOwned::to_owned);
+                                let plan = output_json
+                                    .get("plan")
+                                    .and_then(serde_json::Value::as_array)
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                runtime
+                                    .complete_item(
+                                        session_id,
+                                        turn_for_events.turn_id,
+                                        pending.item_id,
+                                        pending.item_seq,
+                                        ItemKind::Plan,
+                                        TurnItem::Plan(TextItem {
+                                            text: output_json.to_string(),
+                                        }),
+                                        serde_json::json!({
+                                            "title": "Plan",
+                                            "text": output_json.to_string(),
+                                        }),
+                                    )
+                                    .await;
+
+                                runtime
+                                    .broadcast_event(ServerEvent::TurnPlanUpdated(
+                                        TurnPlanUpdatedPayload {
+                                            session_id,
+                                            turn: turn_for_plan_updates.clone(),
+                                            explanation,
+                                            plan: plan
+                                                .into_iter()
+                                                .filter_map(|item| {
+                                                    Some(TurnPlanStepPayload {
+                                                        step: item.get("step")?.as_str()?.to_string(),
+                                                        status: item.get("status")?.as_str()?.to_string(),
+                                                    })
+                                                })
+                                                .collect(),
+                                        },
+                                    ))
+                                    .await;
+                                continue;
+                            }
+
+                            if let Some(tool_name) = tool_name.clone()
+                                && is_file_change_tool(&tool_name)
+                            {
+                                let output_json = match content.clone() {
+                                    devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
+                                    devo_tools::ToolContent::Json(json) => json,
+                                    devo_tools::ToolContent::Mixed { text, json } => {
+                                        json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                    }
+                                };
+                                let changes = output_json
+                                    .get("files")
+                                    .and_then(serde_json::Value::as_array)
+                                    .cloned()
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter_map(|file| {
+                                        let path = std::path::PathBuf::from(file.get("path")?.as_str()?);
+                                        let kind = file.get("kind")?.as_str()?;
+                                        let additions = file.get("additions").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                        let deletions = file.get("deletions").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                        let change = match kind {
+                                            "add" => devo_protocol::protocol::FileChange::Add {
+                                                content: "\n".repeat(additions as usize),
+                                            },
+                                            "delete" => devo_protocol::protocol::FileChange::Delete {
+                                                content: "\n".repeat(deletions as usize),
+                                            },
+                                            "update" | "move" => devo_protocol::protocol::FileChange::Update {
+                                                unified_diff: output_json
+                                                    .get("diff")
+                                                    .and_then(serde_json::Value::as_str)
+                                                    .unwrap_or("")
+                                                    .to_string(),
+                                                move_path: file
+                                                    .get("movePath")
+                                                    .or_else(|| file.get("move_path"))
+                                                    .and_then(serde_json::Value::as_str)
+                                                    .map(std::path::PathBuf::from),
+                                            },
+                                            _ => return None,
+                                        };
+                                        Some((path, change))
+                                    })
+                                    .collect::<Vec<_>>();
+
+                                runtime
+                                    .complete_item(
+                                        session_id,
+                                        turn_for_events.turn_id,
+                                        pending.item_id,
+                                        pending.item_seq,
+                                        ItemKind::FileChange,
+                                        TurnItem::ToolResult(ToolResultItem {
+                                            tool_call_id: tool_use_id.clone(),
+                                            tool_name: Some(tool_name.clone()),
+                                            output: output_json.clone(),
+                                            display_content: display_content.clone(),
+                                            is_error,
+                                        }),
+                                        serde_json::to_value(FileChangePayload {
+                                            tool_call_id: tool_use_id.clone(),
+                                            changes,
+                                            is_error,
+                                        })
+                                        .expect("serialize file change payload"),
+                                    )
+                                    .await;
+                                continue;
+                            }
+
                             if pending.is_command_execution {
                                 let tool_name = tool_name.clone().unwrap_or_default();
-                                let output = serde_json::Value::String(content.clone());
+                                let output = match content.clone() {
+                                    devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
+                                    devo_tools::ToolContent::Json(json) => json,
+                                    devo_tools::ToolContent::Mixed { text, json } => {
+                                        json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                    }
+                                };
                                 let completed_payload =
                                     serde_json::to_value(CommandExecutionPayload {
                                         tool_call_id: tool_use_id.clone(),
                                         tool_name: tool_name.clone(),
                                         command: pending.command.clone(),
+                                        source: devo_protocol::protocol::ExecCommandSource::Agent,
+                                        command_actions: command_actions_from_tool_input(&tool_name, &pending.command, &pending.input),
                                         output: Some(output.clone()),
                                         is_error,
                                     })
@@ -373,6 +620,11 @@ impl ServerRuntime {
                                 tool_call_id: tool_use_id.clone(),
                                 tool_name: tool_name.clone().unwrap_or_default(),
                                 parameters: pending.input.clone(),
+                                command_actions: command_actions_from_tool_input(
+                                    tool_name.clone().unwrap_or_default().as_str(),
+                                    &pending.command,
+                                    &pending.input,
+                                ),
                             })
                             .expect("serialize tool call payload");
                             runtime
@@ -399,14 +651,26 @@ impl ServerRuntime {
                                 TurnItem::ToolResult(ToolResultItem {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name: tool_name.clone(),
-                                    output: serde_json::Value::String(content.clone()),
+                                    output: match content.clone() {
+                                        devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
+                                        devo_tools::ToolContent::Json(json) => json,
+                                        devo_tools::ToolContent::Mixed { text, json } => {
+                                            json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                        }
+                                    },
                                     display_content: display_content.clone(),
                                     is_error,
                                 }),
                                 serde_json::to_value(ToolResultPayload {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name,
-                                    content: serde_json::Value::String(content),
+                                    content: match content {
+                                        devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
+                                        devo_tools::ToolContent::Json(json) => json,
+                                        devo_tools::ToolContent::Mixed { text, json } => {
+                                            json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                        }
+                                    },
                                     display_content,
                                     is_error,
                                     summary,
@@ -1065,5 +1329,55 @@ mod tests {
             command_execution_item_id_for_progress(&pending_tool_calls, "missing"),
             None
         );
+    }
+
+    #[test]
+    fn file_change_tool_detection_matches_apply_patch() {
+        assert!(is_file_change_tool("apply_patch"));
+        assert!(!is_file_change_tool("read"));
+    }
+
+    #[test]
+    fn plan_tool_detection_matches_update_plan() {
+        assert!(is_plan_tool("update_plan"));
+        assert!(!is_plan_tool("read"));
+    }
+
+    #[test]
+    fn command_actions_from_read_tool_input_builds_read_action() {
+        let actions = command_actions_from_tool_input(
+            "read",
+            "read crates/tui/src/chatwidget.rs",
+            &serde_json::json!({
+                "filePath": "crates/tui/src/chatwidget.rs"
+            }),
+        );
+        assert_eq!(
+            actions,
+            vec![devo_protocol::parse_command::ParsedCommand::Read {
+                cmd: "read crates/tui/src/chatwidget.rs".to_string(),
+                name: "chatwidget.rs".to_string(),
+                path: std::path::PathBuf::from("crates/tui/src/chatwidget.rs"),
+            }]
+        );
+    }
+
+    #[test]
+    fn command_actions_from_grep_tool_input_builds_search_action() {
+        let actions = command_actions_from_tool_input(
+            "grep",
+            "grep rebuild_restored_session in crates/tui/src",
+            &serde_json::json!({
+                "pattern": "rebuild_restored_session",
+                "path": "crates/tui/src"
+            }),
+        );
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            devo_protocol::parse_command::ParsedCommand::Search { query, path, .. }
+            if query.as_deref() == Some("rebuild_restored_session")
+                && path.as_deref() == Some("crates/tui/src")
+        ));
     }
 }

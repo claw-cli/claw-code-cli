@@ -333,43 +333,6 @@ fn task_schema() -> JsonSchema {
     )
 }
 
-fn todowrite_schema() -> JsonSchema {
-    JsonSchema::object(
-        BTreeMap::from([(
-            "todos".to_string(),
-            JsonSchema::array(
-                JsonSchema::object(
-                    BTreeMap::from([
-                        (
-                            "content".to_string(),
-                            JsonSchema::string(Some("Brief description of the task")),
-                        ),
-                        (
-                            "status".to_string(),
-                            JsonSchema::string(Some(
-                                "Current status: pending, in_progress, completed, cancelled",
-                            )),
-                        ),
-                        (
-                            "priority".to_string(),
-                            JsonSchema::string(Some("Priority: high, medium, low")),
-                        ),
-                    ]),
-                    Some(vec![
-                        "content".to_string(),
-                        "status".to_string(),
-                        "priority".to_string(),
-                    ]),
-                    Some(false),
-                ),
-                Some("The updated todo list"),
-            ),
-        )]),
-        Some(vec!["todos".to_string()]),
-        Some(false),
-    )
-}
-
 fn webfetch_schema() -> JsonSchema {
     JsonSchema::object(
         BTreeMap::from([
@@ -664,19 +627,6 @@ pub fn build_tool_registry_plan(config: &ToolPlanConfig) -> ToolRegistryPlan {
             supports_parallel: false,
         },
         ToolHandlerKind::Task,
-    );
-
-    plan.push(
-        ToolSpec {
-            name: "todowrite".to_string(),
-            description: "Use this tool to create and manage a structured task list for your current coding session.".to_string(),
-            input_schema: todowrite_schema(),
-            output_mode: ToolOutputMode::Text,
-            execution_mode: ToolExecutionMode::Mutating,
-            capability_tags: vec![ToolCapabilityTag::WriteFiles],
-            supports_parallel: false,
-        },
-        ToolHandlerKind::TodoWrite,
     );
 
     plan.push(

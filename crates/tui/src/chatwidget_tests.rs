@@ -24,6 +24,8 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
 use crate::chatwidget::ThinkingListEntry;
 use crate::chatwidget::TuiSessionState;
+use crate::events::PlanStep;
+use crate::events::PlanStepStatus;
 use crate::render::renderable::Renderable;
 use crate::slash_command::built_in_slash_commands;
 use crate::tui::frame_requester::FrameRequester;
@@ -697,6 +699,363 @@ fn key_release_does_not_duplicate_text_input() {
 }
 
 #[test]
+fn plan_update_updates_progress_and_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PlanUpdated {
+        explanation: Some("Working through checklist".to_string()),
+        steps: vec![
+            PlanStep {
+                text: "Inspect implementation".to_string(),
+                status: PlanStepStatus::Completed,
+            },
+            PlanStep {
+                text: "Patch runtime".to_string(),
+                status: PlanStepStatus::InProgress,
+            },
+        ],
+    });
+
+    assert_eq!(widget.last_plan_progress_for_test(), Some((1, 2)));
+
+    let lines = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(lines.iter().any(|line| line.contains("Updated Plan")));
+    assert!(lines.iter().any(|line| line.contains("Working through checklist")));
+    assert!(lines.iter().any(|line| line.contains("Inspect implementation")));
+    assert!(lines.iter().any(|line| line.contains("Patch runtime")));
+    assert!(lines.iter().any(|line| line.contains("  ✔ Inspect implementation")));
+    assert!(lines.iter().any(|line| line.contains("  → Patch runtime")));
+}
+
+#[test]
+fn session_switch_restores_plan_metadata_into_progress() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd.clone());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd,
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: None,
+            kind: devo_protocol::SessionHistoryItemKind::Assistant,
+            title: String::new(),
+            body: r#"{"explanation":"Do work","plan":[{"step":"Inspect","status":"completed"},{"step":"Patch","status":"in_progress"}]}"#.to_string(),
+            metadata: Some(devo_protocol::SessionHistoryMetadata::PlanUpdate {
+                explanation: Some("Do work".to_string()),
+                steps: vec![
+                    devo_protocol::SessionPlanStep {
+                        text: "Inspect".to_string(),
+                        status: devo_protocol::SessionPlanStepStatus::Completed,
+                    },
+                    devo_protocol::SessionPlanStep {
+                        text: "Patch".to_string(),
+                        status: devo_protocol::SessionPlanStepStatus::InProgress,
+                    },
+                ],
+            }),
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    assert_eq!(widget.last_plan_progress_for_test(), Some((1, 2)));
+}
+
+#[test]
+fn session_switch_restores_explored_metadata_into_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::CommandExecution,
+            title: "cat foo.txt".to_string(),
+            body: "hello".to_string(),
+            metadata: Some(devo_protocol::SessionHistoryMetadata::Explored {
+                actions: vec![devo_protocol::parse_command::ParsedCommand::Read {
+                    cmd: "cat foo.txt".to_string(),
+                    name: "foo.txt".to_string(),
+                    path: PathBuf::from("foo.txt"),
+                }],
+            }),
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Explored") || blob.contains("Exploring"),
+        "expected explored block after resume, got:\n{blob}"
+    );
+    assert!(blob.contains("Read foo.txt"), "expected read summary, got:\n{blob}");
+}
+
+#[test]
+fn session_switch_restores_edited_metadata_into_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::ToolResult,
+            title: "apply_patch".to_string(),
+            body: String::new(),
+            metadata: Some(devo_protocol::SessionHistoryMetadata::Edited { changes }),
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "expected edited block after resume, got:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_merges_consecutive_explored_items() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: Some("call-1".to_string()),
+                kind: devo_protocol::SessionHistoryItemKind::ToolCall,
+                title: "read crates/tui/src/worker.rs".to_string(),
+                body: String::new(),
+                metadata: Some(devo_protocol::SessionHistoryMetadata::Explored {
+                    actions: vec![devo_protocol::parse_command::ParsedCommand::Read {
+                        cmd: "read crates/tui/src/worker.rs".to_string(),
+                        name: "worker.rs".to_string(),
+                        path: PathBuf::from("crates/tui/src/worker.rs"),
+                    }],
+                }),
+                duration_ms: None,
+            },
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: Some("call-2".to_string()),
+                kind: devo_protocol::SessionHistoryItemKind::ToolCall,
+                title: "grep command_actions in crates/tui/src/worker.rs".to_string(),
+                body: String::new(),
+                metadata: Some(devo_protocol::SessionHistoryMetadata::Explored {
+                    actions: vec![devo_protocol::parse_command::ParsedCommand::Search {
+                        cmd: "grep command_actions in crates/tui/src/worker.rs".to_string(),
+                        query: Some("command_actions".to_string()),
+                        path: Some("crates/tui/src/worker.rs".to_string()),
+                    }],
+                }),
+                duration_ms: None,
+            },
+        ],
+        loaded_item_count: 2,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert_eq!(
+        blob.matches("Explored").count() + blob.matches("Exploring").count(),
+        1,
+        "expected one merged explored block, got:\n{blob}"
+    );
+    assert!(blob.contains("Read worker.rs"), "expected read entry, got:\n{blob}");
+    assert!(
+        blob.contains("Search command_actions in crates/tui/src/worker.rs"),
+        "expected search entry, got:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_restores_error_via_tool_result_cell_style() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::Error,
+            title: "bash error".to_string(),
+            body: "permission denied".to_string(),
+            metadata: None,
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(blob.contains("Ran bash error"), "expected tool-result style title, got:\n{blob}");
+    assert!(blob.contains("permission denied"), "expected tool-result body, got:\n{blob}");
+}
+
+#[test]
+fn live_and_resume_error_share_same_rendering_chain() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut live_widget, _live_rx) = widget_with_model(model.clone(), PathBuf::from("."));
+    let (mut resume_widget, _resume_rx) = widget_with_model(model, PathBuf::from("."));
+
+    live_widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "bash error".to_string(),
+        preview: "permission denied".to_string(),
+        is_error: true,
+        truncated: false,
+    });
+    let live_blob = scrollback_plain_lines(&live_widget.drain_scrollback_lines(80))
+        .into_iter()
+        .filter(|line| line.contains("Ran bash error") || line.contains("permission denied"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    resume_widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::Error,
+            title: "bash error".to_string(),
+            body: "permission denied".to_string(),
+            metadata: None,
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+    let resume_blob = scrollback_plain_lines(&resume_widget.drain_scrollback_lines(80))
+        .into_iter()
+        .filter(|line| line.contains("Ran bash error") || line.contains("permission denied"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(live_blob, resume_blob, "live and resume error cells diverged");
+}
+
+#[test]
 fn startup_header_mascot_animation_advances_on_pre_draw_tick() {
     let cwd = std::env::current_dir().expect("current directory is available");
     let model = Model {
@@ -934,6 +1293,7 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
                 "world".to_string(),
             ),
         ],
+        rich_history_items: Vec::new(),
         loaded_item_count: 2,
         pending_texts: vec![],
     });
@@ -1318,6 +1678,7 @@ fn tool_call_start_and_finish_are_both_visible_in_history() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "powershell -NoProfile -Command Get-Date".to_string(),
+        parsed_commands: None,
     });
 
     let running = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
@@ -1414,6 +1775,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
             "",
             "thinking text",
         )],
+        rich_history_items: Vec::new(),
         loaded_item_count: 1,
         pending_texts: vec![],
     });
@@ -1799,6 +2161,7 @@ fn session_switch_updates_session_identity_projection() {
         last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
+        rich_history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
@@ -1837,6 +2200,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         last_query_input_tokens: 42,
         prompt_token_estimate: 12,
         history_items: Vec::new(),
+        rich_history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
@@ -1943,6 +2307,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
         last_query_input_tokens: 20,
         prompt_token_estimate: 20,
         history_items: Vec::new(),
+        rich_history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
@@ -2409,6 +2774,7 @@ fn transcript_overlay_lines_include_full_completed_tool_output() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "bash".to_string(),
+        parsed_commands: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
         tool_use_id: "tool-1".to_string(),
@@ -2465,6 +2831,7 @@ fn transcript_overlay_lines_include_running_tool_output_delta() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "bash".to_string(),
+        parsed_commands: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolOutputDelta {
         tool_use_id: "tool-1".to_string(),
@@ -2487,4 +2854,209 @@ fn transcript_overlay_lines_include_running_tool_output_delta() {
         transcript.contains("streamed output line"),
         "transcript output should include running tool deltas: {transcript}"
     );
+}
+
+#[test]
+fn read_tool_call_renders_as_explored_group_in_viewport() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "cat foo.txt".to_string(),
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "cat foo.txt".to_string(),
+        preview: "hello".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("Explored") || display.contains("Exploring"),
+        "expected explored viewport grouping: {display}"
+    );
+    assert!(
+        display.contains("Read foo.txt"),
+        "expected read summary in explored viewport: {display}"
+    );
+    assert!(display.contains("▌ Explored") || display.contains("▌ Exploring"));
+}
+
+#[test]
+fn glob_tool_call_renders_as_explored_group_in_viewport() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "glob **/Cargo.toml in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+            cmd: "glob **/Cargo.toml in crates".to_string(),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "glob **/Cargo.toml in crates".to_string(),
+        preview: "crates/tools/Cargo.toml".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(display.contains("Explored") || display.contains("Exploring"));
+    assert!(display.contains("List crates"), "expected list summary, got:\n{display}");
+}
+
+#[test]
+fn grep_tool_call_renders_as_explored_group_in_viewport() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'rebuild_restored_session' in crates/tui/src".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'rebuild_restored_session' in crates/tui/src".to_string(),
+            query: Some("rebuild_restored_session".to_string()),
+            path: Some("crates/tui/src".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'rebuild_restored_session' in crates/tui/src".to_string(),
+        preview: "chatwidget.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(display.contains("Explored") || display.contains("Exploring"));
+    assert!(
+        display.contains("Search rebuild_restored_session in crates/tui/src"),
+        "expected search summary, got:\n{display}"
+    );
+}
+
+#[test]
+fn auto_git_diff_trigger_matches_editing_tools_only() {
+    assert!(ChatWidget::should_auto_show_git_diff("write src/main.rs", false));
+    assert!(ChatWidget::should_auto_show_git_diff("apply_patch", false));
+    assert!(!ChatWidget::should_auto_show_git_diff("read src/main.rs", false));
+    assert!(!ChatWidget::should_auto_show_git_diff("write src/main.rs", true));
+}
+
+#[tokio::test]
+async fn successful_write_tool_result_triggers_diff_event() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "write src/main.rs".to_string(),
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "write src/main.rs".to_string(),
+        preview: "updated".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let diff_event = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Some(AppEvent::DiffResult(text)) = app_event_rx.recv().await {
+                break text;
+            }
+        }
+    })
+    .await
+    .expect("diff event should arrive");
+
+    assert!(
+        !diff_event.is_empty(),
+        "auto diff should send some result text"
+    );
+}
+
+#[test]
+fn patch_applied_event_renders_edited_block() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "expected edited patch block, got:\n{blob}"
+    );
+    assert!(blob.contains("▌ Edited") || blob.contains("▌ Added"));
 }

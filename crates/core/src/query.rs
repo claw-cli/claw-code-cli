@@ -17,6 +17,7 @@ use tracing::warn;
 
 use devo_provider::ModelProviderSDK;
 use devo_tools::ToolCall;
+use devo_tools::ToolContent;
 use devo_tools::ToolRegistry;
 use devo_tools::ToolRuntime;
 
@@ -94,7 +95,7 @@ pub enum QueryEvent {
     /// A tool call completed.
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolContent,
         display_content: Option<String>,
         is_error: bool,
         /// Human-readable summary for client-side rendering (e.g. "bash: npm run dev").
@@ -313,6 +314,17 @@ fn micro_compact(content: String) -> String {
         truncated
     } else {
         content
+    }
+}
+
+fn compact_tool_content(content: ToolContent) -> ToolContent {
+    match content {
+        ToolContent::Text(text) => ToolContent::Text(micro_compact(text)),
+        ToolContent::Json(json) => ToolContent::Json(json),
+        ToolContent::Mixed { text, json } => ToolContent::Mixed {
+            text: text.map(micro_compact),
+            json,
+        },
     }
 }
 
@@ -834,7 +846,7 @@ pub async fn query(
                         });
                     },
                     move |result| {
-                        let content = micro_compact(result.content.clone().into_string());
+                        let content = compact_tool_content(result.content.clone());
                         let display_content = result.display_content.clone().map(micro_compact);
                         let summary = summaries
                             .get(result.tool_use_id.as_str())
@@ -2034,10 +2046,13 @@ mod tests {
         .await
         .expect("query should complete");
 
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[(String::from("canonical"), Some(String::from("display")))]
-        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(matches!(
+            &seen[0],
+            (devo_tools::ToolContent::Text(text), Some(display))
+                if text == "canonical" && display == "display"
+        ));
     }
 
     #[tokio::test]
@@ -2105,7 +2120,7 @@ mod tests {
                         is_error,
                         ..
                     } if tool_use_id == "tool-1"
-                        && content == "stream complete"
+                        && matches!(content, devo_tools::ToolContent::Text(text) if text == "stream complete")
                         && !is_error
                 )
             })
@@ -2150,6 +2165,7 @@ mod tests {
                 content,
                 ..
             } => {
+                let content = content.into_string();
                 seen_clone
                     .lock()
                     .expect("lock events")

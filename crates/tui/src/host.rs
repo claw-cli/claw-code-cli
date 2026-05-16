@@ -561,6 +561,8 @@ fn handle_worker_event(
         | WorkerEvent::ReasoningCompleted(_)
         | WorkerEvent::ToolCall { .. }
         | WorkerEvent::ToolResult { .. }
+        | WorkerEvent::PatchApplied { .. }
+        | WorkerEvent::PlanUpdated { .. }
         | WorkerEvent::SessionsListed { .. }
         | WorkerEvent::SkillsListed { .. }
         | WorkerEvent::NewSessionPrepared { .. }

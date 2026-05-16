@@ -229,7 +229,6 @@ The current built-in tools in `devo-tools` include:
 - `websearch` — web search
 - `task` — sub-agent task dispatch
 - `question` — interactive user questions
-- `todo_write` — structured task list management
 - `skill` — skill loading
 - `plan` — plan mode support
 - `lsp` — language server protocol integration

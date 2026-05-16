@@ -6,6 +6,7 @@
 //! through `Model` instead of a TUI-local reasoning enum.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -56,10 +57,15 @@ use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
 use crate::events::SessionListEntry;
+use crate::events::PlanStep;
+use crate::events::PlanStepStatus;
 use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
+use crate::exec_cell::CommandOutput;
+use crate::exec_cell::ExecCell;
+use crate::exec_cell::new_active_exec_command;
 use crate::exec_cell::truncated_tool_output_preview;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
@@ -68,6 +74,7 @@ use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
 use crate::render::renderable::Renderable;
+use crate::render::line_utils::prefix_lines;
 use crate::slash_command::SlashCommand;
 use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
 use crate::streaming::chunking::AdaptiveChunkingPolicy;
@@ -78,6 +85,8 @@ use crate::theme::ThemeSet;
 use crate::tool_result_cell::ToolResultCell;
 use crate::tui::frame_requester::FrameRequester;
 use devo_utils::ansi_escape::ansi_escape_line;
+use devo_utils::shell_command::parse_command::parse_command;
+use devo_protocol::{SessionHistoryItem, SessionHistoryMetadata, SessionPlanStepStatus};
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -204,6 +213,7 @@ struct ActiveToolCall {
     tool_use_id: String,
     title: String,
     lines: Vec<Line<'static>>,
+    exec_like: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,6 +360,7 @@ pub(crate) struct ChatWidget {
     prompt_token_estimate: usize,
     last_query_input_tokens: usize,
     last_query_total_tokens: usize,
+    last_plan_progress: Option<(usize, usize)>,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
     pending_approval: Option<PendingApprovalRequest>,
@@ -363,6 +374,19 @@ pub(crate) struct ChatWidget {
 }
 
 impl ChatWidget {
+    pub(crate) fn should_auto_show_git_diff(tool_title: &str, is_error: bool) -> bool {
+        if is_error {
+            return false;
+        }
+        let lower = tool_title.to_ascii_lowercase();
+        lower.contains("write ")
+            || lower.starts_with("write:")
+            || lower.contains("edit ")
+            || lower.starts_with("edit:")
+            || lower.contains("apply_patch")
+            || lower.contains("apply patch")
+    }
+
     fn can_change_configuration(&self) -> bool {
         !self.busy
     }
@@ -715,6 +739,172 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    fn rebuild_restored_session_history_from_rich_items(
+        &mut self,
+        history_items: &[SessionHistoryItem],
+        loaded_item_count: u64,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> bool {
+        self.history.clear();
+        self.next_history_flush_index = 0;
+
+        if history_items.is_empty() {
+            self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
+                format!(
+                    "switched to {session_id}; title: {}; loaded items: {loaded_item_count}",
+                    title.unwrap_or("(untitled)")
+                ),
+                None,
+            )));
+            self.frame_requester.schedule_frame();
+            return false;
+        }
+
+        let mut paired_result_by_call_id = HashMap::new();
+        for (index, item) in history_items.iter().enumerate() {
+            if matches!(
+                item.kind,
+                devo_protocol::SessionHistoryItemKind::ToolResult
+                    | devo_protocol::SessionHistoryItemKind::Error
+            ) && let Some(tool_call_id) = item.tool_call_id.as_deref()
+            {
+                paired_result_by_call_id
+                    .entry(tool_call_id.to_string())
+                    .or_insert(index);
+            }
+        }
+
+        let metadata_owned_ids: HashSet<String> = history_items
+            .iter()
+            .filter_map(|item| item.tool_call_id.clone().filter(|_| item.metadata.is_some()))
+            .collect();
+        let mut consumed_indexes = HashSet::new();
+
+        for (index, item) in history_items.iter().enumerate() {
+            if consumed_indexes.contains(&index) {
+                continue;
+            }
+
+            if let Some(metadata) = &item.metadata {
+                if let Some(tool_call_id) = item.tool_call_id.as_deref()
+                    && let Some(result_index) = paired_result_by_call_id.get(tool_call_id).copied()
+                {
+                    consumed_indexes.insert(result_index);
+                }
+                match metadata {
+                    SessionHistoryMetadata::PlanUpdate { explanation, steps } => {
+                        self.on_plan_updated(
+                            explanation.clone(),
+                            steps.iter().map(|step| crate::events::PlanStep {
+                                text: step.text.clone(),
+                                status: match step.status {
+                                    SessionPlanStepStatus::Pending => crate::events::PlanStepStatus::Pending,
+                                    SessionPlanStepStatus::InProgress => crate::events::PlanStepStatus::InProgress,
+                                    SessionPlanStepStatus::Completed => crate::events::PlanStepStatus::Completed,
+                                    SessionPlanStepStatus::Cancelled => crate::events::PlanStepStatus::Cancelled,
+                                },
+                            }).collect(),
+                        );
+                    }
+                    SessionHistoryMetadata::Edited { changes } => {
+                        self.add_history_entry_without_redraw(Box::new(
+                            history_cell::new_patch_event(changes.clone(), &self.session.cwd),
+                        ));
+                    }
+                    SessionHistoryMetadata::Explored { actions } => {
+                        self.restore_explored_history_item(item, actions.clone());
+                    }
+                }
+                continue;
+            }
+
+            if item.kind == devo_protocol::SessionHistoryItemKind::ToolCall
+                && let Some(tool_call_id) = item.tool_call_id.as_deref()
+            {
+                if metadata_owned_ids.contains(tool_call_id) {
+                    continue;
+                }
+                if let Some(result_index) = paired_result_by_call_id.get(tool_call_id).copied() {
+                    consumed_indexes.insert(result_index);
+                    let result_item = &history_items[result_index];
+                    let title_line =
+                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title));
+                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                        title_line,
+                        result_item.body.clone(),
+                        Self::tool_dot_prefix(),
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        false,
+                    )));
+                    continue;
+                }
+            }
+
+            match item.kind {
+                devo_protocol::SessionHistoryItemKind::User => {
+                    self.add_history_entry_without_redraw(Box::new(history_cell::new_user_prompt(
+                        item.body.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        self.active_accent_color(),
+                    )));
+                }
+                devo_protocol::SessionHistoryItemKind::Assistant => {
+                    self.add_markdown_history_without_redraw("Assistant", &item.body);
+                }
+                devo_protocol::SessionHistoryItemKind::Reasoning => {
+                    self.add_markdown_history_without_redraw("Reasoning", &item.body);
+                }
+                devo_protocol::SessionHistoryItemKind::ToolCall => {
+                    self.add_history_entry_without_redraw(Box::new(
+                        history_cell::AgentMessageCell::new_with_prefix(
+                            vec![Self::running_tool_line(&item.title)],
+                            self.dot_prefix(DotStatus::Pending),
+                            "  ",
+                            false,
+                        ),
+                    ));
+                }
+                devo_protocol::SessionHistoryItemKind::ToolResult
+                | devo_protocol::SessionHistoryItemKind::CommandExecution => {
+                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                        item.body.clone(),
+                        Self::tool_dot_prefix(),
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        false,
+                    )));
+                }
+                devo_protocol::SessionHistoryItemKind::Error => {
+                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                        item.body.clone(),
+                        self.failed_dot_prefix(),
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        false,
+                    )));
+                }
+                devo_protocol::SessionHistoryItemKind::TurnSummary => {
+                    self.add_history_entry_without_redraw(Box::new(
+                        history_cell::TurnSummaryCell::new(
+                            item.title.clone(),
+                            item.duration_ms,
+                            self.active_accent_color(),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        self.frame_requester.schedule_frame();
+        true
+    }
+
     fn clear_for_session_switch(&mut self) {
         self.history.clear();
         self.next_history_flush_index = 0;
@@ -835,6 +1025,7 @@ impl ChatWidget {
             prompt_token_estimate: 0,
             last_query_input_tokens: 0,
             last_query_total_tokens: 0,
+            last_plan_progress: None,
             queued_count: 0,
             active_turn_id: None,
             pending_approval: None,
@@ -1302,12 +1493,73 @@ impl ChatWidget {
             WorkerEvent::ToolCall {
                 tool_use_id,
                 summary,
+                parsed_commands,
             } => {
+                let command = crate::exec_command::split_command_string(&summary);
+                let parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
+                let exec_like = !parsed.is_empty()
+                    && parsed
+                        .iter()
+                        .all(|parsed| !matches!(parsed, devo_protocol::parse_command::ParsedCommand::Unknown { .. }));
+                if exec_like {
+                    if let Some(cell) = self
+                        .active_cell
+                        .as_mut()
+                        .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                        && let Some(grouped) = cell.with_added_call(
+                            tool_use_id.clone(),
+                            command.clone(),
+                            parsed.clone(),
+                            devo_protocol::protocol::ExecCommandSource::Agent,
+                            None,
+                        )
+                    {
+                        *cell = grouped;
+                        self.active_tool_calls.insert(
+                            tool_use_id.clone(),
+                            ActiveToolCall {
+                                tool_use_id,
+                                title: summary,
+                                lines: Vec::new(),
+                                exec_like: true,
+                            },
+                        );
+                        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                        self.frame_requester.schedule_frame();
+                        self.set_status_message("Tool started");
+                        return;
+                    }
+
+                    self.flush_active_cell();
+                    self.active_cell = Some(Box::new(new_active_exec_command(
+                        tool_use_id.clone(),
+                        command,
+                        parsed,
+                        devo_protocol::protocol::ExecCommandSource::Agent,
+                        None,
+                        true,
+                    )));
+                    self.active_tool_calls.insert(
+                        tool_use_id.clone(),
+                        ActiveToolCall {
+                            tool_use_id,
+                            title: summary,
+                            lines: Vec::new(),
+                            exec_like: true,
+                        },
+                    );
+                    self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                    self.frame_requester.schedule_frame();
+                    self.set_status_message("Tool started");
+                    return;
+                }
+
                 let title = summary;
                 let tool_call = ActiveToolCall {
                     tool_use_id: tool_use_id.clone(),
                     title: title.clone(),
                     lines: vec![Self::running_tool_line(&title)],
+                    exec_like: false,
                 };
                 self.active_tool_calls
                     .insert(tool_use_id.clone(), tool_call.clone());
@@ -1325,6 +1577,18 @@ impl ChatWidget {
             }
             WorkerEvent::ToolOutputDelta { tool_use_id, delta } => {
                 if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
+                    if tool_call.exec_like {
+                        if let Some(cell) = self
+                            .active_cell
+                            .as_mut()
+                            .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                            && cell.append_output(&tool_use_id, &delta)
+                        {
+                            self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                            self.frame_requester.schedule_frame();
+                        }
+                        return;
+                    }
                     let line = Line::from(delta.clone()).patch_style(Self::tool_text_style());
                     tool_call.lines.push(line);
                     self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
@@ -1354,9 +1618,50 @@ impl ChatWidget {
                 let resolved_title = self
                     .active_tool_calls
                     .remove(&tool_use_id)
-                    .map(|tool| tool.title)
-                    .filter(|tool_title| !tool_title.is_empty())
-                    .unwrap_or(title);
+                    .unwrap_or(ActiveToolCall {
+                        tool_use_id: tool_use_id.clone(),
+                        title,
+                        lines: Vec::new(),
+                        exec_like: false,
+                    });
+
+                if resolved_title.exec_like
+                    && let Some(cell) = self
+                        .active_cell
+                        .as_mut()
+                        .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                {
+                    let completed = cell.complete_call(
+                        &tool_use_id,
+                        CommandOutput {
+                            exit_code: if is_error { 1 } else { 0 },
+                            aggregated_output: preview.clone(),
+                            formatted_output: preview.clone(),
+                        },
+                        std::time::Duration::from_millis(0),
+                    );
+                    if completed {
+                        if cell.is_exploring_cell() {
+                            self.active_cell_revision =
+                                self.active_cell_revision.wrapping_add(1);
+                            self.frame_requester.schedule_frame();
+                        } else if cell.should_flush() {
+                            self.flush_active_cell();
+                        } else {
+                            self.active_cell_revision =
+                                self.active_cell_revision.wrapping_add(1);
+                            self.frame_requester.schedule_frame();
+                        }
+                        self.set_status_message(if is_error {
+                            "Tool returned an error"
+                        } else {
+                            "Tool completed"
+                        });
+                        return;
+                    }
+                }
+
+                let resolved_title = resolved_title.title;
 
                 let title_line =
                     (!resolved_title.is_empty()).then(|| Self::ran_tool_line(&resolved_title));
@@ -1376,6 +1681,33 @@ impl ChatWidget {
                 } else {
                     "Tool completed"
                 });
+                if Self::should_auto_show_git_diff(&resolved_title, is_error) {
+                    let tx = self.app_event_tx.clone();
+                    tokio::spawn(async move {
+                        let text = match get_git_diff().await {
+                            Ok((is_git_repo, diff_text)) => {
+                                if is_git_repo {
+                                    diff_text
+                                } else {
+                                    "`/diff` — _not inside a git repository_".to_string()
+                                }
+                            }
+                            Err(e) => format!("Failed to compute diff: {e}"),
+                        };
+                        tx.send(AppEvent::DiffResult(text));
+                    });
+                }
+            }
+            WorkerEvent::PlanUpdated { explanation, steps } => {
+                self.on_plan_updated(explanation, steps);
+                self.set_status_message("Plan updated");
+            }
+            WorkerEvent::PatchApplied { changes } => {
+                self.add_to_history(history_cell::new_patch_event(
+                    changes,
+                    &self.session.cwd,
+                ));
+                self.set_status_message("Patch applied");
             }
             WorkerEvent::ApprovalRequest {
                 session_id,
@@ -1608,6 +1940,7 @@ impl ChatWidget {
                 last_query_input_tokens,
                 prompt_token_estimate,
                 history_items,
+                rich_history_items,
                 loaded_item_count,
                 pending_texts,
             } => {
@@ -1628,12 +1961,19 @@ impl ChatWidget {
                 self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                self.rebuild_restored_session_history(
-                    history_items,
+                if !self.rebuild_restored_session_history_from_rich_items(
+                    &rich_history_items,
                     loaded_item_count,
                     &session_id,
                     title.as_deref(),
-                );
+                ) {
+                    self.rebuild_restored_session_history(
+                        history_items,
+                        loaded_item_count,
+                        &session_id,
+                        title.as_deref(),
+                    );
+                }
                 // Restore pending queue state from the resumed session
                 self.queued_count = pending_texts.len();
                 self.bottom_pane.clear_pending_cells();
@@ -1700,6 +2040,85 @@ impl ChatWidget {
                 self.set_status_message("Steer accepted");
             }
         }
+    }
+
+    fn on_plan_updated(&mut self, explanation: Option<String>, steps: Vec<PlanStep>) {
+        let total = steps.len();
+        let completed = steps
+            .iter()
+            .filter(|step| matches!(step.status, PlanStepStatus::Completed))
+            .count();
+        self.last_plan_progress = (total > 0).then_some((completed, total));
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+                " ".into(),
+                "Updated Plan".bold(),
+            ]),
+        ];
+        if let Some(explanation) = explanation
+            && !explanation.trim().is_empty()
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from(explanation.italic()));
+            lines.push(Line::from(""));
+        }
+        for step in steps {
+            let (prefix, style) = match step.status {
+                PlanStepStatus::Completed => ("✔ ", Style::default().green()),
+                PlanStepStatus::InProgress => ("→ ", Style::default().cyan()),
+                PlanStepStatus::Pending => ("□ ", Style::default().dim()),
+                PlanStepStatus::Cancelled => ("✗ ", Style::default().red()),
+            };
+            lines.extend(prefix_lines(
+                vec![Line::from(Span::styled(step.text, style))],
+                Span::styled(format!("  {prefix}"), style),
+                Span::from("    "),
+            ));
+        }
+        if !lines.is_empty() {
+            self.add_to_history(PlainHistoryCell::new(lines));
+        }
+        self.frame_requester.schedule_frame();
+    }
+
+    fn restore_explored_history_item(
+        &mut self,
+        item: &SessionHistoryItem,
+        actions: Vec<devo_protocol::parse_command::ParsedCommand>,
+    ) {
+        let command = item.title.clone();
+        let command_tokens = crate::exec_command::split_command_string(&command);
+        if let Some(cell) = self
+            .history
+            .last_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+            && let Some(grouped) = cell.with_added_call(
+                item.tool_call_id
+                    .clone()
+                    .unwrap_or_else(|| "restored".to_string()),
+                command_tokens.clone(),
+                actions.clone(),
+                devo_protocol::protocol::ExecCommandSource::Agent,
+                None,
+            )
+        {
+            *cell = grouped;
+            return;
+        }
+
+        let exec = new_active_exec_command(
+            item.tool_call_id
+                .clone()
+                .unwrap_or_else(|| "restored".to_string()),
+            command_tokens,
+            actions,
+            devo_protocol::protocol::ExecCommandSource::Agent,
+            None,
+            false,
+        );
+        self.add_history_entry_without_redraw(Box::new(exec));
     }
 
     pub(crate) fn submit_text(&mut self, text: String) {
@@ -2737,6 +3156,16 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    fn flush_active_cell(&mut self) {
+        if let Some(active) = self.active_cell.take() {
+            self.add_history_entry_without_redraw(active);
+        }
+    }
+
+    fn bump_active_cell_revision(&mut self) {
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+    }
+
     /// Pop the oldest pending cell from the bottom pane and add it to history
     /// as a normal user input cell.
     fn unqueue_oldest_pending(&mut self) {
@@ -2769,6 +3198,14 @@ impl ChatWidget {
         self.active_cell
             .as_ref()
             .map(|cell| cell.transcript_lines(width))
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_cell_display_lines_for_test(&self, width: u16) -> Vec<Line<'static>> {
+        self.active_cell
+            .as_ref()
+            .map(|cell| cell.display_lines(width))
             .unwrap_or_default()
     }
 
@@ -2847,6 +3284,11 @@ impl ChatWidget {
         self.status_message = message.into();
         self.sync_bottom_pane_summary();
         self.frame_requester.schedule_frame();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_plan_progress_for_test(&self) -> Option<(usize, usize)> {
+        self.last_plan_progress
     }
 
     pub(crate) fn active_viewport_lines_for_test(&self, width: u16) -> Vec<Line<'static>> {

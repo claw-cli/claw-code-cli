@@ -101,7 +101,6 @@ pub fn tool_summary(name: &str, input: &serde_json::Value, cwd: &Path) -> String
             let desc = input["description"].as_str().unwrap_or("");
             format!("task: {desc}")
         }
-        "todowrite" => "todowrite".to_string(),
         "lsp" => {
             let path = input["filePath"].as_str().unwrap_or("");
             let rel = make_relative(cwd, path);

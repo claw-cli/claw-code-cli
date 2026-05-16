@@ -42,7 +42,7 @@ pub fn create_default_tool_registry() -> registry::ToolRegistry {
 mod tests {
     use super::*;
 
-    fn expected_tool_names_default() -> [&'static str; 17] {
+    fn expected_tool_names_default() -> [&'static str; 16] {
         [
             "bash",
             "read",
@@ -52,7 +52,6 @@ mod tests {
             "invalid",
             "question",
             "task",
-            "todowrite",
             "webfetch",
             "websearch",
             "skill",

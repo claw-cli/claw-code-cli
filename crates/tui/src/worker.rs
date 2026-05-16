@@ -49,8 +49,12 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
 use devo_server::TurnSteerParams;
+use devo_protocol::SessionHistoryMetadata;
+use devo_protocol::SessionPlanStepStatus;
 
 use crate::app_command::InputHistoryDirection;
+use crate::events::PlanStep;
+use crate::events::PlanStepStatus;
 use crate::events::SessionListEntry;
 use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
@@ -743,6 +747,7 @@ async fn run_worker_inner(
                                         .unwrap_or(0),
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
+                                    rich_history_items: result.history_items.clone(),
                                     loaded_item_count: result.loaded_item_count,
                                     pending_texts: result.pending_texts,
                                 });
@@ -857,6 +862,7 @@ async fn run_worker_inner(
                                         .unwrap_or(0),
                                     prompt_token_estimate: result.session.prompt_token_estimate,
                                     history_items: project_history_items(&result.history_items),
+                                    rich_history_items: result.history_items.clone(),
                                     loaded_item_count: result.loaded_item_count,
                                     pending_texts: result.pending_texts,
                                 });
@@ -936,6 +942,7 @@ async fn run_worker_inner(
                                                 .unwrap_or(0),
                                             prompt_token_estimate: resumed.session.prompt_token_estimate,
                                             history_items: project_history_items(&resumed.history_items),
+                                            rich_history_items: resumed.history_items.clone(),
                                             loaded_item_count: resumed.loaded_item_count,
                                             pending_texts: resumed.pending_texts,
                                         });
@@ -1188,6 +1195,7 @@ async fn run_worker_inner(
                                                 let _ = event_tx.send(WorkerEvent::ToolCall {
                                                     tool_use_id: payload.tool_call_id,
                                                     summary: payload.command,
+                                                    parsed_commands: Some(payload.command_actions),
                                                 });
                                             }
                                         }
@@ -1199,8 +1207,9 @@ async fn run_worker_inner(
                                             {
                                                 let summary = summarize_tool_call(&payload);
                                                 let _ = event_tx.send(WorkerEvent::ToolCall {
-                                                    tool_use_id: payload.tool_call_id,
+                                                    tool_use_id: payload.tool_call_id.clone(),
                                                     summary,
+                                                    parsed_commands: Some(payload.command_actions),
                                                 });
                                             }
                                         }
@@ -1378,6 +1387,26 @@ async fn run_worker_inner(
                                             .as_ref()
                                             .map(|usage| usage.input_tokens as usize)
                                             .unwrap_or(last_query_input_tokens),
+                                    });
+                                }
+                            }
+                            "turn/plan/updated" => {
+                                if let ServerEvent::TurnPlanUpdated(payload) = event {
+                                    let steps = payload
+                                        .plan
+                                        .into_iter()
+                                        .filter_map(|step| {
+                                            Some(PlanStep {
+                                                text: step.step,
+                                                status: parse_plan_step_status(&step.status)?,
+                                            })
+                                        })
+                                        .collect::<Vec<_>>();
+                                    let _ = event_tx.send(WorkerEvent::PlanUpdated {
+                                        explanation: payload
+                                            .explanation
+                                            .filter(|text| !text.trim().is_empty()),
+                                        steps,
                                     });
                                 }
                             }
@@ -1605,6 +1634,17 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             let _ = payload;
         }
         ItemEnvelope {
+            item_kind: ItemKind::FileChange,
+            payload,
+            ..
+        } => {
+            let Ok(payload) = serde_json::from_value::<devo_server::FileChangePayload>(payload) else {
+                return;
+            };
+            let changes = payload.changes.into_iter().collect::<std::collections::HashMap<_, _>>();
+            let _ = event_tx.send(WorkerEvent::PatchApplied { changes });
+        }
+        ItemEnvelope {
             item_kind: ItemKind::ToolResult,
             payload,
             ..
@@ -1612,6 +1652,16 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             let Ok(payload) = serde_json::from_value::<ToolResultPayload>(payload) else {
                 return;
             };
+            // Compatibility fallback until all live file changes come through ItemKind::FileChange.
+            if let Some(patch_event) = patch_event_from_tool_result(&payload) {
+                let _ = event_tx.send(patch_event);
+                return;
+            }
+            // Compatibility fallback until all live plan updates come through turn/plan/updated.
+            if let Some(plan_event) = plan_event_from_tool_result(&payload) {
+                let _ = event_tx.send(plan_event);
+                return;
+            }
             let title = if payload.summary.is_empty() {
                 summarize_tool_result_title(payload.tool_name.as_deref(), payload.is_error)
             } else {
@@ -1712,6 +1762,43 @@ fn project_history_items(items: &[SessionHistoryItem]) -> Vec<TranscriptItem> {
 
     while index < items.len() {
         let item = &items[index];
+        if let Some(metadata) = &item.metadata {
+            match metadata {
+                SessionHistoryMetadata::PlanUpdate { explanation, steps } => {
+                    transcript.push(TranscriptItem::new(
+                        TranscriptItemKind::System,
+                        explanation.clone().unwrap_or_default(),
+                        steps
+                            .iter()
+                            .map(|step| {
+                                let status = match step.status {
+                                    SessionPlanStepStatus::Pending => "pending",
+                                    SessionPlanStepStatus::InProgress => "in_progress",
+                                    SessionPlanStepStatus::Completed => "completed",
+                                    SessionPlanStepStatus::Cancelled => "cancelled",
+                                };
+                                format!("{status}: {}", step.text)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ));
+                    index += 1;
+                    continue;
+                }
+                SessionHistoryMetadata::Explored { actions } => {
+                    let title = item.title.clone();
+                    let body = actions
+                        .iter()
+                        .map(|action| format!("{action:?}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    transcript.push(TranscriptItem::restored_tool_result(title, body));
+                    index += 1;
+                    continue;
+                }
+                SessionHistoryMetadata::Edited { .. } => {}
+            }
+        }
         if item.kind == SessionHistoryItemKind::ToolCall
             && let Some(tool_call_id) = item.tool_call_id.as_deref()
             && let Some(result_index) = paired_result_by_call_id.get(tool_call_id).copied()
@@ -1895,7 +1982,6 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_str)
             .map(|s| s.to_string()),
         "question" => None,
-        "todowrite" => None,
         "skill" => input
             .get("name")
             .and_then(serde_json::Value::as_str)
@@ -1934,6 +2020,93 @@ fn render_json_value_text(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) => text.clone(),
         _ => value.to_string(),
+    }
+}
+
+// Legacy compatibility fallback for sessions/items persisted before server-side
+// TurnPlanUpdated became the primary live source.
+fn plan_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
+    let tool_name = payload.tool_name.as_deref()?;
+    match tool_name {
+        "update_plan" => {
+            let plan = payload.content.get("plan")?.as_array()?;
+            let explanation = payload
+                .content
+                .get("explanation")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+                .filter(|text| !text.trim().is_empty());
+            let steps = plan
+                .iter()
+                .filter_map(|item| {
+                    let text = item.get("step")?.as_str()?.to_string();
+                    let status = parse_plan_step_status(
+                        item.get("status").and_then(serde_json::Value::as_str)?,
+                    )?;
+                    Some(PlanStep { text, status })
+                })
+                .collect::<Vec<_>>();
+            Some(WorkerEvent::PlanUpdated { explanation, steps })
+        }
+        _ => None,
+    }
+}
+
+// Legacy compatibility fallback for sessions/items persisted before server-side
+// FileChange became the primary live source.
+fn patch_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
+    if payload.tool_name.as_deref()? != "apply_patch" {
+        return None;
+    }
+    let files = payload.content.get("files")?.as_array()?;
+    let mut changes = std::collections::HashMap::new();
+    for file in files {
+        let path = std::path::PathBuf::from(file.get("path")?.as_str()?);
+        let kind = file.get("kind").and_then(serde_json::Value::as_str)?;
+        let additions = file
+            .get("additions")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let deletions = file
+            .get("deletions")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let change = match kind {
+            "add" => devo_protocol::protocol::FileChange::Add {
+                content: "\n".repeat(additions as usize),
+            },
+            "delete" => devo_protocol::protocol::FileChange::Delete {
+                content: "\n".repeat(deletions as usize),
+            },
+            "update" | "move" => devo_protocol::protocol::FileChange::Update {
+                unified_diff: payload
+                    .content
+                    .get("diff")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                move_path: file
+                    .get("move_path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(std::path::PathBuf::from),
+            },
+            _ => continue,
+        };
+        changes.insert(path, change);
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    Some(WorkerEvent::PatchApplied { changes })
+}
+
+fn parse_plan_step_status(status: &str) -> Option<PlanStepStatus> {
+    match status {
+        "pending" => Some(PlanStepStatus::Pending),
+        "in_progress" => Some(PlanStepStatus::InProgress),
+        "completed" => Some(PlanStepStatus::Completed),
+        "cancelled" => Some(PlanStepStatus::Cancelled),
+        _ => None,
     }
 }
 
@@ -2084,9 +2257,11 @@ fn map_join_error(error: JoinError) -> anyhow::Error {
 mod tests {
     use chrono::Utc;
     use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
 
     use devo_core::SessionId;
     use devo_core::SessionTitleState;
+    use devo_server::CommandExecutionPayload;
     use devo_server::SessionMetadata;
     use devo_server::SessionRuntimeStatus;
 
@@ -2096,10 +2271,14 @@ mod tests {
     use super::summarize_tool_call;
     use super::truncate_tool_output;
     use crate::events::SessionListEntry;
+    use crate::events::PlanStep;
+    use crate::events::PlanStepStatus;
     use crate::events::TranscriptItem;
     use crate::events::TranscriptItemKind;
     use crate::events::WorkerEvent;
     use devo_core::ItemId;
+    use devo_protocol::SessionHistoryMetadata;
+    use devo_protocol::SessionPlanStepStatus;
     use devo_server::ItemEnvelope;
     use devo_server::ItemEventPayload;
     use devo_server::ItemKind;
@@ -2116,6 +2295,7 @@ mod tests {
             parameters: serde_json::json!({
                 "command": "Get-Date -Format \"yyyy-MM-dd\""
             }),
+            command_actions: Vec::new(),
         };
 
         assert_eq!(
@@ -2222,6 +2402,133 @@ mod tests {
     }
 
     #[test]
+    fn completed_update_plan_tool_result_emits_plan_updated() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("update_plan".to_string()),
+                        content: serde_json::json!({
+                            "explanation": "Working through the task",
+                            "plan": [
+                                { "step": "Inspect code", "status": "completed" },
+                                { "step": "Patch bug", "status": "in_progress" }
+                            ]
+                        }),
+                        display_content: None,
+                        is_error: false,
+                        summary: "update_plan".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        assert_eq!(
+            event_rx.try_recv().expect("worker event"),
+            WorkerEvent::PlanUpdated {
+                explanation: Some("Working through the task".to_string()),
+                steps: vec![
+                    PlanStep {
+                        text: "Inspect code".to_string(),
+                        status: PlanStepStatus::Completed,
+                    },
+                    PlanStep {
+                        text: "Patch bug".to_string(),
+                        status: PlanStepStatus::InProgress,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn completed_apply_patch_tool_result_emits_patch_applied() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("apply_patch".to_string()),
+                        content: serde_json::json!({
+                            "diff": "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                            "files": [
+                                {
+                                    "path": "foo.txt",
+                                    "kind": "update",
+                                    "additions": 1,
+                                    "deletions": 1
+                                }
+                            ]
+                        }),
+                        display_content: None,
+                        is_error: false,
+                        summary: "apply_patch".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+            panic!("expected patch applied event");
+        };
+        assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
+    }
+
+    #[test]
+    fn command_execution_started_event_uses_server_command_actions() {
+        let payload = CommandExecutionPayload {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            command: "read crates/tui/src/chatwidget.rs".to_string(),
+            source: devo_protocol::protocol::ExecCommandSource::Agent,
+            command_actions: vec![devo_protocol::parse_command::ParsedCommand::Read {
+                cmd: "read crates/tui/src/chatwidget.rs".to_string(),
+                name: "chatwidget.rs".to_string(),
+                path: PathBuf::from("crates/tui/src/chatwidget.rs"),
+            }],
+            output: None,
+            is_error: false,
+        };
+
+        assert_eq!(
+            WorkerEvent::ToolCall {
+                tool_use_id: payload.tool_call_id.clone(),
+                summary: payload.command.clone(),
+                parsed_commands: Some(payload.command_actions.clone()),
+            },
+            WorkerEvent::ToolCall {
+                tool_use_id: payload.tool_call_id,
+                summary: payload.command,
+                parsed_commands: Some(payload.command_actions),
+            }
+        );
+    }
+
+
+    #[test]
     fn session_list_entries_keep_title_before_identifier() {
         let active_session_id = SessionId::new();
         let summary = SessionMetadata {
@@ -2307,6 +2614,7 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran powershell -Command \"Get-Date\"".to_string(),
                 body: String::new(),
+                metadata: None,
                 duration_ms: None,
             },
             SessionHistoryItem {
@@ -2314,6 +2622,7 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "2026-04-09".to_string(),
+                metadata: None,
                 duration_ms: None,
             },
         ];
@@ -2335,6 +2644,7 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran read a".to_string(),
                 body: String::new(),
+                metadata: None,
                 duration_ms: None,
             },
             SessionHistoryItem {
@@ -2342,6 +2652,7 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolCall,
                 title: "Ran read b".to_string(),
                 body: String::new(),
+                metadata: None,
                 duration_ms: None,
             },
             SessionHistoryItem {
@@ -2349,6 +2660,7 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "B".to_string(),
+                metadata: None,
                 duration_ms: None,
             },
             SessionHistoryItem {
@@ -2356,6 +2668,7 @@ mod tests {
                 kind: SessionHistoryItemKind::ToolResult,
                 title: "Tool output".to_string(),
                 body: "A".to_string(),
+                metadata: None,
                 duration_ms: None,
             },
         ];
@@ -2370,12 +2683,37 @@ mod tests {
     }
 
     #[test]
+    fn project_history_understands_plan_metadata() {
+        let items = vec![SessionHistoryItem {
+            tool_call_id: None,
+            kind: SessionHistoryItemKind::Assistant,
+            title: String::new(),
+            body: r#"{"explanation":"Do work","plan":[{"step":"Inspect","status":"completed"}]}"#
+                .to_string(),
+            metadata: Some(SessionHistoryMetadata::PlanUpdate {
+                explanation: Some("Do work".to_string()),
+                steps: vec![devo_protocol::SessionPlanStep {
+                    text: "Inspect".to_string(),
+                    status: SessionPlanStepStatus::Completed,
+                }],
+            }),
+            duration_ms: None,
+        }];
+
+        let projected = project_history_items(&items);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].kind, TranscriptItemKind::System);
+        assert!(projected[0].body.contains("completed: Inspect"));
+    }
+
+    #[test]
     fn project_history_restores_command_execution_items() {
         let items = vec![SessionHistoryItem {
             tool_call_id: Some("call-1".to_string()),
             kind: SessionHistoryItemKind::CommandExecution,
             title: "cargo test".to_string(),
             body: "ok".to_string(),
+            metadata: None,
             duration_ms: None,
         }];
 
@@ -2392,6 +2730,7 @@ mod tests {
             kind: SessionHistoryItemKind::Reasoning,
             title: String::new(),
             body: "thinking aloud".to_string(),
+            metadata: None,
             duration_ms: None,
         }];
 

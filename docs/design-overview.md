@@ -208,7 +208,6 @@ The first milestone should include at least:
 - web search (`websearch`)
 - sub-agent task dispatch (`task`)
 - interactive user questions (`question`)
-- structured task list management (`todo_write`)
 
 Tool execution must follow a stable lifecycle:
 

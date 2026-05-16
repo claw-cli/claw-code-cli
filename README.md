@@ -60,6 +60,7 @@
 
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
+- [Configuration](#%EF%B8%8F-configuration)
 - [FAQ](#-faq)
 - [Contributing](#-contributing)
 - [References](#-references)

@@ -2,10 +2,10 @@ use devo_core::{
     CommandExecutionItem, ContentBlock, Message, SessionRecord, TextItem, ToolCallItem,
     ToolResultItem, TurnItem, TurnRecord,
 };
+use devo_protocol::{SessionHistoryMetadata, SessionPlanStep, SessionPlanStepStatus};
+use devo_utils::shell_command::parse_command::parse_command;
 
-use crate::session::{
-    SessionHistoryItem, SessionHistoryItemKind, SessionMetadata, SessionRuntimeStatus,
-};
+use crate::session::{SessionHistoryItem, SessionHistoryItemKind, SessionMetadata, SessionRuntimeStatus};
 use crate::turn::TurnMetadata;
 
 /// Projects a canonical core session record into the API-visible session summary.
@@ -107,7 +107,6 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             ))
         }
         TurnItem::AgentMessage(TextItem { text })
-        | TurnItem::Plan(TextItem { text })
         | TurnItem::WebSearch(TextItem { text })
         | TurnItem::ImageGeneration(TextItem { text })
         | TurnItem::HookPrompt(TextItem { text }) => Some(SessionHistoryItem::new(
@@ -116,6 +115,19 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             String::new(),
             text.clone(),
         )),
+        TurnItem::Plan(TextItem { text }) => {
+            let metadata = parse_plan_history_metadata(text);
+            let mut item = SessionHistoryItem::new(
+                None,
+                SessionHistoryItemKind::Assistant,
+                String::new(),
+                text.clone(),
+            );
+            if let Some(metadata) = metadata {
+                item = item.with_metadata(metadata);
+            }
+            Some(item)
+        }
         TurnItem::ContextCompaction(TextItem { .. }) => None,
         TurnItem::Reasoning(TextItem { text }) => Some(SessionHistoryItem::new(
             None,
@@ -127,12 +139,56 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             tool_call_id,
             tool_name,
             input,
-        }) => Some(SessionHistoryItem::new(
-            Some(tool_call_id.clone()),
-            SessionHistoryItemKind::ToolCall,
-            summarize_tool_call(tool_name, input),
-            String::new(),
-        )),
+        }) => {
+            let title = summarize_tool_call(tool_name, input);
+            let mut item = SessionHistoryItem::new(
+                Some(tool_call_id.clone()),
+                SessionHistoryItemKind::ToolCall,
+                title.clone(),
+                String::new(),
+            );
+            if matches!(tool_name.as_str(), "read" | "glob" | "grep") {
+                let parsed = match tool_name.as_str() {
+                    "read" => {
+                        let path = input
+                            .get("filePath")
+                            .or_else(|| input.get("path"))
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.to_string());
+                        vec![devo_protocol::parse_command::ParsedCommand::Read {
+                            cmd: title.clone(),
+                            name,
+                            path: std::path::PathBuf::from(path),
+                        }]
+                    }
+                    "glob" => vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
+                        cmd: title.clone(),
+                        path: input
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned),
+                    }],
+                    "grep" => vec![devo_protocol::parse_command::ParsedCommand::Search {
+                        cmd: title.clone(),
+                        query: input
+                            .get("pattern")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned),
+                        path: input
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned),
+                    }],
+                    _ => Vec::new(),
+                };
+                item = item.with_metadata(SessionHistoryMetadata::Explored { actions: parsed });
+            }
+            Some(item)
+        }
         TurnItem::ToolResult(ToolResultItem {
             tool_call_id,
             tool_name,
@@ -140,38 +196,57 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             display_content,
             is_error,
             ..
-        }) => Some(SessionHistoryItem::new(
-            Some(tool_call_id.clone()),
-            if *is_error {
-                SessionHistoryItemKind::Error
-            } else {
-                SessionHistoryItemKind::ToolResult
-            },
-            summarize_tool_result(tool_name.as_deref(), *is_error),
-            display_content.clone().unwrap_or_else(|| match output {
-                serde_json::Value::String(text) => text.clone(),
-                other => other.to_string(),
-            }),
-        )),
+        }) => {
+            let mut item = SessionHistoryItem::new(
+                Some(tool_call_id.clone()),
+                if *is_error {
+                    SessionHistoryItemKind::Error
+                } else {
+                    SessionHistoryItemKind::ToolResult
+                },
+                summarize_tool_result(tool_name.as_deref(), *is_error),
+                display_content.clone().unwrap_or_else(|| match output {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                }),
+            );
+            if !*is_error
+                && tool_name.as_deref() == Some("update_plan")
+                && let Some(metadata) = match output {
+                    serde_json::Value::String(text) => parse_plan_history_metadata(text),
+                    other => parse_plan_history_metadata(&other.to_string()),
+                }
+            {
+                item = item.with_metadata(metadata);
+            }
+            Some(item)
+        }
         TurnItem::CommandExecution(CommandExecutionItem {
             tool_call_id,
             command,
             output,
             is_error,
             ..
-        }) => Some(SessionHistoryItem::new(
-            Some(tool_call_id.clone()),
-            if *is_error {
-                SessionHistoryItemKind::Error
-            } else {
-                SessionHistoryItemKind::CommandExecution
-            },
-            command.clone(),
-            match output {
-                serde_json::Value::String(text) => text.clone(),
-                other => other.to_string(),
-            },
-        )),
+        }) => {
+            let parsed = parse_command(std::slice::from_ref(command));
+            let mut item = SessionHistoryItem::new(
+                Some(tool_call_id.clone()),
+                if *is_error {
+                    SessionHistoryItemKind::Error
+                } else {
+                    SessionHistoryItemKind::CommandExecution
+                },
+                command.clone(),
+                match output {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                },
+            );
+            if !parsed.is_empty() {
+                item = item.with_metadata(SessionHistoryMetadata::Explored { actions: parsed });
+            }
+            Some(item)
+        }
         TurnItem::ToolProgress(_)
         | TurnItem::ApprovalRequest(_)
         | TurnItem::ApprovalDecision(_) => None,
@@ -186,10 +261,38 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
                 kind: SessionHistoryItemKind::TurnSummary,
                 title: model_name,
                 body: String::new(),
+                metadata: None,
                 duration_ms: duration_secs,
             })
         }
     }
+}
+
+
+fn parse_plan_history_metadata(text: &str) -> Option<SessionHistoryMetadata> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let explanation = value
+        .get("explanation")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .filter(|text| !text.trim().is_empty());
+    let steps = value
+        .get("plan")
+        .and_then(serde_json::Value::as_array)?
+        .iter()
+        .filter_map(|item| {
+            let text = item.get("step")?.as_str()?.to_string();
+            let status = match item.get("status").and_then(serde_json::Value::as_str)? {
+                "pending" => SessionPlanStepStatus::Pending,
+                "in_progress" => SessionPlanStepStatus::InProgress,
+                "completed" => SessionPlanStepStatus::Completed,
+                "cancelled" => SessionPlanStepStatus::Cancelled,
+                _ => return None,
+            };
+            Some(SessionPlanStep { text, status })
+        })
+        .collect::<Vec<_>>();
+    Some(SessionHistoryMetadata::PlanUpdate { explanation, steps })
 }
 
 impl SessionProjector for DefaultProjection {
@@ -278,7 +381,8 @@ mod tests {
 
     use super::history_item_from_turn_item;
     use crate::session::SessionHistoryItemKind;
-    use devo_core::ToolResultItem;
+    use devo_core::{CommandExecutionItem, TextItem, ToolCallItem, ToolResultItem};
+    use devo_protocol::{SessionHistoryMetadata, SessionPlanStepStatus};
     use devo_core::TurnItem;
 
     #[test]
@@ -309,5 +413,92 @@ mod tests {
 
         let history_item = history_item_from_turn_item(&item).expect("history item");
         assert_eq!(history_item.body, "<content>canonical</content>");
+    }
+
+    #[test]
+    fn plan_turn_item_emits_structured_plan_metadata() {
+        let item = TurnItem::Plan(TextItem {
+            text: r#"{"explanation":"Do work","plan":[{"step":"Inspect","status":"completed"},{"step":"Patch","status":"in_progress"}]}"#.to_string(),
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        let SessionHistoryMetadata::PlanUpdate { explanation, steps } =
+            history_item.metadata.expect("plan metadata")
+        else {
+            panic!("expected plan update metadata");
+        };
+        assert_eq!(explanation, Some("Do work".to_string()));
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, SessionPlanStepStatus::Completed);
+        assert_eq!(steps[1].status, SessionPlanStepStatus::InProgress);
+    }
+
+    #[test]
+    fn command_execution_turn_item_emits_explored_metadata() {
+        let item = TurnItem::CommandExecution(CommandExecutionItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "exec_command".to_string(),
+            command: "cat foo.txt".to_string(),
+            input: serde_json::json!({}),
+            output: serde_json::Value::String("hello".to_string()),
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        match history_item.metadata.expect("explored metadata") {
+            SessionHistoryMetadata::Explored { actions } => {
+                assert!(!actions.is_empty(), "expected parsed command actions");
+            }
+            other => panic!("unexpected metadata: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_tool_call_turn_item_emits_explored_metadata() {
+        let item = TurnItem::ToolCall(ToolCallItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: "read".to_string(),
+            input: serde_json::json!({
+                "filePath": "crates/tui/src/chatwidget.rs"
+            }),
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        match history_item.metadata.expect("explored metadata") {
+            SessionHistoryMetadata::Explored { actions } => {
+                assert!(matches!(
+                    &actions[0],
+                    devo_protocol::parse_command::ParsedCommand::Read { name, .. }
+                    if name == "chatwidget.rs"
+                ));
+            }
+            other => panic!("unexpected metadata: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_plan_tool_result_emits_plan_metadata() {
+        let item = TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("update_plan".to_string()),
+            output: serde_json::json!({
+                "explanation": "",
+                "plan": [
+                    { "step": "创建一个示例计划，展示 plan 工具的使用方式", "status": "in_progress" },
+                    { "step": "再添加一个已完成步骤作为对比", "status": "completed" },
+                    { "step": "最后留一个待处理步骤", "status": "pending" }
+                ]
+            }),
+            display_content: None,
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        let SessionHistoryMetadata::PlanUpdate { steps, .. } =
+            history_item.metadata.expect("plan metadata")
+        else {
+            panic!("expected plan update metadata");
+        };
+        assert_eq!(steps.len(), 3);
     }
 }
