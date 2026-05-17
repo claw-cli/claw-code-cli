@@ -6,7 +6,9 @@ use devo_protocol::{SessionHistoryMetadata, SessionPlanStep, SessionPlanStepStat
 use devo_utils::git_op::extract_paths_from_patch;
 use devo_utils::shell_command::parse_command::parse_command;
 
-use crate::session::{SessionHistoryItem, SessionHistoryItemKind, SessionMetadata, SessionRuntimeStatus};
+use crate::session::{
+    SessionHistoryItem, SessionHistoryItemKind, SessionMetadata, SessionRuntimeStatus,
+};
 use crate::turn::TurnMetadata;
 
 /// Projects a canonical core session record into the API-visible session summary.
@@ -275,7 +277,6 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
     }
 }
 
-
 fn parse_plan_history_metadata(text: &str) -> Option<SessionHistoryMetadata> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     let explanation = value
@@ -445,9 +446,9 @@ mod tests {
 
     use super::history_item_from_turn_item;
     use crate::session::SessionHistoryItemKind;
+    use devo_core::TurnItem;
     use devo_core::{CommandExecutionItem, TextItem, ToolCallItem, ToolResultItem};
     use devo_protocol::{SessionHistoryMetadata, SessionPlanStepStatus};
-    use devo_core::TurnItem;
 
     #[test]
     fn history_projection_prefers_tool_result_display_content() {
@@ -644,8 +645,9 @@ mod tests {
         else {
             panic!("expected edited metadata");
         };
-        let devo_protocol::protocol::FileChange::Update { unified_diff, .. } =
-            changes.get(&std::path::PathBuf::from("foo.txt")).expect("update change")
+        let devo_protocol::protocol::FileChange::Update { unified_diff, .. } = changes
+            .get(&std::path::PathBuf::from("foo.txt"))
+            .expect("update change")
         else {
             panic!("expected update change");
         };

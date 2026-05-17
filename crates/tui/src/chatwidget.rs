@@ -1532,6 +1532,7 @@ impl ChatWidget {
 
     pub(crate) fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
+            WorkerEvent::SessionActivated { .. } => {}
             WorkerEvent::TurnStarted {
                 model,
                 thinking,

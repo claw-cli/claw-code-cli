@@ -611,7 +611,8 @@ impl TranscriptOverlay {
 
     fn sync_selected_user_highlight(&mut self) {
         for (idx, cell) in self.cells.iter_mut().enumerate() {
-            cell.is_selected_user = cell.user_message.is_some() && self.selected_user_index == Some(idx);
+            cell.is_selected_user =
+                cell.user_message.is_some() && self.selected_user_index == Some(idx);
         }
         self.rebuild_renderables();
     }
@@ -1035,7 +1036,9 @@ mod tests {
         );
 
         overlay.begin_backtrack_preview();
-        let selected = overlay.selected_user_message().expect("selected latest user");
+        let selected = overlay
+            .selected_user_message()
+            .expect("selected latest user");
         assert_eq!(selected.text, "user 2");
     }
 

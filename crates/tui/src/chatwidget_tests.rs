@@ -4,7 +4,6 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
-use ratatui::text::Line;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
@@ -16,6 +15,7 @@ use devo_protocol::SessionId;
 use devo_protocol::ThinkingCapability;
 use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
+use ratatui::text::Line;
 use tokio::sync::mpsc;
 
 use crate::app_command::AppCommand;
@@ -141,7 +141,8 @@ fn trim_trailing_blank_scrollback_lines(
 }
 
 fn line_texts(lines: Vec<ratatui::text::Line<'static>>) -> Vec<String> {
-    lines.into_iter()
+    lines
+        .into_iter()
         .map(|line| {
             line.spans
                 .into_iter()
@@ -180,7 +181,11 @@ fn user_prompt_multiline_has_no_extra_blank_prefix_rows_and_consistent_prefix_te
         .filter(|line| line.starts_with("▌ "))
         .collect();
 
-    assert_eq!(user_lines.len(), 5, "unexpected user prompt rows: {user_lines:?}");
+    assert_eq!(
+        user_lines.len(),
+        5,
+        "unexpected user prompt rows: {user_lines:?}"
+    );
     assert_eq!(user_lines[0], "▌ ");
     assert_eq!(user_lines[1], "▌ line one");
     assert_eq!(user_lines[2], "▌ line two");
@@ -197,12 +202,14 @@ fn restore_user_message_to_composer_restores_text() {
     };
     let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
-    widget.restore_user_message_to_composer(crate::chatwidget::UserMessage::from(
-        "previous message",
-    ));
+    widget
+        .restore_user_message_to_composer(crate::chatwidget::UserMessage::from("previous message"));
 
     let rendered = rendered_rows(&widget, 80, 12).join("\n");
-    assert!(rendered.contains("previous message"), "composer should show restored text:\n{rendered}");
+    assert!(
+        rendered.contains("previous message"),
+        "composer should show restored text:\n{rendered}"
+    );
 }
 
 #[test]
@@ -242,15 +249,15 @@ fn backtrack_preview_restore_latest_user_message() {
     widget.submit_text("second message".to_string());
     let _ = widget.drain_scrollback_lines(80);
 
-    let mut overlay = crate::pager_overlay::Overlay::new_transcript(
-        widget.transcript_overlay_cells(80),
-        80,
-    );
+    let mut overlay =
+        crate::pager_overlay::Overlay::new_transcript(widget.transcript_overlay_cells(80), 80);
     let crate::pager_overlay::Overlay::Transcript(transcript) = &mut overlay else {
         panic!("expected transcript overlay");
     };
     transcript.begin_backtrack_preview();
-    let selected = transcript.selected_user_message().expect("selected latest user");
+    let selected = transcript
+        .selected_user_message()
+        .expect("selected latest user");
     widget.restore_user_message_to_composer(selected);
 
     let rendered = rendered_rows(&widget, 80, 12).join("\n");
@@ -274,16 +281,16 @@ fn backtrack_preview_can_restore_previous_and_next_user_messages() {
     widget.submit_text("second message".to_string());
     let _ = widget.drain_scrollback_lines(80);
 
-    let mut overlay = crate::pager_overlay::Overlay::new_transcript(
-        widget.transcript_overlay_cells(80),
-        80,
-    );
+    let mut overlay =
+        crate::pager_overlay::Overlay::new_transcript(widget.transcript_overlay_cells(80), 80);
     let crate::pager_overlay::Overlay::Transcript(transcript) = &mut overlay else {
         panic!("expected transcript overlay");
     };
     transcript.begin_backtrack_preview();
     transcript.select_prev_user();
-    let previous = transcript.selected_user_message().expect("selected previous user");
+    let previous = transcript
+        .selected_user_message()
+        .expect("selected previous user");
     widget.restore_user_message_to_composer(previous);
     let rendered_prev = rendered_rows(&widget, 80, 12).join("\n");
     assert!(
@@ -292,7 +299,9 @@ fn backtrack_preview_can_restore_previous_and_next_user_messages() {
     );
 
     transcript.select_next_user();
-    let next = transcript.selected_user_message().expect("selected next user");
+    let next = transcript
+        .selected_user_message()
+        .expect("selected next user");
     widget.restore_user_message_to_composer(next);
     let rendered_next = rendered_rows(&widget, 80, 12).join("\n");
     assert!(
@@ -311,9 +320,13 @@ fn restoring_previous_message_truncates_later_transcript_history() {
     let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
 
     widget.submit_text("first message".to_string());
-    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![Line::from("assistant 1")]));
+    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        Line::from("assistant 1"),
+    ]));
     widget.submit_text("second message".to_string());
-    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![Line::from("assistant 2")]));
+    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        Line::from("assistant 2"),
+    ]));
     let _ = widget.drain_scrollback_lines(80);
 
     widget.truncate_history_to_user_turn_count(1);
@@ -350,7 +363,6 @@ fn esc_backtrack_hint_is_shown_before_restore() {
         "expected esc backtrack hint before opening overlay:\n{rendered}"
     );
 }
-
 
 #[test]
 fn resume_command_opens_loading_browser_immediately() {
@@ -421,9 +433,18 @@ fn resume_browser_clips_sessions_to_viewport_height() {
     let blob = rows.join("\n");
     assert!(blob.contains("Session 0"));
     assert!(blob.contains("Session 1"));
-    assert!(!blob.contains("Session 2"), "rows should be clipped to viewport:\n{blob}");
-    assert!(!blob.contains("Session 3"), "rows should be clipped to viewport:\n{blob}");
-    assert!(blob.contains("↓ more"), "expected lower overflow indicator:\n{blob}");
+    assert!(
+        !blob.contains("Session 2"),
+        "rows should be clipped to viewport:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Session 3"),
+        "rows should be clipped to viewport:\n{blob}"
+    );
+    assert!(
+        blob.contains("↓ more"),
+        "expected lower overflow indicator:\n{blob}"
+    );
 }
 
 #[test]
@@ -478,9 +499,18 @@ fn resume_browser_keeps_selection_visible_when_navigating_down() {
 
     let rows = rendered_rows(&widget, 80, 10);
     let blob = rows.join("\n");
-    assert!(blob.contains("Session 11"), "selected tail item should be visible:\n{blob}");
-    assert!(!blob.contains("Session 0"), "viewport should have scrolled away from the head:\n{blob}");
-    assert!(blob.contains("↑ more"), "expected upper overflow indicator after scrolling:\n{blob}");
+    assert!(
+        blob.contains("Session 11"),
+        "selected tail item should be visible:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Session 0"),
+        "viewport should have scrolled away from the head:\n{blob}"
+    );
+    assert!(
+        blob.contains("↑ more"),
+        "expected upper overflow indicator after scrolling:\n{blob}"
+    );
 }
 
 #[test]
@@ -604,8 +634,14 @@ fn resume_browser_shows_position_and_scroll_progress() {
     widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
 
     let blob = rendered_rows(&widget, 80, 10).join("\n");
-    assert!(blob.contains("12 / 12"), "expected position label in resume header:\n{blob}");
-    assert!(blob.contains("100%"), "expected scroll percent in resume header:\n{blob}");
+    assert!(
+        blob.contains("12 / 12"),
+        "expected position label in resume header:\n{blob}"
+    );
+    assert!(
+        blob.contains("100%"),
+        "expected scroll percent in resume header:\n{blob}"
+    );
 }
 
 #[test]
@@ -618,13 +654,17 @@ fn resume_browser_title_uses_ascii_ellipsis_when_too_long() {
     let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
     widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
         session_id: SessionId::new(),
-        title: "This is a very long session title that should be truncated in resume browser".to_string(),
+        title: "This is a very long session title that should be truncated in resume browser"
+            .to_string(),
         updated_at: "2026-05-17 10:00".to_string(),
         is_active: true,
     }]);
 
     let blob = rendered_rows(&widget, 54, 10).join("\n");
-    assert!(blob.contains("..."), "expected ASCII ellipsis truncation in title column:\n{blob}");
+    assert!(
+        blob.contains("..."),
+        "expected ASCII ellipsis truncation in title column:\n{blob}"
+    );
 }
 
 #[test]
@@ -643,7 +683,10 @@ fn resume_browser_dash_only_title_is_truncated_with_ascii_ellipsis() {
     }]);
 
     let blob = rendered_rows(&widget, 54, 10).join("\n");
-    assert!(blob.contains("..."), "expected dash-only title to be truncated with ASCII ellipsis:\n{blob}");
+    assert!(
+        blob.contains("..."),
+        "expected dash-only title to be truncated with ASCII ellipsis:\n{blob}"
+    );
 }
 
 #[test]
@@ -662,8 +705,14 @@ fn resume_browser_cjk_title_truncates_by_display_width() {
     }]);
 
     let blob = rendered_rows(&widget, 54, 10).join("\n");
-    assert!(blob.contains("..."), "expected CJK title truncation to include ASCII ellipsis:\n{blob}");
-    assert!(!blob.contains("是否正确"), "expected tail of long CJK title to be truncated:\n{blob}");
+    assert!(
+        blob.contains("..."),
+        "expected CJK title truncation to include ASCII ellipsis:\n{blob}"
+    );
+    assert!(
+        !blob.contains("是否正确"),
+        "expected tail of long CJK title to be truncated:\n{blob}"
+    );
 }
 
 #[test]
@@ -722,7 +771,10 @@ fn resume_browser_cjk_and_ascii_titles_keep_session_id_column_aligned() {
     }
     let cjk_col = cjk_pos.expect("cjk session id column");
     let ascii_col = ascii_pos.expect("ascii session id column");
-    assert_eq!(cjk_col, ascii_col, "expected Session ID column alignment across CJK and ASCII rows");
+    assert_eq!(
+        cjk_col, ascii_col,
+        "expected Session ID column alignment across CJK and ASCII rows"
+    );
 }
 
 #[test]
@@ -1340,10 +1392,22 @@ fn plan_update_updates_progress_and_history() {
 
     let lines = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
     assert!(lines.iter().any(|line| line.contains("Updated Plan")));
-    assert!(lines.iter().any(|line| line.contains("Working through checklist")));
-    assert!(lines.iter().any(|line| line.contains("Inspect implementation")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Working through checklist"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Inspect implementation"))
+    );
     assert!(lines.iter().any(|line| line.contains("Patch runtime")));
-    assert!(lines.iter().any(|line| line.contains("  ✔ Inspect implementation")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("  ✔ Inspect implementation"))
+    );
     assert!(lines.iter().any(|line| line.contains("  → Patch runtime")));
 }
 
@@ -1445,7 +1509,10 @@ fn session_switch_restores_explored_metadata_into_history() {
         blob.contains("Explored") || blob.contains("Exploring"),
         "expected explored block after resume, got:\n{blob}"
     );
-    assert!(blob.contains("Read foo.txt"), "expected read summary, got:\n{blob}");
+    assert!(
+        blob.contains("Read foo.txt"),
+        "expected read summary, got:\n{blob}"
+    );
 }
 
 #[test]
@@ -1564,7 +1631,10 @@ fn session_switch_merges_consecutive_explored_items() {
         1,
         "expected one merged explored block, got:\n{blob}"
     );
-    assert!(blob.contains("Read worker.rs"), "expected read entry, got:\n{blob}");
+    assert!(
+        blob.contains("Read worker.rs"),
+        "expected read entry, got:\n{blob}"
+    );
     assert!(
         blob.contains("Search command_actions in crates/tui/src/worker.rs"),
         "expected search entry, got:\n{blob}"
@@ -1608,8 +1678,14 @@ fn session_switch_restores_error_via_tool_result_cell_style() {
     });
 
     let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
-    assert!(blob.contains("Ran bash error"), "expected tool-result style title, got:\n{blob}");
-    assert!(blob.contains("permission denied"), "expected tool-result body, got:\n{blob}");
+    assert!(
+        blob.contains("Ran bash error"),
+        "expected tool-result style title, got:\n{blob}"
+    );
+    assert!(
+        blob.contains("permission denied"),
+        "expected tool-result body, got:\n{blob}"
+    );
 }
 
 #[test]
@@ -1666,7 +1742,10 @@ fn live_and_resume_error_share_same_rendering_chain() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert_eq!(live_blob, resume_blob, "live and resume error cells diverged");
+    assert_eq!(
+        live_blob, resume_blob,
+        "live and resume error cells diverged"
+    );
 }
 
 #[test]
@@ -3529,10 +3608,12 @@ fn glob_tool_call_renders_as_explored_group_in_viewport() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "glob **/Cargo.toml in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/Cargo.toml in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/Cargo.toml in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
         tool_use_id: "tool-1".to_string(),
@@ -3555,7 +3636,10 @@ fn glob_tool_call_renders_as_explored_group_in_viewport() {
         .join("\n");
 
     assert!(display.contains("Explored") || display.contains("Exploring"));
-    assert!(display.contains("List crates"), "expected list summary, got:\n{display}");
+    assert!(
+        display.contains("List crates"),
+        "expected list summary, got:\n{display}"
+    );
 }
 
 #[test]
@@ -3624,10 +3708,12 @@ fn merged_explored_group_becomes_explored_after_all_results_arrive() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
         summary: "glob **/plan.rs in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/plan.rs in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
 
     widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
@@ -3688,10 +3774,12 @@ fn live_viewport_shows_explored_group_while_active() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
         summary: "glob **/plan.rs in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/plan.rs in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
 
     let display = widget
@@ -3745,10 +3833,12 @@ fn reasoning_start_closes_current_explored_group() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
         summary: "glob **/plan.rs in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/plan.rs in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
 
     let transcript = widget
@@ -3795,10 +3885,12 @@ fn assistant_text_start_closes_current_explored_group() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
         summary: "glob **/plan.rs in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/plan.rs in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
 
     let transcript = widget
@@ -3841,10 +3933,12 @@ fn merged_explored_group_stays_completed_when_tool_results_arrive_after_tool_cal
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
         summary: "glob **/plan.rs in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/plan.rs in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
 
     widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
@@ -3919,10 +4013,12 @@ fn explored_group_in_history_can_finish_late_completions() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-2".to_string(),
         summary: "glob **/plan.rs in crates".to_string(),
-        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::ListFiles {
-            cmd: "glob **/plan.rs in crates".to_string(),
-            path: Some("crates".to_string()),
-        }]),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
         tool_use_id: "tool-1".to_string(),
@@ -3970,12 +4066,24 @@ fn explored_group_in_history_can_finish_late_completions() {
 
 #[test]
 fn auto_git_diff_trigger_matches_editing_tools_only() {
-    assert!(ChatWidget::should_auto_show_git_diff("write src/main.rs", false));
+    assert!(ChatWidget::should_auto_show_git_diff(
+        "write src/main.rs",
+        false
+    ));
     assert!(ChatWidget::should_auto_show_git_diff("apply_patch", false));
     assert!(!ChatWidget::should_auto_show_git_diff("bash", false));
-    assert!(!ChatWidget::should_auto_show_git_diff("bash echo hi > file.txt", false));
-    assert!(!ChatWidget::should_auto_show_git_diff("read src/main.rs", false));
-    assert!(!ChatWidget::should_auto_show_git_diff("write src/main.rs", true));
+    assert!(!ChatWidget::should_auto_show_git_diff(
+        "bash echo hi > file.txt",
+        false
+    ));
+    assert!(!ChatWidget::should_auto_show_git_diff(
+        "read src/main.rs",
+        false
+    ));
+    assert!(!ChatWidget::should_auto_show_git_diff(
+        "write src/main.rs",
+        true
+    ));
 }
 
 #[tokio::test]
@@ -4075,17 +4183,22 @@ fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
     );
 }
 
-
 #[test]
 fn diff_count_parser_handles_write_generated_update_diff_shape() {
     let diff = "diff --git a/foo.txt b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n";
-    assert_eq!(crate::diff_render::calculate_add_remove_from_diff(diff), (1, 1));
+    assert_eq!(
+        crate::diff_render::calculate_add_remove_from_diff(diff),
+        (1, 1)
+    );
 }
 
 #[test]
 fn diff_count_parser_handles_apply_patch_generated_update_diff_shape() {
     let diff = "diff --git a/update.txt b/update.txt\n@@ -1 +1 @@\n-old\n+new\n";
-    assert_eq!(crate::diff_render::calculate_add_remove_from_diff(diff), (1, 1));
+    assert_eq!(
+        crate::diff_render::calculate_add_remove_from_diff(diff),
+        (1, 1)
+    );
 }
 
 #[test]

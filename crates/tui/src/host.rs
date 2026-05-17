@@ -45,9 +45,11 @@ struct PendingOnboarding {
 
 #[derive(Debug, Default)]
 struct InteractiveLoopState {
+    session_id: Option<devo_core::SessionId>,
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
+    total_cache_read_tokens: usize,
     pending_onboarding: Option<PendingOnboarding>,
     // True while the resume browser is waiting for the worker's session list.
     resume_browser_pending: bool,
@@ -157,6 +159,7 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     // spawn a worker with stdio transport with server, it'll emit events
     // such as `[WorkerEvent::TurnStarted]`, `[WorkerEvent::UsageUpdated]` etc.
     let mut worker = QueryWorkerHandle::spawn(QueryWorkerConfig {
+        initial_session_id: initial_session.session_id,
         model: initial_session.model.clone(),
         cwd: initial_session.cwd.clone(),
         server_log_level: config.server_log_level,
@@ -281,9 +284,11 @@ pub async fn run_interactive_tui(config: InteractiveTuiConfig) -> Result<AppExit
     terminal_restore_guard.restore()?;
     worker.shutdown().await?;
     Ok(AppExit {
+        session_id: loop_state.session_id,
         turn_count: loop_state.turn_count,
         total_input_tokens: loop_state.total_input_tokens,
         total_output_tokens: loop_state.total_output_tokens,
+        total_cache_read_tokens: loop_state.total_cache_read_tokens,
     })
 }
 
@@ -319,14 +324,18 @@ fn handle_tui_event(
 
     if loop_state.overlay.is_active() {
         if let TuiEvent::Key(key_event) = tui_event
-            && matches!(key_event.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat)
+            && matches!(
+                key_event.kind,
+                crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+            )
             && key_event.code == KeyCode::Enter
             && let Some(transcript) = loop_state.overlay.transcript_mut()
             && let Some(user_message) = transcript.selected_user_message()
         {
             if let Some(selected_history_position) = transcript.selected_user_history_position() {
-                chat_widget
-                    .truncate_history_to_user_turn_count(selected_history_position.saturating_add(1));
+                chat_widget.truncate_history_to_user_turn_count(
+                    selected_history_position.saturating_add(1),
+                );
             }
             chat_widget.restore_user_message_to_composer(user_message);
             loop_state.overlay.close(tui)?;
@@ -561,32 +570,40 @@ fn handle_worker_event(
             turn_count: next_turn_count,
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_cache_read_tokens: next_total_cache_read_tokens,
             ..
         }
         | WorkerEvent::TurnFailed {
             turn_count: next_turn_count,
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_cache_read_tokens: next_total_cache_read_tokens,
             ..
         } => {
             loop_state.busy = false;
             loop_state.turn_count = *next_turn_count;
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
             loop_state.session_switch_pending = false;
         }
         WorkerEvent::TurnStarted { .. } => {
             loop_state.busy = true;
+        }
+        WorkerEvent::SessionActivated { session_id } => {
+            loop_state.session_id = Some(*session_id);
         }
         // Streaming deltas are handled entirely within the ChatWidget
         WorkerEvent::ToolOutputDelta { .. } => {}
         WorkerEvent::UsageUpdated {
             total_input_tokens: next_total_input_tokens,
             total_output_tokens: next_total_output_tokens,
+            total_cache_read_tokens: next_total_cache_read_tokens,
             ..
         } => {
             loop_state.total_input_tokens = *next_total_input_tokens;
             loop_state.total_output_tokens = *next_total_output_tokens;
+            loop_state.total_cache_read_tokens = *next_total_cache_read_tokens;
         }
         WorkerEvent::ProviderValidationSucceeded { .. } => {
             if let Some(pending) = loop_state.pending_onboarding.take() {
@@ -623,8 +640,18 @@ fn handle_worker_event(
         WorkerEvent::SessionCompactionFailed { .. } => {
             loop_state.busy = false;
         }
-        WorkerEvent::SessionSwitched { .. } => {
+        WorkerEvent::SessionSwitched {
+            session_id,
+            total_input_tokens,
+            total_output_tokens,
+            total_cache_read_tokens,
+            ..
+        } => {
             loop_state.session_switch_pending = false;
+            loop_state.session_id = devo_core::SessionId::try_from(session_id.as_str()).ok();
+            loop_state.total_input_tokens = *total_input_tokens;
+            loop_state.total_output_tokens = *total_output_tokens;
+            loop_state.total_cache_read_tokens = *total_cache_read_tokens;
         }
         WorkerEvent::TextDelta(_)
         | WorkerEvent::TextItemStarted { .. }
@@ -864,9 +891,7 @@ mod tests {
 
         assert_eq!(
             determine_esc_backtrack_action(
-                esc_press,
-                false,
-                /*is_normal_backtrack_mode*/ true,
+                esc_press, false, /*is_normal_backtrack_mode*/ true,
                 /*composer_is_empty*/ true,
             ),
             EscBacktrackAction::PrimeHint
@@ -882,13 +907,26 @@ mod tests {
         );
         assert_eq!(
             determine_esc_backtrack_action(
-                esc_press,
-                true,
-                /*is_normal_backtrack_mode*/ true,
+                esc_press, true, /*is_normal_backtrack_mode*/ true,
                 /*composer_is_empty*/ true,
             ),
             EscBacktrackAction::OpenOverlay
         );
     }
 
+    #[test]
+    fn session_activated_updates_loop_state_session_id() {
+        let session_id = devo_core::SessionId::new();
+        let mut loop_state = InteractiveLoopState::default();
+        let worker_event = WorkerEvent::SessionActivated { session_id };
+
+        match &worker_event {
+            WorkerEvent::SessionActivated { session_id } => {
+                loop_state.session_id = Some(*session_id);
+            }
+            _ => unreachable!(),
+        }
+
+        assert_eq!(loop_state.session_id, Some(session_id));
+    }
 }

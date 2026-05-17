@@ -67,7 +67,11 @@ fn resolve_path(cwd: &std::path::Path, path: &str) -> PathBuf {
     if p.is_absolute() { p } else { cwd.join(p) }
 }
 
-fn build_write_metadata(path: &std::path::Path, previous: Option<&str>, content: &str) -> serde_json::Value {
+fn build_write_metadata(
+    path: &std::path::Path,
+    previous: Option<&str>,
+    content: &str,
+) -> serde_json::Value {
     match previous {
         None => json!({
             "diff": format!(
@@ -117,16 +121,28 @@ mod tests {
 
     #[test]
     fn build_write_metadata_for_new_file_marks_add() {
-        let metadata = build_write_metadata(std::path::Path::new("foo.txt"), None, "hello\nworld\n");
+        let metadata =
+            build_write_metadata(std::path::Path::new("foo.txt"), None, "hello\nworld\n");
         assert_eq!(metadata["files"][0]["kind"], "add");
         assert_eq!(metadata["files"][0]["additions"], 2);
     }
 
     #[test]
     fn build_write_metadata_for_existing_file_marks_update() {
-        let metadata = build_write_metadata(std::path::Path::new("foo.txt"), Some("old\n"), "new\n");
+        let metadata =
+            build_write_metadata(std::path::Path::new("foo.txt"), Some("old\n"), "new\n");
         assert_eq!(metadata["files"][0]["kind"], "update");
-        assert!(metadata["diff"].as_str().unwrap_or_default().contains("diff --git a/foo.txt b/foo.txt"));
-        assert!(metadata["diff"].as_str().unwrap_or_default().contains("@@ -1 +1 @@"));
+        assert!(
+            metadata["diff"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("diff --git a/foo.txt b/foo.txt")
+        );
+        assert!(
+            metadata["diff"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("@@ -1 +1 @@")
+        );
     }
 }

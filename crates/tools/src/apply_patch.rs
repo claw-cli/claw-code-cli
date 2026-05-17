@@ -1052,16 +1052,16 @@ hello
                     .or_else(|| file.get("patch"))
                     .and_then(serde_json::Value::as_str)
                     .expect("per-file diff");
-                let patch = diffy::Patch::from_str(per_file_diff).expect("per-file diff should parse");
-                let (added, removed) = patch
-                    .hunks()
-                    .iter()
-                    .flat_map(diffy::Hunk::lines)
-                    .fold((0usize, 0usize), |(a, d), line| match line {
+                let patch =
+                    diffy::Patch::from_str(per_file_diff).expect("per-file diff should parse");
+                let (added, removed) = patch.hunks().iter().flat_map(diffy::Hunk::lines).fold(
+                    (0usize, 0usize),
+                    |(a, d), line| match line {
                         diffy::Line::Insert(_) => (a + 1, d),
                         diffy::Line::Delete(_) => (a, d + 1),
                         diffy::Line::Context(_) => (a, d),
-                    });
+                    },
+                );
                 assert_eq!((added, removed), (1, 1));
             }
         }

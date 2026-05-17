@@ -1,14 +1,14 @@
-use std::time::Instant;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::app_command::InputHistoryDirection;
 use devo_core::ItemId;
 use devo_core::SessionId;
-use devo_protocol::parse_command::ParsedCommand;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
 use devo_protocol::SessionHistoryItem;
+use devo_protocol::parse_command::ParsedCommand;
 use devo_protocol::protocol::FileChange;
 const TOOL_RESULT_FOLD_FINAL_STAGE: u8 = 3;
 
@@ -68,6 +68,8 @@ pub(crate) enum WorkerEvent {
         /// The server-assigned turn identifier.
         turn_id: TurnId,
     },
+    /// The active session identifier is now known.
+    SessionActivated { session_id: SessionId },
     /// Input queue state updated by the server.
     InputQueueUpdated {
         pending_count: usize,

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use super::*;
 use crate::{FileChangePayload, TurnPlanStepPayload, TurnPlanUpdatedPayload};
 use devo_utils::git_op::extract_paths_from_patch;
+use tokio::sync::mpsc;
 
 struct PendingToolCall {
     item_id: ItemId,
@@ -399,7 +399,9 @@ impl ServerRuntime {
                                 tool_name: name.clone(),
                                 command: command.clone(),
                                 source: devo_protocol::protocol::ExecCommandSource::Agent,
-                                command_actions: command_actions_from_tool_input(&name, &command, &input),
+                                command_actions: command_actions_from_tool_input(
+                                    &name, &command, &input,
+                                ),
                                 output: None,
                                 is_error: false,
                             })
@@ -414,7 +416,9 @@ impl ServerRuntime {
                                 tool_call_id: id.clone(),
                                 tool_name: name.clone(),
                                 parameters: input.clone(),
-                                command_actions: command_actions_from_tool_input(&name, &command, &input),
+                                command_actions: command_actions_from_tool_input(
+                                    &name, &command, &input,
+                                ),
                             })
                             .expect("serialize tool call payload")
                         };
@@ -452,11 +456,14 @@ impl ServerRuntime {
                                 && is_plan_tool(&tool_name)
                             {
                                 let output_json = match content.clone() {
-                                    devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
-                                    devo_tools::ToolContent::Json(json) => json,
-                                    devo_tools::ToolContent::Mixed { text, json } => {
-                                        json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                    devo_tools::ToolContent::Text(text) => {
+                                        serde_json::Value::String(text)
                                     }
+                                    devo_tools::ToolContent::Json(json) => json,
+                                    devo_tools::ToolContent::Mixed { text, json } => json
+                                        .unwrap_or_else(|| {
+                                            serde_json::Value::String(text.unwrap_or_default())
+                                        }),
                                 };
                                 let explanation = output_json
                                     .get("explanation")
@@ -495,8 +502,14 @@ impl ServerRuntime {
                                                 .into_iter()
                                                 .filter_map(|item| {
                                                     Some(TurnPlanStepPayload {
-                                                        step: item.get("step")?.as_str()?.to_string(),
-                                                        status: item.get("status")?.as_str()?.to_string(),
+                                                        step: item
+                                                            .get("step")?
+                                                            .as_str()?
+                                                            .to_string(),
+                                                        status: item
+                                                            .get("status")?
+                                                            .as_str()?
+                                                            .to_string(),
                                                     })
                                                 })
                                                 .collect(),
@@ -510,11 +523,14 @@ impl ServerRuntime {
                                 && is_file_change_tool(&tool_name)
                             {
                                 let output_json = match content.clone() {
-                                    devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
-                                    devo_tools::ToolContent::Json(json) => json,
-                                    devo_tools::ToolContent::Mixed { text, json } => {
-                                        json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                    devo_tools::ToolContent::Text(text) => {
+                                        serde_json::Value::String(text)
                                     }
+                                    devo_tools::ToolContent::Json(json) => json,
+                                    devo_tools::ToolContent::Mixed { text, json } => json
+                                        .unwrap_or_else(|| {
+                                            serde_json::Value::String(text.unwrap_or_default())
+                                        }),
                                 };
                                 let changes = output_json
                                     .get("files")
@@ -523,31 +539,42 @@ impl ServerRuntime {
                                     .unwrap_or_default()
                                     .into_iter()
                                     .filter_map(|file| {
-                                        let path = std::path::PathBuf::from(file.get("path")?.as_str()?);
+                                        let path =
+                                            std::path::PathBuf::from(file.get("path")?.as_str()?);
                                         let kind = file.get("kind")?.as_str()?;
-                                        let additions = file.get("additions").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                                        let deletions = file.get("deletions").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                                        let additions = file
+                                            .get("additions")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .unwrap_or(0);
+                                        let deletions = file
+                                            .get("deletions")
+                                            .and_then(serde_json::Value::as_u64)
+                                            .unwrap_or(0);
                                         let change = match kind {
                                             "add" => devo_protocol::protocol::FileChange::Add {
                                                 content: "\n".repeat(additions as usize),
                                             },
-                                            "delete" => devo_protocol::protocol::FileChange::Delete {
-                                                content: "\n".repeat(deletions as usize),
-                                            },
-                                            "update" | "move" => devo_protocol::protocol::FileChange::Update {
-                                                unified_diff: file
-                                                    .get("diff")
-                                                    .or_else(|| file.get("patch"))
-                                                    .or_else(|| output_json.get("diff"))
-                                                    .and_then(serde_json::Value::as_str)
-                                                    .unwrap_or("")
-                                                    .to_string(),
-                                                move_path: file
-                                                    .get("movePath")
-                                                    .or_else(|| file.get("move_path"))
-                                                    .and_then(serde_json::Value::as_str)
-                                                    .map(std::path::PathBuf::from),
-                                            },
+                                            "delete" => {
+                                                devo_protocol::protocol::FileChange::Delete {
+                                                    content: "\n".repeat(deletions as usize),
+                                                }
+                                            }
+                                            "update" | "move" => {
+                                                devo_protocol::protocol::FileChange::Update {
+                                                    unified_diff: file
+                                                        .get("diff")
+                                                        .or_else(|| file.get("patch"))
+                                                        .or_else(|| output_json.get("diff"))
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    move_path: file
+                                                        .get("movePath")
+                                                        .or_else(|| file.get("move_path"))
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .map(std::path::PathBuf::from),
+                                                }
+                                            }
                                             _ => return None,
                                         };
                                         Some((path, change))
@@ -606,11 +633,14 @@ impl ServerRuntime {
                             if pending.is_command_execution {
                                 let tool_name = tool_name.clone().unwrap_or_default();
                                 let output = match content.clone() {
-                                    devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
-                                    devo_tools::ToolContent::Json(json) => json,
-                                    devo_tools::ToolContent::Mixed { text, json } => {
-                                        json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                    devo_tools::ToolContent::Text(text) => {
+                                        serde_json::Value::String(text)
                                     }
+                                    devo_tools::ToolContent::Json(json) => json,
+                                    devo_tools::ToolContent::Mixed { text, json } => json
+                                        .unwrap_or_else(|| {
+                                            serde_json::Value::String(text.unwrap_or_default())
+                                        }),
                                 };
                                 let completed_payload =
                                     serde_json::to_value(CommandExecutionPayload {
@@ -618,7 +648,11 @@ impl ServerRuntime {
                                         tool_name: tool_name.clone(),
                                         command: pending.command.clone(),
                                         source: devo_protocol::protocol::ExecCommandSource::Agent,
-                                        command_actions: command_actions_from_tool_input(&tool_name, &pending.command, &pending.input),
+                                        command_actions: command_actions_from_tool_input(
+                                            &tool_name,
+                                            &pending.command,
+                                            &pending.input,
+                                        ),
                                         output: Some(output.clone()),
                                         is_error,
                                     })
@@ -679,11 +713,14 @@ impl ServerRuntime {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name: tool_name.clone(),
                                     output: match content.clone() {
-                                        devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
-                                        devo_tools::ToolContent::Json(json) => json,
-                                        devo_tools::ToolContent::Mixed { text, json } => {
-                                            json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                        devo_tools::ToolContent::Text(text) => {
+                                            serde_json::Value::String(text)
                                         }
+                                        devo_tools::ToolContent::Json(json) => json,
+                                        devo_tools::ToolContent::Mixed { text, json } => json
+                                            .unwrap_or_else(|| {
+                                                serde_json::Value::String(text.unwrap_or_default())
+                                            }),
                                     },
                                     display_content: display_content.clone(),
                                     is_error,
@@ -692,11 +729,14 @@ impl ServerRuntime {
                                     tool_call_id: tool_use_id.clone(),
                                     tool_name,
                                     content: match content {
-                                        devo_tools::ToolContent::Text(text) => serde_json::Value::String(text),
-                                        devo_tools::ToolContent::Json(json) => json,
-                                        devo_tools::ToolContent::Mixed { text, json } => {
-                                            json.unwrap_or_else(|| serde_json::Value::String(text.unwrap_or_default()))
+                                        devo_tools::ToolContent::Text(text) => {
+                                            serde_json::Value::String(text)
                                         }
+                                        devo_tools::ToolContent::Json(json) => json,
+                                        devo_tools::ToolContent::Mixed { text, json } => json
+                                            .unwrap_or_else(|| {
+                                                serde_json::Value::String(text.unwrap_or_default())
+                                            }),
                                     },
                                     display_content,
                                     is_error,

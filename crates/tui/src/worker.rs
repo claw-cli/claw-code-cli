@@ -18,6 +18,8 @@ use devo_core::SessionId;
 use devo_core::TurnId;
 use devo_core::TurnStatus;
 use devo_core::test_model_connection;
+use devo_protocol::SessionHistoryMetadata;
+use devo_protocol::SessionPlanStepStatus;
 use devo_provider::ModelProviderSDK;
 use devo_provider::anthropic::AnthropicProvider;
 use devo_provider::openai::OpenAIProvider;
@@ -49,8 +51,6 @@ use devo_server::TurnEventPayload;
 use devo_server::TurnInterruptParams;
 use devo_server::TurnStartParams;
 use devo_server::TurnSteerParams;
-use devo_protocol::SessionHistoryMetadata;
-use devo_protocol::SessionPlanStepStatus;
 
 use crate::app_command::InputHistoryDirection;
 use crate::events::PlanStep;
@@ -71,6 +71,8 @@ struct EnsureSessionOutcome {
 
 /// Immutable runtime configuration used to construct the background server client worker.
 pub(crate) struct QueryWorkerConfig {
+    /// Optional pre-existing session to resume immediately on startup.
+    pub(crate) initial_session_id: Option<SessionId>,
     /// Model identifier used for new turns.
     pub(crate) model: String,
     /// Working directory used for the server session.
@@ -426,6 +428,61 @@ async fn run_worker_inner(
     let mut latest_completed_agent_message: Option<String> = None;
     let mut input_history_cursor: Option<usize> = None;
 
+    if let Some(initial_session_id) = config.initial_session_id {
+        match client
+            .session_resume(SessionResumeParams {
+                session_id: initial_session_id,
+            })
+            .await
+        {
+            Ok(resumed) => {
+                active_turn_id = None;
+                session_id = Some(initial_session_id);
+                session_cwd = resumed.session.cwd.clone();
+                let _ = event_tx.send(WorkerEvent::SessionSwitched {
+                    session_id: initial_session_id.to_string(),
+                    cwd: resumed.session.cwd,
+                    title: resumed.session.title,
+                    model: resumed.session.model.clone(),
+                    thinking: resumed.session.thinking.clone(),
+                    reasoning_effort: resumed.session.reasoning_effort,
+                    total_input_tokens: resumed.session.total_input_tokens,
+                    total_output_tokens: resumed.session.total_output_tokens,
+                    total_cache_read_tokens: resumed.session.total_cache_read_tokens,
+                    last_query_total_tokens: resumed.session.last_query_total_tokens,
+                    last_query_input_tokens: resumed
+                        .latest_turn
+                        .as_ref()
+                        .and_then(|turn| turn.usage.as_ref())
+                        .map(|usage| usage.input_tokens as usize)
+                        .unwrap_or(0),
+                    prompt_token_estimate: resumed.session.prompt_token_estimate,
+                    history_items: project_history_items(&resumed.history_items),
+                    rich_history_items: resumed.history_items.clone(),
+                    loaded_item_count: resumed.loaded_item_count,
+                    pending_texts: resumed.pending_texts,
+                });
+                model = resumed.session.model.clone().unwrap_or(model);
+                thinking_selection = resumed.session.thinking.clone();
+                total_input_tokens = resumed.session.total_input_tokens;
+                total_output_tokens = resumed.session.total_output_tokens;
+                total_cache_read_tokens = resumed.session.total_cache_read_tokens;
+                last_query_total_tokens = resumed.session.last_query_total_tokens;
+            }
+            Err(error) => {
+                let _ = event_tx.send(WorkerEvent::TurnFailed {
+                    message: format!("failed to resume session: {error}"),
+                    turn_count,
+                    total_input_tokens,
+                    total_output_tokens,
+                    total_cache_read_tokens,
+                    prompt_token_estimate: total_input_tokens,
+                    last_query_input_tokens,
+                });
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             maybe_command = command_rx.recv() => {
@@ -450,6 +507,9 @@ async fn run_worker_inner(
                             .or(thinking_selection);
                         let active_session_id = session_start.session_id;
                         if session_start.created {
+                            let _ = event_tx.send(WorkerEvent::SessionActivated {
+                                session_id: active_session_id,
+                            });
                             apply_session_permissions(
                                 &mut client,
                                 active_session_id,
@@ -1638,10 +1698,14 @@ fn handle_completed_item(payload: ItemEventPayload, event_tx: &mpsc::UnboundedSe
             payload,
             ..
         } => {
-            let Ok(payload) = serde_json::from_value::<devo_server::FileChangePayload>(payload) else {
+            let Ok(payload) = serde_json::from_value::<devo_server::FileChangePayload>(payload)
+            else {
                 return;
             };
-            let changes = payload.changes.into_iter().collect::<std::collections::HashMap<_, _>>();
+            let changes = payload
+                .changes
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
             let _ = event_tx.send(WorkerEvent::PatchApplied { changes });
         }
         ItemEnvelope {
@@ -2271,9 +2335,9 @@ mod tests {
     use super::project_history_items;
     use super::summarize_tool_call;
     use super::truncate_tool_output;
-    use crate::events::SessionListEntry;
     use crate::events::PlanStep;
     use crate::events::PlanStepStatus;
+    use crate::events::SessionListEntry;
     use crate::events::TranscriptItem;
     use crate::events::TranscriptItemKind;
     use crate::events::WorkerEvent;
@@ -2492,7 +2556,8 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        else {
             panic!("expected patch applied event");
         };
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
@@ -2536,7 +2601,8 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        else {
             panic!("expected patch applied event");
         };
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
@@ -2585,7 +2651,8 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        else {
             panic!("expected patch applied event");
         };
         assert!(changes.contains_key(&std::path::PathBuf::from("update.txt")));
@@ -2630,11 +2697,13 @@ mod tests {
             &event_tx,
         );
 
-        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event")
+        else {
             panic!("expected patch applied event");
         };
-        let devo_protocol::protocol::FileChange::Update { unified_diff, .. } =
-            changes.get(&std::path::PathBuf::from("update.txt")).expect("update change")
+        let devo_protocol::protocol::FileChange::Update { unified_diff, .. } = changes
+            .get(&std::path::PathBuf::from("update.txt"))
+            .expect("update change")
         else {
             panic!("expected update change");
         };
@@ -2671,7 +2740,6 @@ mod tests {
             }
         );
     }
-
 
     #[test]
     fn session_list_entries_keep_title_before_identifier() {
