@@ -3394,6 +3394,8 @@ fn explored_group_in_history_can_finish_late_completions() {
 fn auto_git_diff_trigger_matches_editing_tools_only() {
     assert!(ChatWidget::should_auto_show_git_diff("write src/main.rs", false));
     assert!(ChatWidget::should_auto_show_git_diff("apply_patch", false));
+    assert!(!ChatWidget::should_auto_show_git_diff("bash", false));
+    assert!(!ChatWidget::should_auto_show_git_diff("bash echo hi > file.txt", false));
     assert!(!ChatWidget::should_auto_show_git_diff("read src/main.rs", false));
     assert!(!ChatWidget::should_auto_show_git_diff("write src/main.rs", true));
 }
@@ -3462,4 +3464,222 @@ fn patch_applied_event_renders_edited_block() {
         "expected edited patch block, got:\n{blob}"
     );
     assert!(blob.contains("▌ Edited") || blob.contains("▌ Added"));
+}
+
+#[test]
+fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("update.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("(+1 -1)"),
+        "full git-style apply_patch diff should report non-zero counts:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Edited 0 files (+0 -0)"),
+        "full git-style apply_patch diff should not collapse to zero summary:\n{blob}"
+    );
+}
+
+
+#[test]
+fn diff_count_parser_handles_write_generated_update_diff_shape() {
+    let diff = "diff --git a/foo.txt b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    assert_eq!(crate::diff_render::calculate_add_remove_from_diff(diff), (1, 1));
+}
+
+#[test]
+fn diff_count_parser_handles_apply_patch_generated_update_diff_shape() {
+    let diff = "diff --git a/update.txt b/update.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    assert_eq!(crate::diff_render::calculate_add_remove_from_diff(diff), (1, 1));
+}
+
+#[test]
+fn write_patch_applied_event_renders_edited_block() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "expected edited patch block for write result, got:\n{blob}"
+    );
+}
+
+#[test]
+fn write_patch_applied_event_reports_non_zero_counts() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        !blob.contains("Edited 0 files (+0 -0)"),
+        "write-derived edited block should not collapse to zero summary:\n{blob}"
+    );
+    assert!(
+        blob.contains("(+1 -1)"),
+        "write-derived edited block should report non-zero counts:\n{blob}"
+    );
+}
+
+#[test]
+fn patch_applied_event_with_diff_only_reports_non_zero_counts() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        !blob.contains("Edited 0 files (+0 -0)"),
+        "patch-derived edited block should not collapse to zero summary:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_without_rich_edited_metadata_degrades_to_tool_result_path() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![crate::events::TranscriptItem::restored_tool_result(
+            "Ran apply_patch output",
+            "{\"diff\":\"diff --git a/foo.txt b/foo.txt\\n--- a/foo.txt\\n+++ b/foo.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"files\":[{\"path\":\"foo.txt\",\"kind\":\"update\",\"additions\":1,\"deletions\":1}]}",
+        )],
+        rich_history_items: Vec::new(),
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Ran apply_patch output"),
+        "missing rich metadata currently falls back to tool-result rendering:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_without_rich_edited_metadata_still_restores_edited_block() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![crate::events::TranscriptItem::restored_tool_result(
+            "Ran apply_patch output",
+            "{\"diff\":\"diff --git a/foo.txt b/foo.txt\\n--- a/foo.txt\\n+++ b/foo.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"files\":[{\"path\":\"foo.txt\",\"kind\":\"update\",\"additions\":1,\"deletions\":1}]}",
+        )],
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::ToolResult,
+            title: "apply_patch output".to_string(),
+            body: "{\"diff\":\"diff --git a/foo.txt b/foo.txt\\n--- a/foo.txt\\n+++ b/foo.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"files\":[{\"path\":\"foo.txt\",\"kind\":\"update\",\"additions\":1,\"deletions\":1}]}".to_string(),
+            metadata: None,
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "fallback parse should restore edited block without rich metadata:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Ran apply_patch output"),
+        "fallback parse should avoid tool-result degradation:\n{blob}"
+    );
 }

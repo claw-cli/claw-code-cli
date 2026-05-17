@@ -2055,7 +2055,7 @@ fn plan_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEven
 // Legacy compatibility fallback for sessions/items persisted before server-side
 // FileChange became the primary live source.
 fn patch_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEvent> {
-    if payload.tool_name.as_deref()? != "apply_patch" {
+    if !matches!(payload.tool_name.as_deref()?, "apply_patch" | "write") {
         return None;
     }
     let files = payload.content.get("files")?.as_array()?;
@@ -2079,9 +2079,10 @@ fn patch_event_from_tool_result(payload: &ToolResultPayload) -> Option<WorkerEve
                 content: "\n".repeat(deletions as usize),
             },
             "update" | "move" => devo_protocol::protocol::FileChange::Update {
-                unified_diff: payload
-                    .content
+                unified_diff: file
                     .get("diff")
+                    .or_else(|| file.get("patch"))
+                    .or_else(|| payload.content.get("diff"))
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("")
                     .to_string(),
@@ -2495,6 +2496,150 @@ mod tests {
             panic!("expected patch applied event");
         };
         assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
+    }
+
+    #[test]
+    fn completed_write_tool_result_emits_patch_applied() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("write".to_string()),
+                        content: serde_json::json!({
+                            "diff": "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                            "files": [
+                                {
+                                    "path": "foo.txt",
+                                    "kind": "update",
+                                    "additions": 1,
+                                    "deletions": 1
+                                }
+                            ]
+                        }),
+                        display_content: None,
+                        is_error: false,
+                        summary: "write foo.txt".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+            panic!("expected patch applied event");
+        };
+        assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
+    }
+
+    #[test]
+    fn completed_apply_patch_tool_result_with_real_metadata_shape_emits_patch_applied() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("apply_patch".to_string()),
+                        content: serde_json::json!({
+                            "diff": "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                            "files": [
+                                {
+                                    "path": "update.txt",
+                                    "filePath": "/tmp/update.txt",
+                                    "relativePath": "update.txt",
+                                    "kind": "update",
+                                    "type": "update",
+                                    "diff": "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                                    "patch": "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                                    "additions": 1,
+                                    "deletions": 1
+                                }
+                            ]
+                        }),
+                        display_content: None,
+                        is_error: false,
+                        summary: "apply_patch".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+            panic!("expected patch applied event");
+        };
+        assert!(changes.contains_key(&std::path::PathBuf::from("update.txt")));
+    }
+
+    #[test]
+    fn completed_apply_patch_prefers_file_local_diff_over_top_level_diff() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_completed_item(
+            ItemEventPayload {
+                context: devo_server::EventContext {
+                    session_id: SessionId::new(),
+                    turn_id: None,
+                    item_id: None,
+                    seq: 1,
+                },
+                item: ItemEnvelope {
+                    item_id: ItemId::new(),
+                    item_kind: ItemKind::ToolResult,
+                    payload: serde_json::to_value(ToolResultPayload {
+                        tool_call_id: "call-1".to_string(),
+                        tool_name: Some("apply_patch".to_string()),
+                        content: serde_json::json!({
+                            "diff": "BROKEN TOP LEVEL DIFF",
+                            "files": [
+                                {
+                                    "path": "update.txt",
+                                    "kind": "update",
+                                    "diff": "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                                    "additions": 1,
+                                    "deletions": 1
+                                }
+                            ]
+                        }),
+                        display_content: None,
+                        is_error: false,
+                        summary: "apply_patch".to_string(),
+                    })
+                    .expect("serialize tool result payload"),
+                },
+            },
+            &event_tx,
+        );
+
+        let WorkerEvent::PatchApplied { changes } = event_rx.try_recv().expect("worker event") else {
+            panic!("expected patch applied event");
+        };
+        let devo_protocol::protocol::FileChange::Update { unified_diff, .. } =
+            changes.get(&std::path::PathBuf::from("update.txt")).expect("update change")
+        else {
+            panic!("expected update change");
+        };
+        assert!(unified_diff.contains("--- a/update.txt"));
+        assert!(!unified_diff.contains("BROKEN TOP LEVEL DIFF"));
     }
 
     #[test]

@@ -833,6 +833,14 @@ impl ChatWidget {
                 continue;
             }
 
+            if let Some(changes) = Self::edited_changes_from_history_item(item) {
+                self.add_history_entry_without_redraw(Box::new(history_cell::new_patch_event(
+                    changes,
+                    &self.session.cwd,
+                )));
+                continue;
+            }
+
             if item.kind == devo_protocol::SessionHistoryItemKind::ToolCall
                 && let Some(tool_call_id) = item.tool_call_id.as_deref()
             {
@@ -917,6 +925,60 @@ impl ChatWidget {
 
         self.frame_requester.schedule_frame();
         true
+    }
+
+    fn edited_changes_from_history_item(
+        item: &SessionHistoryItem,
+    ) -> Option<HashMap<PathBuf, devo_protocol::protocol::FileChange>> {
+        if item.kind != devo_protocol::SessionHistoryItemKind::ToolResult {
+            return None;
+        }
+        let lower_title = item.title.to_ascii_lowercase();
+        if !lower_title.contains("apply_patch")
+            && !lower_title.contains("write")
+            && !item.body.contains("\"files\"")
+        {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(&item.body).ok()?;
+        let files = value.get("files")?.as_array()?;
+        let diff = value
+            .get("diff")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut changes = HashMap::new();
+        for file in files {
+            let path = PathBuf::from(file.get("path")?.as_str()?);
+            let kind = file.get("kind")?.as_str()?;
+            let additions = file
+                .get("additions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let deletions = file
+                .get("deletions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let change = match kind {
+                "add" => devo_protocol::protocol::FileChange::Add {
+                    content: "\n".repeat(additions as usize),
+                },
+                "delete" => devo_protocol::protocol::FileChange::Delete {
+                    content: "\n".repeat(deletions as usize),
+                },
+                "update" | "move" => devo_protocol::protocol::FileChange::Update {
+                    unified_diff: diff.clone(),
+                    move_path: file
+                        .get("movePath")
+                        .or_else(|| file.get("move_path"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(PathBuf::from),
+                },
+                _ => continue,
+            };
+            changes.insert(path, change);
+        }
+        (!changes.is_empty()).then_some(changes)
     }
 
     fn clear_for_session_switch(&mut self) {

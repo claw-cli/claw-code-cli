@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use super::*;
 use crate::{FileChangePayload, TurnPlanStepPayload, TurnPlanUpdatedPayload};
+use devo_utils::git_op::extract_paths_from_patch;
 
 struct PendingToolCall {
     item_id: ItemId,
@@ -60,7 +61,7 @@ fn is_unified_exec_tool(name: &str) -> bool {
 }
 
 fn is_file_change_tool(name: &str) -> bool {
-    matches!(name, "apply_patch")
+    matches!(name, "apply_patch" | "write")
 }
 
 fn is_plan_tool(name: &str) -> bool {
@@ -534,8 +535,10 @@ impl ServerRuntime {
                                                 content: "\n".repeat(deletions as usize),
                                             },
                                             "update" | "move" => devo_protocol::protocol::FileChange::Update {
-                                                unified_diff: output_json
+                                                unified_diff: file
                                                     .get("diff")
+                                                    .or_else(|| file.get("patch"))
+                                                    .or_else(|| output_json.get("diff"))
                                                     .and_then(serde_json::Value::as_str)
                                                     .unwrap_or("")
                                                     .to_string(),
@@ -550,6 +553,30 @@ impl ServerRuntime {
                                         Some((path, change))
                                     })
                                     .collect::<Vec<_>>();
+                                let changes = if changes.is_empty() {
+                                    output_json
+                                        .get("diff")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(extract_paths_from_patch)
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(|path| {
+                                            (
+                                                std::path::PathBuf::from(path),
+                                                devo_protocol::protocol::FileChange::Update {
+                                                    unified_diff: output_json
+                                                        .get("diff")
+                                                        .and_then(serde_json::Value::as_str)
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    move_path: None,
+                                                },
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                } else {
+                                    changes
+                                };
 
                                 runtime
                                     .complete_item(
@@ -1332,8 +1359,9 @@ mod tests {
     }
 
     #[test]
-    fn file_change_tool_detection_matches_apply_patch() {
+    fn file_change_tool_detection_matches_apply_patch_and_write() {
         assert!(is_file_change_tool("apply_patch"));
+        assert!(is_file_change_tool("write"));
         assert!(!is_file_change_tool("read"));
     }
 

@@ -3,6 +3,7 @@ use devo_core::{
     ToolResultItem, TurnItem, TurnRecord,
 };
 use devo_protocol::{SessionHistoryMetadata, SessionPlanStep, SessionPlanStepStatus};
+use devo_utils::git_op::extract_paths_from_patch;
 use devo_utils::shell_command::parse_command::parse_command;
 
 use crate::session::{SessionHistoryItem, SessionHistoryItemKind, SessionMetadata, SessionRuntimeStatus};
@@ -219,6 +220,12 @@ pub(crate) fn history_item_from_turn_item(item: &TurnItem) -> Option<SessionHist
             {
                 item = item.with_metadata(metadata);
             }
+            if !*is_error
+                && matches!(tool_name.as_deref(), Some("apply_patch" | "write"))
+                && let Some(metadata) = parse_edited_history_metadata(output)
+            {
+                item = item.with_metadata(metadata);
+            }
             Some(item)
         }
         TurnItem::CommandExecution(CommandExecutionItem {
@@ -293,6 +300,63 @@ fn parse_plan_history_metadata(text: &str) -> Option<SessionHistoryMetadata> {
         })
         .collect::<Vec<_>>();
     Some(SessionHistoryMetadata::PlanUpdate { explanation, steps })
+}
+
+fn parse_edited_history_metadata(output: &serde_json::Value) -> Option<SessionHistoryMetadata> {
+    let files = output.get("files")?.as_array()?;
+    let diff = output
+        .get("diff")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut changes = std::collections::HashMap::new();
+    for file in files {
+        let path = std::path::PathBuf::from(file.get("path")?.as_str()?);
+        let kind = file.get("kind")?.as_str()?;
+        let additions = file
+            .get("additions")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let deletions = file
+            .get("deletions")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let change = match kind {
+            "add" => devo_protocol::protocol::FileChange::Add {
+                content: "\n".repeat(additions as usize),
+            },
+            "delete" => devo_protocol::protocol::FileChange::Delete {
+                content: "\n".repeat(deletions as usize),
+            },
+            "update" | "move" => devo_protocol::protocol::FileChange::Update {
+                unified_diff: file
+                    .get("diff")
+                    .or_else(|| file.get("patch"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| diff.clone()),
+                move_path: file
+                    .get("movePath")
+                    .or_else(|| file.get("move_path"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(std::path::PathBuf::from),
+            },
+            _ => continue,
+        };
+        changes.insert(path, change);
+    }
+    if changes.is_empty() && !diff.is_empty() {
+        for path in extract_paths_from_patch(&diff) {
+            changes.insert(
+                std::path::PathBuf::from(path),
+                devo_protocol::protocol::FileChange::Update {
+                    unified_diff: diff.clone(),
+                    move_path: None,
+                },
+            );
+        }
+    }
+    (!changes.is_empty()).then_some(SessionHistoryMetadata::Edited { changes })
 }
 
 impl SessionProjector for DefaultProjection {
@@ -500,5 +564,92 @@ mod tests {
             panic!("expected plan update metadata");
         };
         assert_eq!(steps.len(), 3);
+    }
+
+    #[test]
+    fn write_tool_result_emits_edited_metadata() {
+        let item = TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("write".to_string()),
+            output: serde_json::json!({
+                "diff": "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                "files": [
+                    {
+                        "path": "foo.txt",
+                        "kind": "update",
+                        "additions": 1,
+                        "deletions": 1
+                    }
+                ]
+            }),
+            display_content: None,
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        let SessionHistoryMetadata::Edited { changes } =
+            history_item.metadata.expect("edited metadata")
+        else {
+            panic!("expected edited metadata");
+        };
+        assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
+    }
+
+    #[test]
+    fn write_tool_result_with_diff_only_still_emits_edited_metadata() {
+        let item = TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("write".to_string()),
+            output: serde_json::json!({
+                "diff": "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                "files": []
+            }),
+            display_content: None,
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        let SessionHistoryMetadata::Edited { changes } =
+            history_item.metadata.expect("edited metadata")
+        else {
+            panic!("expected edited metadata");
+        };
+        assert!(changes.contains_key(&std::path::PathBuf::from("foo.txt")));
+    }
+
+    #[test]
+    fn edited_metadata_prefers_file_local_diff_over_top_level_diff() {
+        let item = TurnItem::ToolResult(ToolResultItem {
+            tool_call_id: "call-1".to_string(),
+            tool_name: Some("apply_patch".to_string()),
+            output: serde_json::json!({
+                "diff": "BROKEN TOP LEVEL DIFF",
+                "files": [
+                    {
+                        "path": "foo.txt",
+                        "kind": "update",
+                        "diff": "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n",
+                        "additions": 1,
+                        "deletions": 1
+                    }
+                ]
+            }),
+            display_content: None,
+            is_error: false,
+        });
+
+        let history_item = history_item_from_turn_item(&item).expect("history item");
+        let SessionHistoryMetadata::Edited { changes } =
+            history_item.metadata.expect("edited metadata")
+        else {
+            panic!("expected edited metadata");
+        };
+        let devo_protocol::protocol::FileChange::Update { unified_diff, .. } =
+            changes.get(&std::path::PathBuf::from("foo.txt")).expect("update change")
+        else {
+            panic!("expected update change");
+        };
+        assert!(unified_diff.contains("--- a/foo.txt"));
+        assert!(!unified_diff.contains("BROKEN TOP LEVEL DIFF"));
     }
 }

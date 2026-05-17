@@ -80,12 +80,63 @@ pub(crate) async fn exec_apply_patch(
         let relative_path =
             relative_worktree_path(target_path.as_ref().unwrap_or(&source_path), cwd);
         let kind_name = change.kind.as_str();
-        let diff = format!("--- {}\n+++ {}\n", relative_path, relative_path);
+        let diff = match change.kind {
+            PatchKind::Add => {
+                let content = if change.content.ends_with('\n') {
+                    change.content.clone()
+                } else {
+                    format!("{}\n", change.content)
+                };
+                format!(
+                    "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n@@ -0,0 +1,{1} @@\n{2}",
+                    relative_path,
+                    additions,
+                    content
+                        .lines()
+                        .map(|line| format!("+{line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            }
+            PatchKind::Delete => {
+                let deleted = if old_content.ends_with('\n') {
+                    old_content.clone()
+                } else {
+                    format!("{old_content}\n")
+                };
+                format!(
+                    "diff --git a/{0} b/{0}\ndeleted file mode 100644\n--- a/{0}\n+++ /dev/null\n@@ -1,{1} +0,0 @@\n{2}",
+                    relative_path,
+                    deletions,
+                    deleted
+                        .lines()
+                        .map(|line| format!("-{line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            }
+            PatchKind::Update | PatchKind::Move => {
+                let patch = diffy::create_patch(&old_content, &new_content);
+                let patch_text = diffy::PatchFormatter::new().fmt_patch(&patch).to_string();
+                let patch_body = patch_text
+                    .lines()
+                    .filter(|line| !line.starts_with("--- ") && !line.starts_with("+++ "))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                    relative_path, patch_body
+                )
+            }
+        };
 
         files.push(json!({
+            "path": relative_path,
             "filePath": source_path,
             "relativePath": relative_path,
+            "kind": kind_name,
             "type": kind_name,
+            "diff": diff,
             "patch": diff,
             "additions": additions,
             "deletions": deletions,
@@ -980,5 +1031,18 @@ hello
         assert_eq!(files[2]["deletions"], 1);
         assert_eq!(files[3]["additions"], 1);
         assert_eq!(files[3]["deletions"], 1);
+
+        let diff = metadata["diff"].as_str().expect("diff metadata");
+        let patch = diffy::Patch::from_str(diff).expect("metadata diff should parse");
+        let (added, removed) = patch
+            .hunks()
+            .iter()
+            .flat_map(diffy::Hunk::lines)
+            .fold((0usize, 0usize), |(a, d), line| match line {
+                diffy::Line::Insert(_) => (a + 1, d),
+                diffy::Line::Delete(_) => (a, d + 1),
+                diffy::Line::Context(_) => (a, d),
+            });
+        assert_eq!((added, removed), (3, 3));
     }
 }
