@@ -126,7 +126,7 @@ mod tests {
     fn build_write_metadata_for_existing_file_marks_update() {
         let metadata = build_write_metadata(std::path::Path::new("foo.txt"), Some("old\n"), "new\n");
         assert_eq!(metadata["files"][0]["kind"], "update");
-        assert!(metadata["diff"].as_str().unwrap_or_default().contains("--- a/foo.txt"));
-        assert!(metadata["diff"].as_str().unwrap_or_default().contains("+++ b/foo.txt"));
+        assert!(metadata["diff"].as_str().unwrap_or_default().contains("diff --git a/foo.txt b/foo.txt"));
+        assert!(metadata["diff"].as_str().unwrap_or_default().contains("@@ -1 +1 @@"));
     }
 }

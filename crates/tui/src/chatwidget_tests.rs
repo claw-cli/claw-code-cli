@@ -4,6 +4,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use ratatui::text::Line;
 use devo_protocol::ApprovalDecisionValue;
 use devo_protocol::ApprovalScopeValue;
 use devo_protocol::InputItem;
@@ -188,6 +189,170 @@ fn user_prompt_multiline_has_no_extra_blank_prefix_rows_and_consistent_prefix_te
 }
 
 #[test]
+fn restore_user_message_to_composer_restores_text() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.restore_user_message_to_composer(crate::chatwidget::UserMessage::from(
+        "previous message",
+    ));
+
+    let rendered = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(rendered.contains("previous message"), "composer should show restored text:\n{rendered}");
+}
+
+#[test]
+fn transcript_overlay_cell_carries_user_message_payload() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("previous message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+
+    let cells = widget.transcript_overlay_cells(80);
+    let user_cell = cells
+        .into_iter()
+        .find(|cell| cell.user_message.is_some())
+        .expect("user transcript cell");
+    assert_eq!(
+        user_cell.user_message.expect("user payload").text,
+        "previous message"
+    );
+}
+
+#[test]
+fn backtrack_preview_restore_latest_user_message() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("first message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+    widget.submit_text("second message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+
+    let mut overlay = crate::pager_overlay::Overlay::new_transcript(
+        widget.transcript_overlay_cells(80),
+        80,
+    );
+    let crate::pager_overlay::Overlay::Transcript(transcript) = &mut overlay else {
+        panic!("expected transcript overlay");
+    };
+    transcript.begin_backtrack_preview();
+    let selected = transcript.selected_user_message().expect("selected latest user");
+    widget.restore_user_message_to_composer(selected);
+
+    let rendered = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered.contains("second message"),
+        "expected latest message to be restored into composer:\n{rendered}"
+    );
+}
+
+#[test]
+fn backtrack_preview_can_restore_previous_and_next_user_messages() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("first message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+    widget.submit_text("second message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+
+    let mut overlay = crate::pager_overlay::Overlay::new_transcript(
+        widget.transcript_overlay_cells(80),
+        80,
+    );
+    let crate::pager_overlay::Overlay::Transcript(transcript) = &mut overlay else {
+        panic!("expected transcript overlay");
+    };
+    transcript.begin_backtrack_preview();
+    transcript.select_prev_user();
+    let previous = transcript.selected_user_message().expect("selected previous user");
+    widget.restore_user_message_to_composer(previous);
+    let rendered_prev = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered_prev.contains("first message"),
+        "expected previous message after select_prev:\n{rendered_prev}"
+    );
+
+    transcript.select_next_user();
+    let next = transcript.selected_user_message().expect("selected next user");
+    widget.restore_user_message_to_composer(next);
+    let rendered_next = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered_next.contains("second message"),
+        "expected next message after select_next:\n{rendered_next}"
+    );
+}
+
+#[test]
+fn restoring_previous_message_truncates_later_transcript_history() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("first message".to_string());
+    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![Line::from("assistant 1")]));
+    widget.submit_text("second message".to_string());
+    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![Line::from("assistant 2")]));
+    let _ = widget.drain_scrollback_lines(80);
+
+    widget.truncate_history_to_user_turn_count(1);
+    widget.restore_user_message_to_composer(crate::chatwidget::UserMessage::from("first message"));
+
+    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(rendered.contains("first message"));
+    let transcript_lines = widget
+        .transcript_overlay_cells(80)
+        .into_iter()
+        .flat_map(|cell| cell.lines)
+        .flat_map(|line| line.spans.into_iter())
+        .map(|span| span.content)
+        .collect::<String>();
+    assert!(transcript_lines.contains("first message"));
+    assert!(!transcript_lines.contains("second message"));
+    assert!(!transcript_lines.contains("assistant 2"));
+}
+
+#[test]
+fn esc_backtrack_hint_is_shown_before_restore() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.show_esc_backtrack_hint();
+    let rendered = rendered_rows(&widget, 100, 14).join("\n");
+    assert!(
+        rendered.contains("esc again to edit previous message")
+            || rendered.contains("esc esc to edit previous message"),
+        "expected esc backtrack hint before opening overlay:\n{rendered}"
+    );
+}
+
+
+#[test]
 fn resume_command_opens_loading_browser_immediately() {
     let model = Model {
         slug: "test-model".to_string(),
@@ -207,6 +372,357 @@ fn resume_command_opens_loading_browser_immediately() {
         rows.iter()
             .any(|row| row.contains("Loading saved sessions"))
     );
+}
+
+#[test]
+fn resume_loading_browser_closes_with_esc_or_q() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::Command(AppCommand::RunUserShellCommand {
+        command: "session list".to_string(),
+    }));
+    assert!(widget.is_resume_browser_open());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+
+    widget.handle_app_event(AppEvent::Command(AppCommand::RunUserShellCommand {
+        command: "session list".to_string(),
+    }));
+    assert!(widget.is_resume_browser_open());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+}
+
+#[test]
+fn resume_browser_clips_sessions_to_viewport_height() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+
+    let rows = rendered_rows(&widget, 80, 10);
+    let blob = rows.join("\n");
+    assert!(blob.contains("Session 0"));
+    assert!(blob.contains("Session 1"));
+    assert!(!blob.contains("Session 2"), "rows should be clipped to viewport:\n{blob}");
+    assert!(!blob.contains("Session 3"), "rows should be clipped to viewport:\n{blob}");
+    assert!(blob.contains("↓ more"), "expected lower overflow indicator:\n{blob}");
+}
+
+#[test]
+fn resume_browser_list_closes_with_esc_or_q() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions = vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "Session".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: true,
+    }];
+    widget.open_resume_browser_for_test(sessions.clone());
+    assert!(widget.is_resume_browser_open());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+
+    widget.open_resume_browser_for_test(sessions);
+    assert!(widget.is_resume_browser_open());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+}
+
+#[test]
+fn resume_browser_keeps_selection_visible_when_navigating_down() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+
+    for _ in 0..11 {
+        widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(11));
+
+    let rows = rendered_rows(&widget, 80, 10);
+    let blob = rows.join("\n");
+    assert!(blob.contains("Session 11"), "selected tail item should be visible:\n{blob}");
+    assert!(!blob.contains("Session 0"), "viewport should have scrolled away from the head:\n{blob}");
+    assert!(blob.contains("↑ more"), "expected upper overflow indicator after scrolling:\n{blob}");
+}
+
+#[test]
+fn resume_browser_enter_resumes_selected_scrolled_session() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    let expected = sessions[11].session_id;
+    widget.open_resume_browser_for_test(sessions);
+
+    for _ in 0..11 {
+        widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let event = app_event_rx
+        .try_recv()
+        .expect("resume selection should emit switch command");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::switch_session(expected))
+    );
+}
+
+#[test]
+fn resume_browser_supports_page_and_home_end_navigation() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+    let _ = rendered_rows(&widget, 80, 10);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(3));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(11));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(0));
+
+    let blob = rendered_rows(&widget, 80, 10).join("\n");
+    assert!(
+        blob.contains("pgup/pgdn page"),
+        "expected paging hint text in resume browser:\n{blob}"
+    );
+    assert!(
+        blob.contains("home/end jump"),
+        "expected home/end hint text in resume browser:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_up_down_do_not_wrap_around() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..4)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(0));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(3));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(3));
+}
+
+#[test]
+fn resume_browser_shows_position_and_scroll_progress() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+    let _ = rendered_rows(&widget, 80, 10);
+    widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+
+    let blob = rendered_rows(&widget, 80, 10).join("\n");
+    assert!(blob.contains("12 / 12"), "expected position label in resume header:\n{blob}");
+    assert!(blob.contains("100%"), "expected scroll percent in resume header:\n{blob}");
+}
+
+#[test]
+fn resume_browser_title_uses_ascii_ellipsis_when_too_long() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "This is a very long session title that should be truncated in resume browser".to_string(),
+        updated_at: "2026-05-17 10:00".to_string(),
+        is_active: true,
+    }]);
+
+    let blob = rendered_rows(&widget, 54, 10).join("\n");
+    assert!(blob.contains("..."), "expected ASCII ellipsis truncation in title column:\n{blob}");
+}
+
+#[test]
+fn resume_browser_dash_only_title_is_truncated_with_ascii_ellipsis() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "------------------------------------------------------------".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: true,
+    }]);
+
+    let blob = rendered_rows(&widget, 54, 10).join("\n");
+    assert!(blob.contains("..."), "expected dash-only title to be truncated with ASCII ellipsis:\n{blob}");
+}
+
+#[test]
+fn resume_browser_cjk_title_truncates_by_display_width() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "这是一个非常非常长的中文会话标题用于测试截断显示是否正确".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: true,
+    }]);
+
+    let blob = rendered_rows(&widget, 54, 10).join("\n");
+    assert!(blob.contains("..."), "expected CJK title truncation to include ASCII ellipsis:\n{blob}");
+    assert!(!blob.contains("是否正确"), "expected tail of long CJK title to be truncated:\n{blob}");
+}
+
+#[test]
+fn resume_browser_cjk_and_ascii_titles_keep_session_id_column_aligned() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let cjk_session_id = SessionId::new();
+    let ascii_session_id = SessionId::new();
+    widget.open_resume_browser_for_test(vec![
+        crate::events::SessionListEntry {
+            session_id: cjk_session_id,
+            title: "中文标题用于对齐测试".to_string(),
+            updated_at: "2026-05-18 10:00".to_string(),
+            is_active: true,
+        },
+        crate::events::SessionListEntry {
+            session_id: ascii_session_id,
+            title: "ASCII title".to_string(),
+            updated_at: "2026-05-18 10:00".to_string(),
+            is_active: false,
+        },
+    ]);
+
+    let area = ratatui::layout::Rect::new(0, 0, 90, 10);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    widget.render(area, &mut buf);
+
+    let cjk_id_text = cjk_session_id.to_string();
+    let ascii_id_text = ascii_session_id.to_string();
+    let mut cjk_pos = None;
+    let mut ascii_pos = None;
+    for row in 0..area.height {
+        let row_text = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if row_text.contains(&cjk_id_text) {
+            cjk_pos = (0..area.width).find(|col| {
+                let tail = (*col..area.width)
+                    .map(|scan_col| buf[(scan_col, row)].symbol())
+                    .collect::<String>();
+                tail.starts_with(&cjk_id_text)
+            });
+        }
+        if row_text.contains(&ascii_id_text) {
+            ascii_pos = (0..area.width).find(|col| {
+                let tail = (*col..area.width)
+                    .map(|scan_col| buf[(scan_col, row)].symbol())
+                    .collect::<String>();
+                tail.starts_with(&ascii_id_text)
+            });
+        }
+    }
+    let cjk_col = cjk_pos.expect("cjk session id column");
+    let ascii_col = ascii_pos.expect("ascii session id column");
+    assert_eq!(cjk_col, ascii_col, "expected Session ID column alignment across CJK and ASCII rows");
 }
 
 #[test]

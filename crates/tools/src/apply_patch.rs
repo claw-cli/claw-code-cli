@@ -116,15 +116,25 @@ pub(crate) async fn exec_apply_patch(
                 )
             }
             PatchKind::Update | PatchKind::Move => {
-                let patch = diffy::create_patch(&old_content, &new_content);
-                let patch_text = diffy::PatchFormatter::new().fmt_patch(&patch).to_string();
-                let patch_body = patch_text
-                    .lines()
-                    .filter(|line| !line.starts_with("--- ") && !line.starts_with("+++ "))
+                let old_line_count = old_content.lines().count();
+                let new_line_count = new_content.lines().count();
+                let patch_body = change
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| {
+                        let mut lines = Vec::with_capacity(hunk.lines.len() + 1);
+                        lines.push(format!("@@ -1,{old_line_count} +1,{new_line_count} @@"));
+                        lines.extend(hunk.lines.iter().map(|line| match line {
+                            HunkLine::Context(text) => format!(" {text}"),
+                            HunkLine::Remove(text) => format!("-{text}"),
+                            HunkLine::Add(text) => format!("+{text}"),
+                        }));
+                        lines
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 format!(
-                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
+                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}\n",
                     relative_path, patch_body
                 )
             }
@@ -142,7 +152,10 @@ pub(crate) async fn exec_apply_patch(
             "deletions": deletions,
             "movePath": target_path,
         }));
-        total_diff.push_str(&diff);
+        if !total_diff.is_empty() {
+            total_diff.push('\n');
+        }
+        total_diff.push_str(diff.trim_end());
         total_diff.push('\n');
 
         summary.push(match change.kind {
@@ -1032,17 +1045,25 @@ hello
         assert_eq!(files[3]["additions"], 1);
         assert_eq!(files[3]["deletions"], 1);
 
-        let diff = metadata["diff"].as_str().expect("diff metadata");
-        let patch = diffy::Patch::from_str(diff).expect("metadata diff should parse");
-        let (added, removed) = patch
-            .hunks()
-            .iter()
-            .flat_map(diffy::Hunk::lines)
-            .fold((0usize, 0usize), |(a, d), line| match line {
-                diffy::Line::Insert(_) => (a + 1, d),
-                diffy::Line::Delete(_) => (a, d + 1),
-                diffy::Line::Context(_) => (a, d),
-            });
-        assert_eq!((added, removed), (3, 3));
+        for file in files {
+            if file["kind"] == "update" || file["kind"] == "move" {
+                let per_file_diff = file
+                    .get("diff")
+                    .or_else(|| file.get("patch"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("per-file diff");
+                let patch = diffy::Patch::from_str(per_file_diff).expect("per-file diff should parse");
+                let (added, removed) = patch
+                    .hunks()
+                    .iter()
+                    .flat_map(diffy::Hunk::lines)
+                    .fold((0usize, 0usize), |(a, d), line| match line {
+                        diffy::Line::Insert(_) => (a + 1, d),
+                        diffy::Line::Delete(_) => (a, d + 1),
+                        diffy::Line::Context(_) => (a, d),
+                    });
+                assert_eq!((added, removed), (1, 1));
+            }
+        }
     }
 }

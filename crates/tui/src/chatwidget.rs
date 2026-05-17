@@ -5,6 +5,7 @@
 //! interaction. Protocol thinking choices come from `devo_protocol::thinking`
 //! through `Model` instead of a TUI-local reasoning enum.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -56,9 +57,9 @@ use crate::bottom_pane::ModelPickerEntry;
 use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
-use crate::events::SessionListEntry;
 use crate::events::PlanStep;
 use crate::events::PlanStepStatus;
+use crate::events::SessionListEntry;
 use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
@@ -73,8 +74,8 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
-use crate::render::renderable::Renderable;
 use crate::render::line_utils::prefix_lines;
+use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
 use crate::streaming::chunking::AdaptiveChunkingPolicy;
@@ -84,9 +85,11 @@ use crate::streaming::controller::StreamController;
 use crate::theme::ThemeSet;
 use crate::tool_result_cell::ToolResultCell;
 use crate::tui::frame_requester::FrameRequester;
+use devo_protocol::SessionHistoryItem;
+use devo_protocol::SessionHistoryMetadata;
+use devo_protocol::SessionPlanStepStatus;
 use devo_utils::ansi_escape::ansi_escape_line;
 use devo_utils::shell_command::parse_command::parse_command;
-use devo_protocol::{SessionHistoryItem, SessionHistoryMetadata, SessionPlanStepStatus};
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -151,6 +154,8 @@ pub(crate) struct ActiveCellTranscriptKey {
 pub(crate) struct TranscriptOverlayCell {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) is_stream_continuation: bool,
+    pub(crate) user_message: Option<UserMessage>,
+    pub(crate) is_selected_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -206,6 +211,7 @@ enum OnboardingStep {
 struct ResumeBrowserState {
     sessions: Vec<SessionListEntry>,
     selection: usize,
+    scroll_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +359,7 @@ pub(crate) struct ChatWidget {
     pending_model_selection: Option<PendingModelSelection>,
     theme_set: ThemeSet,
     active_theme_name: String,
+    resume_browser_last_height: Cell<u16>,
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
@@ -363,8 +370,7 @@ pub(crate) struct ChatWidget {
     last_plan_progress: Option<(usize, usize)>,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
-    saw_server_assistant_lifecycle: bool,
-    saw_server_reasoning_lifecycle: bool,
+    committed_server_assistant_in_turn: bool,
     pending_approval: Option<PendingApprovalRequest>,
     permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
@@ -499,24 +505,39 @@ impl ChatWidget {
         ])
     }
 
-    fn truncate_display_text(value: &str, max_chars: usize) -> String {
+    fn truncate_display_text(value: &str, max_width: usize) -> String {
+        let total_width = unicode_width::UnicodeWidthStr::width(value);
+        if total_width <= max_width {
+            return value.to_string();
+        }
+        if max_width == 0 {
+            return String::new();
+        }
+        if max_width <= 3 {
+            return ".".repeat(max_width);
+        }
+
+        let target_width = max_width.saturating_sub(3);
         let mut rendered = String::new();
-        for (count, ch) in value.chars().enumerate() {
-            if count >= max_chars {
+        let mut rendered_width = 0usize;
+        for ch in value.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if rendered_width.saturating_add(ch_width) > target_width {
                 break;
             }
             rendered.push(ch);
+            rendered_width = rendered_width.saturating_add(ch_width);
         }
-        if value.chars().count() > max_chars && max_chars > 0 {
-            let mut truncated = rendered
-                .chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>();
-            truncated.push('…');
-            truncated
-        } else {
-            rendered
+        rendered.push_str("...");
+        rendered
+    }
+
+    fn pad_display_text(value: &str, target_width: usize) -> String {
+        let width = unicode_width::UnicodeWidthStr::width(value);
+        if width >= target_width {
+            return value.to_string();
         }
+        format!("{value}{}", " ".repeat(target_width - width))
     }
 
     fn tool_text_style() -> Style {
@@ -793,7 +814,11 @@ impl ChatWidget {
 
         let metadata_owned_ids: HashSet<String> = history_items
             .iter()
-            .filter_map(|item| item.tool_call_id.clone().filter(|_| item.metadata.is_some()))
+            .filter_map(|item| {
+                item.tool_call_id
+                    .clone()
+                    .filter(|_| item.metadata.is_some())
+            })
             .collect();
         let mut consumed_indexes = HashSet::new();
 
@@ -812,15 +837,26 @@ impl ChatWidget {
                     SessionHistoryMetadata::PlanUpdate { explanation, steps } => {
                         self.on_plan_updated(
                             explanation.clone(),
-                            steps.iter().map(|step| crate::events::PlanStep {
-                                text: step.text.clone(),
-                                status: match step.status {
-                                    SessionPlanStepStatus::Pending => crate::events::PlanStepStatus::Pending,
-                                    SessionPlanStepStatus::InProgress => crate::events::PlanStepStatus::InProgress,
-                                    SessionPlanStepStatus::Completed => crate::events::PlanStepStatus::Completed,
-                                    SessionPlanStepStatus::Cancelled => crate::events::PlanStepStatus::Cancelled,
-                                },
-                            }).collect(),
+                            steps
+                                .iter()
+                                .map(|step| crate::events::PlanStep {
+                                    text: step.text.clone(),
+                                    status: match step.status {
+                                        SessionPlanStepStatus::Pending => {
+                                            crate::events::PlanStepStatus::Pending
+                                        }
+                                        SessionPlanStepStatus::InProgress => {
+                                            crate::events::PlanStepStatus::InProgress
+                                        }
+                                        SessionPlanStepStatus::Completed => {
+                                            crate::events::PlanStepStatus::Completed
+                                        }
+                                        SessionPlanStepStatus::Cancelled => {
+                                            crate::events::PlanStepStatus::Cancelled
+                                        }
+                                    },
+                                })
+                                .collect(),
                         );
                     }
                     SessionHistoryMetadata::Edited { changes } => {
@@ -1096,6 +1132,7 @@ impl ChatWidget {
             pending_model_selection: None,
             theme_set,
             active_theme_name,
+            resume_browser_last_height: Cell::new(0),
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -1106,8 +1143,7 @@ impl ChatWidget {
             last_plan_progress: None,
             queued_count: 0,
             active_turn_id: None,
-            saw_server_assistant_lifecycle: false,
-            saw_server_reasoning_lifecycle: false,
+            committed_server_assistant_in_turn: false,
             pending_approval: None,
             permission_preset: initial_permission_preset,
             busy: false,
@@ -1130,6 +1166,18 @@ impl ChatWidget {
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+        if self.resume_browser_loading {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.resume_browser = None;
+                    self.resume_browser_loading = false;
+                    self.set_status_message("Ready");
+                    self.frame_requester.schedule_frame();
+                }
+                _ => {}
+            }
             return;
         }
         if self.resume_browser.is_some() {
@@ -1492,8 +1540,7 @@ impl ChatWidget {
                 ..
             } => {
                 self.active_turn_id = Some(turn_id);
-                self.saw_server_assistant_lifecycle = false;
-                self.saw_server_reasoning_lifecycle = false;
+                self.committed_server_assistant_in_turn = false;
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
@@ -1505,10 +1552,6 @@ impl ChatWidget {
             }
             WorkerEvent::TextItemStarted { item_id, kind } => {
                 self.flush_active_cell();
-                match kind {
-                    TextItemKind::Assistant => self.saw_server_assistant_lifecycle = true,
-                    TextItemKind::Reasoning => self.saw_server_reasoning_lifecycle = true,
-                }
                 self.start_text_item(ActiveTextItemId::Server(item_id), kind);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
@@ -1538,9 +1581,7 @@ impl ChatWidget {
                 });
             }
             WorkerEvent::TextDelta(text) => {
-                if !self.saw_server_assistant_lifecycle
-                    && !self.has_server_active_item(TextItemKind::Assistant)
-                {
+                if !self.has_server_active_item(TextItemKind::Assistant) {
                     self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
@@ -1551,9 +1592,7 @@ impl ChatWidget {
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningDelta(text) => {
-                if !self.saw_server_reasoning_lifecycle
-                    && !self.has_server_active_item(TextItemKind::Reasoning)
-                {
+                if !self.has_server_active_item(TextItemKind::Reasoning) {
                     self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
@@ -1564,7 +1603,7 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                if !self.saw_server_assistant_lifecycle
+                if !self.committed_server_assistant_in_turn
                     && !self.has_server_active_item(TextItemKind::Assistant)
                     && !self
                         .active_text_items
@@ -1580,13 +1619,7 @@ impl ChatWidget {
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningCompleted(text) => {
-                if !self.saw_server_reasoning_lifecycle
-                    && !self.has_server_active_item(TextItemKind::Reasoning)
-                    && !self
-                        .active_text_items
-                        .iter()
-                        .any(|item| item.kind == TextItemKind::Reasoning)
-                {
+                if !self.has_server_active_item(TextItemKind::Reasoning) {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
@@ -1603,9 +1636,12 @@ impl ChatWidget {
                 let command = crate::exec_command::split_command_string(&summary);
                 let parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
                 let exec_like = !parsed.is_empty()
-                    && parsed
-                        .iter()
-                        .all(|parsed| !matches!(parsed, devo_protocol::parse_command::ParsedCommand::Unknown { .. }));
+                    && parsed.iter().all(|parsed| {
+                        !matches!(
+                            parsed,
+                            devo_protocol::parse_command::ParsedCommand::Unknown { .. }
+                        )
+                    });
                 if exec_like {
                     if let Some(cell) = self
                         .active_cell
@@ -1720,18 +1756,17 @@ impl ChatWidget {
                 } else {
                     DotStatus::Completed
                 };
-                let resolved_title = self
-                    .active_tool_calls
-                    .remove(&tool_use_id)
-                    .unwrap_or(ActiveToolCall {
-                        tool_use_id: tool_use_id.clone(),
-                        title,
-                        lines: Vec::new(),
-                        exec_like: false,
-                    });
+                let resolved_title =
+                    self.active_tool_calls
+                        .remove(&tool_use_id)
+                        .unwrap_or(ActiveToolCall {
+                            tool_use_id: tool_use_id.clone(),
+                            title,
+                            lines: Vec::new(),
+                            exec_like: false,
+                        });
 
-                if resolved_title.exec_like
-                {
+                if resolved_title.exec_like {
                     let output = CommandOutput {
                         exit_code: if is_error { 1 } else { 0 },
                         aggregated_output: preview.clone(),
@@ -1765,10 +1800,12 @@ impl ChatWidget {
                         }
                     }
                     if let Some(cell) = self.history.iter_mut().rev().find_map(|cell| {
-                        cell.as_any_mut().downcast_mut::<ExecCell>().and_then(|cell| {
-                            cell.complete_call(&tool_use_id, output.clone(), duration)
-                                .then_some(cell)
-                        })
+                        cell.as_any_mut()
+                            .downcast_mut::<ExecCell>()
+                            .and_then(|cell| {
+                                cell.complete_call(&tool_use_id, output.clone(), duration)
+                                    .then_some(cell)
+                            })
                     }) {
                         let _ = cell;
                         self.frame_requester.schedule_frame();
@@ -1814,10 +1851,7 @@ impl ChatWidget {
                 self.set_status_message("Plan updated");
             }
             WorkerEvent::PatchApplied { changes } => {
-                self.add_to_history(history_cell::new_patch_event(
-                    changes,
-                    &self.session.cwd,
-                ));
+                self.add_to_history(history_cell::new_patch_event(changes, &self.session.cwd));
                 self.set_status_message("Patch applied");
             }
             WorkerEvent::ApprovalRequest {
@@ -1902,8 +1936,7 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
-                self.saw_server_assistant_lifecycle = false;
-                self.saw_server_reasoning_lifecycle = false;
+                self.committed_server_assistant_in_turn = false;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1949,8 +1982,7 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
-                self.saw_server_assistant_lifecycle = false;
-                self.saw_server_reasoning_lifecycle = false;
+                self.committed_server_assistant_in_turn = false;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -2025,8 +2057,7 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.active_text_items.clear();
-                self.saw_server_assistant_lifecycle = false;
-                self.saw_server_reasoning_lifecycle = false;
+                self.committed_server_assistant_in_turn = false;
                 self.stream_chunking_policy.reset();
                 self.busy = false;
                 self.turn_count = 0;
@@ -2071,8 +2102,7 @@ impl ChatWidget {
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.active_text_items.clear();
-                self.saw_server_assistant_lifecycle = false;
-                self.saw_server_reasoning_lifecycle = false;
+                self.committed_server_assistant_in_turn = false;
                 self.stream_chunking_policy.reset();
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
@@ -2169,13 +2199,11 @@ impl ChatWidget {
             .count();
         self.last_plan_progress = (total > 0).then_some((completed, total));
 
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
-                " ".into(),
-                "Updated Plan".bold(),
-            ]),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+            " ".into(),
+            "Updated Plan".bold(),
+        ])];
         if let Some(explanation) = explanation
             && !explanation.trim().is_empty()
         {
@@ -2750,6 +2778,9 @@ impl ChatWidget {
         }
         self.sync_text_item_cell(index);
         self.commit_completed_text_items();
+        if matches!(item_id, ActiveTextItemId::Server(_)) && kind == TextItemKind::Assistant {
+            self.committed_server_assistant_in_turn = true;
+        }
     }
 
     fn ensure_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) -> usize {
@@ -3327,11 +3358,57 @@ impl ChatWidget {
         let width = width.max(1);
         self.history
             .iter()
-            .map(|cell| TranscriptOverlayCell {
-                lines: cell.transcript_lines(width),
-                is_stream_continuation: cell.is_stream_continuation(),
+            .map(|cell| {
+                let user_message = cell
+                    .as_any()
+                    .downcast_ref::<history_cell::UserHistoryCell>()
+                    .map(|user| UserMessage {
+                        text: user.message.clone(),
+                        local_images: user
+                            .local_image_paths
+                            .iter()
+                            .cloned()
+                            .map(|path| crate::bottom_pane::LocalImageAttachment {
+                                path,
+                                placeholder: String::new(),
+                            })
+                            .collect(),
+                        remote_image_urls: user.remote_image_urls.clone(),
+                        text_elements: user.text_elements.clone(),
+                        mention_bindings: Vec::new(),
+                    });
+                TranscriptOverlayCell {
+                    lines: cell.transcript_lines(width),
+                    is_stream_continuation: cell.is_stream_continuation(),
+                    user_message,
+                    is_selected_user: false,
+                }
             })
             .collect()
+    }
+
+    pub(crate) fn truncate_history_to_user_turn_count(&mut self, user_turn_count: usize) {
+        let mut remaining_users = user_turn_count;
+        let mut new_len = 0usize;
+        for (idx, cell) in self.history.iter().enumerate() {
+            let is_user = cell
+                .as_ref()
+                .as_any()
+                .downcast_ref::<history_cell::UserHistoryCell>()
+                .is_some();
+            if is_user {
+                if remaining_users == 0 {
+                    break;
+                }
+                remaining_users -= 1;
+            }
+            new_len = idx + 1;
+        }
+        self.history.truncate(new_len);
+        self.next_history_flush_index = self.next_history_flush_index.min(self.history.len());
+        self.refresh_user_cell_indices();
+        self.exit_selection_mode();
+        self.frame_requester.schedule_frame();
     }
 
     pub(crate) fn transcript_overlay_live_tail_key(&self) -> Option<ActiveCellTranscriptKey> {
@@ -3386,6 +3463,22 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    pub(crate) fn restore_user_message_to_composer(&mut self, user_message: UserMessage) {
+        self.bottom_pane
+            .set_remote_image_urls(user_message.remote_image_urls);
+        let local_image_paths = user_message
+            .local_images
+            .into_iter()
+            .map(|attachment| attachment.path)
+            .collect::<Vec<_>>();
+        self.bottom_pane.set_text_content(
+            user_message.text,
+            user_message.text_elements,
+            local_image_paths,
+        );
+        self.set_status_message("Previous message loaded");
+    }
+
     pub(crate) fn pop_next_queued_user_message(&mut self) -> Option<UserMessage> {
         self.queued_user_messages.pop_front()
     }
@@ -3403,6 +3496,22 @@ impl ChatWidget {
 
     pub(crate) fn active_viewport_lines_for_test(&self, width: u16) -> Vec<Line<'static>> {
         self.active_viewport_lines(width)
+    }
+
+    pub(crate) fn composer_is_empty(&self) -> bool {
+        self.bottom_pane.current_text().trim().is_empty()
+    }
+
+    pub(crate) fn is_normal_backtrack_mode(&self) -> bool {
+        self.bottom_pane.is_normal_backtrack_mode()
+    }
+
+    pub(crate) fn show_esc_backtrack_hint(&mut self) {
+        self.bottom_pane.show_esc_backtrack_hint();
+    }
+
+    pub(crate) fn clear_esc_backtrack_hint(&mut self) {
+        self.bottom_pane.clear_esc_backtrack_hint();
     }
 
     fn active_viewport_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -3736,6 +3845,7 @@ impl ChatWidget {
         self.resume_browser = Some(ResumeBrowserState {
             sessions,
             selection,
+            scroll_offset: 0,
         });
         self.set_status_message("Resume session");
     }
@@ -3747,28 +3857,69 @@ impl ChatWidget {
         let Some(browser) = self.resume_browser.as_mut() else {
             return;
         };
+        let page_step = Self::resume_browser_visible_capacity(
+            self.resume_browser_last_height.get(),
+            !browser.sessions.is_empty(),
+        )
+        .max(1);
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('q') => {
                 self.resume_browser = None;
                 self.resume_browser_loading = false;
                 self.set_status_message("Ready");
+                self.frame_requester.schedule_frame();
             }
             KeyCode::Up => {
                 if browser.sessions.is_empty() {
                     browser.selection = 0;
-                } else {
-                    browser.selection = (browser.selection as isize - 1)
-                        .rem_euclid(browser.sessions.len() as isize)
-                        as usize;
+                } else if browser.selection > 0 {
+                    browser.selection -= 1;
                 }
+                self.ensure_resume_selection_visible(u16::MAX);
                 self.frame_requester.schedule_frame();
             }
             KeyCode::Down => {
                 if browser.sessions.is_empty() {
                     browser.selection = 0;
-                } else {
-                    browser.selection = (browser.selection + 1) % browser.sessions.len();
+                } else if browser.selection + 1 < browser.sessions.len() {
+                    browser.selection += 1;
                 }
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::PageUp => {
+                if browser.sessions.is_empty() {
+                    browser.selection = 0;
+                } else {
+                    browser.selection = browser.selection.saturating_sub(page_step);
+                }
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::PageDown => {
+                if browser.sessions.is_empty() {
+                    browser.selection = 0;
+                } else {
+                    browser.selection = browser
+                        .selection
+                        .saturating_add(page_step)
+                        .min(browser.sessions.len().saturating_sub(1));
+                }
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::Home => {
+                browser.selection = 0;
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::End => {
+                if browser.sessions.is_empty() {
+                    browser.selection = 0;
+                } else {
+                    browser.selection = browser.sessions.len().saturating_sub(1);
+                }
+                self.ensure_resume_selection_visible(u16::MAX);
                 self.frame_requester.schedule_frame();
             }
             KeyCode::Enter => {
@@ -3786,6 +3937,146 @@ impl ChatWidget {
 
     pub(crate) fn is_resume_browser_open(&self) -> bool {
         self.resume_browser_loading || self.resume_browser.is_some()
+    }
+
+    fn resume_browser_entry_height() -> usize {
+        1
+    }
+
+    fn resume_browser_chrome_height(has_sessions: bool) -> usize {
+        if has_sessions { 7 } else { 6 }
+    }
+
+    fn resume_browser_visible_capacity(area_height: u16, has_sessions: bool) -> usize {
+        area_height.saturating_sub(Self::resume_browser_chrome_height(has_sessions) as u16) as usize
+    }
+
+    fn resume_browser_window(
+        sessions_len: usize,
+        selection: usize,
+        requested_offset: usize,
+        area_height: u16,
+    ) -> (usize, usize, bool, bool) {
+        if sessions_len == 0 {
+            return (0, 0, false, false);
+        }
+        let list_window = Self::resume_browser_visible_capacity(area_height, true);
+        if list_window == 0 {
+            return (selection.min(sessions_len.saturating_sub(1)), 0, true, true);
+        }
+
+        let selection = selection.min(sessions_len.saturating_sub(1));
+        let mut start = requested_offset.min(sessions_len.saturating_sub(1));
+        let mut slots = list_window;
+
+        loop {
+            if slots == 0 {
+                return (selection, 0, start > 0, selection + 1 < sessions_len);
+            }
+            let end = (start + slots).min(sessions_len);
+            let has_above = start > 0;
+            let has_below = end < sessions_len;
+            let indicator_rows = usize::from(has_above) + usize::from(has_below);
+            let session_slots = list_window.saturating_sub(indicator_rows);
+            if session_slots == slots {
+                let end = (start + session_slots).min(sessions_len);
+                let has_above = start > 0;
+                let has_below = end < sessions_len;
+                return (start, end, has_above, has_below);
+            }
+            slots = session_slots;
+            if selection < start {
+                start = selection;
+            } else if selection >= start + slots {
+                start = selection + 1 - slots;
+            }
+            start = start.min(sessions_len.saturating_sub(slots.max(1)));
+        }
+    }
+
+    fn resume_browser_footer_lines(has_sessions: bool) -> Vec<Line<'static>> {
+        if has_sessions {
+            vec![
+                Line::from("↑/↓ select  pgup/pgdn page  home/end jump".dim()),
+                Line::from("enter resume  q back".dim()),
+            ]
+        } else {
+            vec![Line::from("q back".dim())]
+        }
+    }
+
+    fn resume_browser_progress_label(
+        selection: usize,
+        sessions_len: usize,
+        rendered_start: usize,
+        area_height: u16,
+    ) -> String {
+        if sessions_len == 0 {
+            return " 0 / 0 · 100% ".to_string();
+        }
+        let position = selection.saturating_add(1);
+        let total = sessions_len;
+        let capacity = Self::resume_browser_visible_capacity(area_height, true);
+        let max_scroll = sessions_len.saturating_sub(capacity.max(1));
+        let percent = if max_scroll == 0 {
+            100
+        } else {
+            ((rendered_start.min(max_scroll) as f32 / max_scroll as f32) * 100.0).round() as usize
+        };
+        format!(" {position} / {total} · {percent}% ")
+    }
+
+    fn ensure_resume_selection_visible(&mut self, area_height: u16) {
+        let Some(browser) = self.resume_browser.as_mut() else {
+            return;
+        };
+        if browser.sessions.is_empty() {
+            browser.selection = 0;
+            browser.scroll_offset = 0;
+            return;
+        }
+
+        let selection = browser
+            .selection
+            .min(browser.sessions.len().saturating_sub(1));
+        browser.selection = selection;
+        let capacity = Self::resume_browser_visible_capacity(area_height, true);
+        if capacity == 0 {
+            browser.scroll_offset = selection;
+            return;
+        }
+
+        if selection < browser.scroll_offset {
+            browser.scroll_offset = selection;
+        } else {
+            let selection_bottom = selection + Self::resume_browser_entry_height();
+            let viewport_bottom = browser.scroll_offset + capacity;
+            if selection_bottom > viewport_bottom {
+                browser.scroll_offset = selection_bottom.saturating_sub(capacity);
+            }
+        }
+
+        let max_offset = browser.sessions.len().saturating_sub(capacity);
+        browser.scroll_offset = browser.scroll_offset.min(max_offset);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_browser_selection_for_test(&self) -> Option<usize> {
+        self.resume_browser
+            .as_ref()
+            .map(|browser| browser.selection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_browser_scroll_offset_for_test(&self) -> Option<usize> {
+        self.resume_browser
+            .as_ref()
+            .map(|browser| browser.scroll_offset)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_resume_browser_for_test(&mut self, sessions: Vec<SessionListEntry>) {
+        self.open_resume_browser(sessions);
     }
 }
 
@@ -3806,26 +4097,38 @@ impl Renderable for ChatWidget {
         }
 
         if let Some(browser) = &self.resume_browser {
+            self.resume_browser_last_height.set(area.height);
             Block::default().style(Style::default()).render(area, buf);
+            let (scroll_offset, end, has_above, has_below) = Self::resume_browser_window(
+                browser.sessions.len(),
+                browser.selection,
+                browser.scroll_offset,
+                area.height,
+            );
             let title_width = browser
                 .sessions
                 .iter()
-                .map(|session| session.title.chars().count())
+                .map(|session| unicode_width::UnicodeWidthStr::width(session.title.as_str()))
                 .max()
                 .unwrap_or(5)
-                .clamp(5, 36);
-            let mut lines = vec![
-                Line::from("Resume Session".bold()),
-                Line::from("Use Up/Down to select a session, Enter to resume.".dim()),
-                Line::from("Esc to go back.".dim()),
-                Line::from(""),
-            ];
+                .clamp(5, 48);
+            let progress = Self::resume_browser_progress_label(
+                browser.selection,
+                browser.sessions.len(),
+                scroll_offset,
+                area.height,
+            );
+            let mut lines = vec![Line::from(vec![
+                Span::styled("Resume Session", Style::default().bold()),
+                Span::raw(" "),
+                Span::styled(progress, Style::default().dim()),
+            ])];
             if browser.sessions.is_empty() {
                 lines.push(Line::from("No saved sessions found.".dim()));
             } else {
                 lines.push(
                     Line::from(format!(
-                        "  {:title_width$}  {:<16}  {}",
+                        "  {:title_width$}  {:<36}  {}",
                         "Title",
                         "Session ID",
                         "Updated",
@@ -3837,22 +4140,30 @@ impl Renderable for ChatWidget {
                     Line::from(format!(
                         "  {}  {}  {}",
                         "-".repeat(title_width),
-                        "-".repeat(16),
-                        "-".repeat(19)
+                        "-".repeat(36),
+                        "-".repeat(23)
                     ))
                     .dim(),
                 );
-                for (index, session) in browser.sessions.iter().enumerate() {
+                if has_above {
+                    lines.push(Line::from("  ↑ more").dim());
+                }
+                for (index, session) in browser
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .skip(scroll_offset)
+                    .take(end.saturating_sub(scroll_offset))
+                {
                     let marker = if index == browser.selection { ">" } else { " " };
                     let current = if session.is_active { "  current" } else { "" };
-                    let display_title = Self::truncate_display_text(&session.title, title_width);
+                    let display_title = Self::pad_display_text(
+                        &Self::truncate_display_text(&session.title, title_width),
+                        title_width,
+                    );
                     let line = format!(
-                        "{marker} {:title_width$}  {:<16}  {}{}",
-                        display_title,
-                        session.session_id,
-                        session.updated_at,
-                        current,
-                        title_width = title_width
+                        "{marker} {}  {:<16}  {}{}",
+                        display_title, session.session_id, session.updated_at, current
                     );
                     lines.push(if index == browser.selection {
                         Line::from(line).bold()
@@ -3860,7 +4171,13 @@ impl Renderable for ChatWidget {
                         Line::from(line)
                     });
                 }
+                if has_below {
+                    lines.push(Line::from("  ↓ more").dim());
+                }
             }
+            lines.extend(Self::resume_browser_footer_lines(
+                !browser.sessions.is_empty(),
+            ));
             Paragraph::new(Text::from(lines))
                 .block(Block::default().title("Devo Sessions"))
                 .wrap(Wrap { trim: false })

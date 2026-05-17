@@ -517,6 +517,43 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn current_text(&self) -> String {
+        self.composer.current_text()
+    }
+
+    pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
+        self.composer.set_remote_image_urls(urls);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_text_content(
+        &mut self,
+        text: String,
+        text_elements: Vec<TextElement>,
+        local_image_paths: Vec<PathBuf>,
+    ) {
+        self.composer
+            .set_text_content(text, text_elements, local_image_paths);
+        self.request_redraw();
+    }
+
+    pub(crate) fn is_normal_backtrack_mode(&self) -> bool {
+        self.active_view().is_none()
+            && !self.is_task_running
+            && !self.composer.popup_active()
+            && !self.external_history_active
+    }
+
+    pub(crate) fn show_esc_backtrack_hint(&mut self) {
+        self.composer.set_esc_backtrack_hint(/*show*/ true);
+        self.request_redraw();
+    }
+
+    pub(crate) fn clear_esc_backtrack_hint(&mut self) {
+        self.composer.set_esc_backtrack_hint(/*show*/ false);
+        self.request_redraw();
+    }
+
     #[allow(dead_code)]
     pub(crate) fn set_status_line(&mut self, status_line: Option<Line<'static>>) {
         if self.composer.set_status_line(status_line) {

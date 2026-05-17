@@ -14,6 +14,8 @@ use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell as BufferCell;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
@@ -29,12 +31,39 @@ use crate::chatwidget::TranscriptOverlayCell;
 use crate::render::Insets;
 use crate::render::renderable::InsetRenderable;
 use crate::render::renderable::Renderable;
+use crate::style::user_message_style;
 use crate::tui;
 use crate::tui::TuiEvent;
 
 pub(crate) enum Overlay {
-    Transcript(TranscriptOverlay),
-    Static(StaticOverlay),
+    Transcript(Box<TranscriptOverlay>),
+    Static(Box<StaticOverlay>),
+}
+
+struct UserTranscriptCellRenderable {
+    lines: Vec<Line<'static>>,
+    style: Style,
+}
+
+impl Renderable for UserTranscriptCellRenderable {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        for y in area.y..area.bottom() {
+            for x in area.x..area.right() {
+                buf[(x, y)].set_style(self.style);
+            }
+        }
+        Paragraph::new(Text::from(self.lines.clone()))
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        Paragraph::new(Text::from(self.lines.clone()))
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .try_into()
+            .unwrap_or(0)
+    }
 }
 
 impl fmt::Debug for Overlay {
@@ -48,11 +77,11 @@ impl fmt::Debug for Overlay {
 
 impl Overlay {
     pub(crate) fn new_transcript(cells: Vec<TranscriptOverlayCell>, width: u16) -> Self {
-        Self::Transcript(TranscriptOverlay::new(cells, width))
+        Self::Transcript(Box::new(TranscriptOverlay::new(cells, width)))
     }
 
     pub(crate) fn new_static_with_lines(lines: Vec<Line<'static>>, title: String) -> Self {
-        Self::Static(StaticOverlay::new(lines, title))
+        Self::Static(Box::new(StaticOverlay::new(lines, title)))
     }
 
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
@@ -188,31 +217,38 @@ impl PagerView {
         buf: &mut Buffer,
         total_len: usize,
     ) {
-        if full_area.height == 0 {
+        if full_area.height < 2 {
             return;
         }
-
-        let y = content_area
+        let first_y = content_area
             .bottom()
-            .min(full_area.bottom().saturating_sub(1));
-        let rect = Rect::new(full_area.x, y, full_area.width, 1);
-        Span::from("-".repeat(rect.width as usize))
+            .min(full_area.bottom().saturating_sub(2));
+        let first = Rect::new(full_area.x, first_y, full_area.width, 1);
+        let second = Rect::new(full_area.x, first_y.saturating_add(1), full_area.width, 1);
+        Span::from("-".repeat(first.width as usize))
             .dim()
-            .render_ref(rect, buf);
+            .render_ref(first, buf);
+        Span::from("-".repeat(second.width as usize))
+            .dim()
+            .render_ref(second, buf);
 
-        let hints = " Q/Ctrl+C/ESC close  Up/Down scroll  PgUp/PgDn page ";
-        Span::from(hints)
+        let hints1 = " ↑/↓ to scroll   pgup/pgdn to page   home/end to jump ";
+        let hints2 = " q to quit   esc/← to edit prev   → to edit next   enter to edit message ";
+        Span::from(hints1)
             .dim()
-            .render_ref(Rect::new(rect.x, rect.y, rect.width, 1), buf);
+            .render_ref(Rect::new(first.x, first.y, first.width, 1), buf);
+        Span::from(hints2)
+            .dim()
+            .render_ref(Rect::new(second.x, second.y, second.width, 1), buf);
 
         let percent = self.scroll_percent(total_len, content_area.height as usize);
         let pct_text = format!(" {percent}% ");
         let pct_w = pct_text.chars().count() as u16;
-        if rect.width > pct_w {
-            let pct_x = rect.x + rect.width.saturating_sub(pct_w);
+        if first.width > pct_w {
+            let pct_x = first.x + first.width.saturating_sub(pct_w);
             Span::from(pct_text)
                 .dim()
-                .render_ref(Rect::new(pct_x, rect.y, pct_w, 1), buf);
+                .render_ref(Rect::new(pct_x, first.y, pct_w, 1), buf);
         }
     }
 
@@ -289,12 +325,36 @@ impl PagerView {
             .max(1)
     }
 
+    fn scroll_chunk_into_view(&mut self, renderable_index: usize) {
+        let width = self
+            .last_content_height
+            .map(|_| self.content_area(Rect::new(0, 0, 80, 24)).width)
+            .unwrap_or(80);
+        let width = width.max(1);
+        let mut start = 0usize;
+        for (idx, renderable) in self.renderables.iter().enumerate() {
+            let height = renderable.desired_height(width) as usize;
+            let end = start.saturating_add(height);
+            if idx == renderable_index {
+                if self.scroll_offset > start {
+                    self.scroll_offset = start;
+                } else if let Some(visible_height) = self.last_content_height
+                    && end > self.scroll_offset.saturating_add(visible_height)
+                {
+                    self.scroll_offset = end.saturating_sub(visible_height);
+                }
+                return;
+            }
+            start = end;
+        }
+    }
+
     fn content_area(&self, area: Rect) -> Rect {
         Rect::new(
             area.x,
             area.y.saturating_add(1),
             area.width,
-            area.height.saturating_sub(2),
+            area.height.saturating_sub(3),
         )
     }
 
@@ -366,6 +426,7 @@ pub(crate) struct TranscriptOverlay {
     committed_key: CommittedCellsKey,
     live_tail: Option<TranscriptOverlayCell>,
     live_tail_key: Option<LiveTailKey>,
+    selected_user_index: Option<usize>,
     is_done: bool,
 }
 
@@ -398,6 +459,7 @@ impl TranscriptOverlay {
             committed_key,
             live_tail: None,
             live_tail_key: None,
+            selected_user_index: None,
             is_done: false,
         }
     }
@@ -456,6 +518,8 @@ impl TranscriptOverlay {
             (!lines.is_empty()).then_some(TranscriptOverlayCell {
                 lines,
                 is_stream_continuation: key.is_stream_continuation,
+                user_message: None,
+                is_selected_user: false,
             })
         });
         self.rebuild_renderables();
@@ -467,6 +531,89 @@ impl TranscriptOverlay {
 
     pub(crate) fn is_scrolled_to_bottom(&self) -> bool {
         self.view.is_scrolled_to_bottom()
+    }
+
+    pub(crate) fn begin_backtrack_preview(&mut self) {
+        self.selected_user_index = self.user_positions().last().copied();
+        self.sync_selected_user_highlight();
+        if let Some(idx) = self.selected_user_index {
+            self.view.scroll_chunk_into_view(idx);
+        }
+    }
+
+    pub(crate) fn select_prev_user(&mut self) {
+        let positions = self.user_positions();
+        if positions.is_empty() {
+            self.selected_user_index = None;
+            self.sync_selected_user_highlight();
+            return;
+        }
+        self.selected_user_index = Some(match self.selected_user_index {
+            None => *positions.last().unwrap_or(&positions[0]),
+            Some(current) => positions
+                .iter()
+                .rev()
+                .copied()
+                .find(|idx| *idx < current)
+                .unwrap_or(positions[0]),
+        });
+        self.sync_selected_user_highlight();
+        if let Some(idx) = self.selected_user_index {
+            self.view.scroll_chunk_into_view(idx);
+        }
+    }
+
+    pub(crate) fn select_next_user(&mut self) {
+        let positions = self.user_positions();
+        if positions.is_empty() {
+            self.selected_user_index = None;
+            self.sync_selected_user_highlight();
+            return;
+        }
+        self.selected_user_index = Some(match self.selected_user_index {
+            None => *positions.last().unwrap_or(&positions[0]),
+            Some(current) => positions
+                .iter()
+                .copied()
+                .find(|idx| *idx > current)
+                .unwrap_or(*positions.last().unwrap_or(&current)),
+        });
+        self.sync_selected_user_highlight();
+        if let Some(idx) = self.selected_user_index {
+            self.view.scroll_chunk_into_view(idx);
+        }
+    }
+
+    pub(crate) fn selected_user_message(&self) -> Option<crate::chatwidget::UserMessage> {
+        self.selected_user_index
+            .and_then(|idx| self.cells.get(idx))
+            .and_then(|cell| cell.user_message.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_user_index_for_test(&self) -> Option<usize> {
+        self.selected_user_index
+    }
+
+    pub(crate) fn selected_user_history_position(&self) -> Option<usize> {
+        let positions = self.user_positions();
+        self.selected_user_index
+            .and_then(|selected| positions.iter().position(|idx| *idx == selected))
+    }
+
+    fn user_positions(&self) -> Vec<usize> {
+        self.cells
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cell)| cell.user_message.is_some().then_some(idx))
+            .collect()
+    }
+
+    fn sync_selected_user_highlight(&mut self) {
+        for (idx, cell) in self.cells.iter_mut().enumerate() {
+            cell.is_selected_user = cell.user_message.is_some() && self.selected_user_index == Some(idx);
+        }
+        self.rebuild_renderables();
     }
 
     fn rebuild_renderables(&mut self) {
@@ -488,8 +635,24 @@ impl TranscriptOverlay {
     }
 
     fn cell_renderable(cell: TranscriptOverlayCell, has_prior_cells: bool) -> Box<dyn Renderable> {
-        let paragraph = Paragraph::new(Text::from(cell.lines)).wrap(Wrap { trim: false });
-        let mut renderable: Box<dyn Renderable> = Box::new(CachedRenderable::new(paragraph));
+        let mut renderable: Box<dyn Renderable> = if cell.user_message.is_some() {
+            let mut style = user_message_style();
+            if style.bg.is_none() {
+                style = style.bg(Color::Rgb(40, 44, 52));
+            }
+            if cell.is_selected_user {
+                style = style
+                    .bg(Color::Rgb(52, 70, 110))
+                    .fg(Color::Rgb(120, 200, 255));
+            }
+            Box::new(CachedRenderable::new(UserTranscriptCellRenderable {
+                lines: cell.lines,
+                style,
+            }))
+        } else {
+            let paragraph = Paragraph::new(Text::from(cell.lines)).wrap(Wrap { trim: false });
+            Box::new(CachedRenderable::new(paragraph))
+        };
         if has_prior_cells && !cell.is_stream_continuation {
             renderable = Box::new(InsetRenderable::new(
                 renderable,
@@ -504,8 +667,18 @@ impl TranscriptOverlay {
     fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match event {
             TuiEvent::Key(key_event) => {
-                if close_key(key_event) || ctrl_t_key(key_event) {
+                if ctrl_t_key(key_event) || close_key(key_event) {
                     self.is_done = true;
+                } else if is_press_or_repeat(key_event)
+                    && matches!(key_event.code, KeyCode::Esc | KeyCode::Left)
+                {
+                    self.select_prev_user();
+                    tui.frame_requester()
+                        .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
+                } else if is_press_or_repeat(key_event) && key_event.code == KeyCode::Right {
+                    self.select_next_user();
+                    tui.frame_requester()
+                        .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
                 } else if self
                     .view
                     .handle_key_event(key_event, tui.terminal.viewport_area)
@@ -616,7 +789,7 @@ fn is_press_or_repeat(key_event: KeyEvent) -> bool {
 
 fn close_key(key_event: KeyEvent) -> bool {
     is_press_or_repeat(key_event)
-        && (matches!(key_event.code, KeyCode::Char('q') | KeyCode::Esc)
+        && (matches!(key_event.code, KeyCode::Char('q'))
             || (key_event.code == KeyCode::Char('c')
                 && key_event.modifiers.contains(KeyModifiers::CONTROL)))
 }
@@ -625,6 +798,14 @@ fn ctrl_t_key(key_event: KeyEvent) -> bool {
     is_press_or_repeat(key_event)
         && key_event.code == KeyCode::Char('t')
         && key_event.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+#[cfg(test)]
+fn transcript_hint_lines_for_test() -> (String, String) {
+    (
+        " ↑/↓ to scroll   pgup/pgdn to page   home/end to jump ".to_string(),
+        " q to quit   esc/← to edit prev   → to edit next   enter to edit message ".to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -647,6 +828,8 @@ mod tests {
         TranscriptOverlayCell {
             lines: vec![Line::from(text.into())],
             is_stream_continuation: false,
+            user_message: None,
+            is_selected_user: false,
         }
     }
 
@@ -751,5 +934,195 @@ mod tests {
         }));
 
         assert_eq!(4, overlay.view.scroll_offset);
+    }
+
+    #[test]
+    fn transcript_overlay_backtrack_navigation_selects_user_cells() {
+        let mut overlay = TranscriptOverlay::new(
+            vec![
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("assistant 1")],
+                    is_stream_continuation: false,
+                    user_message: None,
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 1")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 1")),
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("assistant 2")],
+                    is_stream_continuation: false,
+                    user_message: None,
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 2")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 2")),
+                    is_selected_user: false,
+                },
+            ],
+            80,
+        );
+
+        overlay.begin_backtrack_preview();
+        assert_eq!(
+            overlay.selected_user_message().map(|m| m.text),
+            Some("user 2".to_string())
+        );
+
+        overlay.select_prev_user();
+        assert_eq!(
+            overlay.selected_user_message().map(|m| m.text),
+            Some("user 1".to_string())
+        );
+
+        overlay.select_next_user();
+        assert_eq!(
+            overlay.selected_user_message().map(|m| m.text),
+            Some("user 2".to_string())
+        );
+    }
+
+    #[test]
+    fn transcript_overlay_enter_target_is_latest_user_after_begin_preview() {
+        let mut overlay = TranscriptOverlay::new(
+            vec![
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 1")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 1")),
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 2")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 2")),
+                    is_selected_user: false,
+                },
+            ],
+            80,
+        );
+
+        overlay.begin_backtrack_preview();
+        assert_eq!(
+            overlay.selected_user_message().map(|m| m.text),
+            Some("user 2".to_string())
+        );
+    }
+
+    #[test]
+    fn transcript_overlay_selected_user_message_returns_full_payload() {
+        let mut overlay = TranscriptOverlay::new(
+            vec![
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 1")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 1")),
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 2")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 2")),
+                    is_selected_user: false,
+                },
+            ],
+            80,
+        );
+
+        overlay.begin_backtrack_preview();
+        let selected = overlay.selected_user_message().expect("selected latest user");
+        assert_eq!(selected.text, "user 2");
+    }
+
+    #[test]
+    fn transcript_overlay_hint_lines_match_backtrack_copy() {
+        let (line1, line2) = transcript_hint_lines_for_test();
+        assert!(line1.contains("↑/↓ to scroll"));
+        assert!(line1.contains("pgup/pgdn to page"));
+        assert!(line1.contains("home/end to jump"));
+        assert!(line2.contains("q to quit"));
+        assert!(line2.contains("esc/← to edit prev"));
+        assert!(line2.contains("→ to edit next"));
+        assert!(line2.contains("enter to edit message"));
+    }
+
+    #[test]
+    fn transcript_overlay_selected_user_index_tracks_history_position() {
+        let mut overlay = TranscriptOverlay::new(
+            vec![
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("assistant 1")],
+                    is_stream_continuation: false,
+                    user_message: None,
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 1")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 1")),
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("assistant 2")],
+                    is_stream_continuation: false,
+                    user_message: None,
+                    is_selected_user: false,
+                },
+                TranscriptOverlayCell {
+                    lines: vec![Line::from("user 2")],
+                    is_stream_continuation: false,
+                    user_message: Some(crate::chatwidget::UserMessage::from("user 2")),
+                    is_selected_user: false,
+                },
+            ],
+            80,
+        );
+
+        overlay.begin_backtrack_preview();
+        assert_eq!(overlay.selected_user_history_position(), Some(1));
+        overlay.select_prev_user();
+        assert_eq!(overlay.selected_user_history_position(), Some(0));
+    }
+
+    #[test]
+    fn transcript_overlay_user_selection_renders_full_row_highlight() {
+        let mut overlay = TranscriptOverlay::new(
+            vec![TranscriptOverlayCell {
+                lines: vec![
+                    Line::from("▌"),
+                    Line::from("▌ selected message"),
+                    Line::from("▌"),
+                ],
+                is_stream_continuation: false,
+                user_message: Some(crate::chatwidget::UserMessage::from("selected message")),
+                is_selected_user: false,
+            }],
+            40,
+        );
+        overlay.begin_backtrack_preview();
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        overlay.view.render(area, &mut buf);
+
+        let target_row = (0..area.height)
+            .find(|row| {
+                (0..area.width)
+                    .map(|col| buf[(col, *row)].symbol())
+                    .collect::<String>()
+                    .contains("selected message")
+            })
+            .expect("selected message row");
+        let bg0 = buf[(0, target_row)].style().bg;
+        let bg10 = buf[(10, target_row)].style().bg;
+        let bg30 = buf[(30, target_row)].style().bg;
+        assert_eq!(bg0, bg10);
+        assert_eq!(bg10, bg30);
+        assert_ne!(bg0, Some(Color::Reset));
     }
 }

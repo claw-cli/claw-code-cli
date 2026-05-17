@@ -58,6 +58,7 @@ struct InteractiveLoopState {
     // replacement session has been restored into widget state.
     session_switch_pending: bool,
     last_ctrl_c_at: Option<Instant>,
+    esc_backtrack_primed: bool,
     overlay: OverlayState,
 }
 
@@ -72,6 +73,14 @@ enum CtrlCKeyAction {
     PromptInterruptWithEsc,
     PromptExitConfirmation,
     Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscBacktrackAction {
+    Noop,
+    PrimeHint,
+    OpenOverlay,
+    ClearHint,
 }
 
 struct AppCommandContext<'a, M: ModelCatalog> {
@@ -309,6 +318,20 @@ fn handle_tui_event(
     };
 
     if loop_state.overlay.is_active() {
+        if let TuiEvent::Key(key_event) = tui_event
+            && matches!(key_event.kind, crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat)
+            && key_event.code == KeyCode::Enter
+            && let Some(transcript) = loop_state.overlay.transcript_mut()
+            && let Some(user_message) = transcript.selected_user_message()
+        {
+            if let Some(selected_history_position) = transcript.selected_user_history_position() {
+                chat_widget
+                    .truncate_history_to_user_turn_count(selected_history_position.saturating_add(1));
+            }
+            chat_widget.restore_user_message_to_composer(user_message);
+            loop_state.overlay.close(tui)?;
+            return Ok(LoopAction::Continue);
+        }
         if matches!(tui_event, TuiEvent::Draw) {
             chat_widget.pre_draw_tick();
         }
@@ -398,6 +421,32 @@ fn handle_tui_event(
             }
 
             loop_state.last_ctrl_c_at = None;
+            match determine_esc_backtrack_action(
+                key,
+                loop_state.esc_backtrack_primed,
+                chat_widget.is_normal_backtrack_mode(),
+                chat_widget.composer_is_empty(),
+            ) {
+                EscBacktrackAction::PrimeHint => {
+                    loop_state.esc_backtrack_primed = true;
+                    chat_widget.show_esc_backtrack_hint();
+                    return Ok(LoopAction::Continue);
+                }
+                EscBacktrackAction::OpenOverlay => {
+                    loop_state.esc_backtrack_primed = false;
+                    chat_widget.clear_esc_backtrack_hint();
+                    loop_state.overlay.open_transcript(tui, chat_widget)?;
+                    if let Some(transcript) = loop_state.overlay.transcript_mut() {
+                        transcript.begin_backtrack_preview();
+                    }
+                    return Ok(LoopAction::Continue);
+                }
+                EscBacktrackAction::ClearHint => {
+                    loop_state.esc_backtrack_primed = false;
+                    chat_widget.clear_esc_backtrack_hint();
+                }
+                EscBacktrackAction::Noop => {}
+            }
             chat_widget.handle_key_event(key);
         }
         TuiEvent::Paste(pasted) => {
@@ -428,6 +477,31 @@ fn handle_ctrl_c_key(loop_state: &mut InteractiveLoopState, now: Instant) -> Ctr
 
     loop_state.last_ctrl_c_at = Some(now);
     CtrlCKeyAction::PromptExitConfirmation
+}
+
+fn determine_esc_backtrack_action(
+    key: crossterm::event::KeyEvent,
+    esc_backtrack_primed: bool,
+    is_normal_backtrack_mode: bool,
+    composer_is_empty: bool,
+) -> EscBacktrackAction {
+    if !matches!(
+        key.kind,
+        crossterm::event::KeyEventKind::Press | crossterm::event::KeyEventKind::Repeat
+    ) {
+        return EscBacktrackAction::Noop;
+    }
+    if key.code == KeyCode::Esc && is_normal_backtrack_mode && composer_is_empty {
+        return if esc_backtrack_primed {
+            EscBacktrackAction::OpenOverlay
+        } else {
+            EscBacktrackAction::PrimeHint
+        };
+    }
+    if key.code != KeyCode::Esc && esc_backtrack_primed {
+        return EscBacktrackAction::ClearHint;
+    }
+    EscBacktrackAction::Noop
 }
 
 fn handle_app_event(
@@ -772,4 +846,49 @@ mod tests {
         assert_eq!(CtrlCKeyAction::PromptExitConfirmation, first);
         assert_eq!(CtrlCKeyAction::Exit, second);
     }
+
+    #[test]
+    fn esc_backtrack_requires_second_press_to_open_overlay() {
+        let esc_press = crossterm::event::KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        let esc_release = crossterm::event::KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Release,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+
+        assert_eq!(
+            determine_esc_backtrack_action(
+                esc_press,
+                false,
+                /*is_normal_backtrack_mode*/ true,
+                /*composer_is_empty*/ true,
+            ),
+            EscBacktrackAction::PrimeHint
+        );
+        assert_eq!(
+            determine_esc_backtrack_action(
+                esc_release,
+                true,
+                /*is_normal_backtrack_mode*/ true,
+                /*composer_is_empty*/ true,
+            ),
+            EscBacktrackAction::Noop
+        );
+        assert_eq!(
+            determine_esc_backtrack_action(
+                esc_press,
+                true,
+                /*is_normal_backtrack_mode*/ true,
+                /*composer_is_empty*/ true,
+            ),
+            EscBacktrackAction::OpenOverlay
+        );
+    }
+
 }
