@@ -4,16 +4,21 @@ use crate::events::SavedModelEntry;
 use devo_core::PermissionPreset;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderWireApi;
+use devo_protocol::SessionId;
 
 /// Summary returned when the interactive TUI exits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppExit {
+    /// Active session identifier at exit, when one exists.
+    pub session_id: Option<SessionId>,
     /// Total turns completed in the session.
     pub turn_count: usize,
     /// Total input tokens accumulated in the session.
     pub total_input_tokens: usize,
     /// Total output tokens accumulated in the session.
     pub total_output_tokens: usize,
+    /// Total cached input tokens accumulated in the session.
+    pub total_cache_read_tokens: usize,
 }
 
 /// Public startup request passed from the CLI into the TUI crate.
@@ -23,6 +28,8 @@ pub struct AppExit {
 /// constructing the chat widget's runtime session state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialTuiSession {
+    /// Optional pre-existing session to resume immediately on startup.
+    pub session_id: Option<SessionId>,
     /// Model identifier used for the first requests and initial UI projection.
     pub model: String,
     /// Provider family used for the initial runtime connection and picker fallback.

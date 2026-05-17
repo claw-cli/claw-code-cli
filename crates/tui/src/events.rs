@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::app_command::InputHistoryDirection;
@@ -5,7 +7,24 @@ use devo_core::ItemId;
 use devo_core::SessionId;
 use devo_protocol::ProviderWireApi;
 use devo_protocol::ReasoningEffort;
+use devo_protocol::SessionHistoryItem;
+use devo_protocol::parse_command::ParsedCommand;
+use devo_protocol::protocol::FileChange;
 const TOOL_RESULT_FOLD_FINAL_STAGE: u8 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanStep {
+    pub(crate) text: String,
+    pub(crate) status: PlanStepStatus,
+}
 
 /// One persisted session entry shown in the interactive session picker panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +55,7 @@ pub struct SavedModelEntry {
 use devo_protocol::TurnId;
 
 /// One event emitted by the background query worker into the interactive UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum WorkerEvent {
     /// A new assistant turn has started.
     TurnStarted {
@@ -49,6 +68,8 @@ pub(crate) enum WorkerEvent {
         /// The server-assigned turn identifier.
         turn_id: TurnId,
     },
+    /// The active session identifier is now known.
+    SessionActivated { session_id: SessionId },
     /// Input queue state updated by the server.
     InputQueueUpdated {
         pending_count: usize,
@@ -84,6 +105,8 @@ pub(crate) enum WorkerEvent {
         tool_use_id: String,
         /// Human-readable summary line for the tool execution.
         summary: String,
+        /// Optional parsed command semantics for command-like and exploration-like tools.
+        parsed_commands: Option<Vec<ParsedCommand>>,
     },
     /// Incremental output delta from a running tool.
     ToolOutputDelta {
@@ -104,6 +127,15 @@ pub(crate) enum WorkerEvent {
         is_error: bool,
         /// Whether the preview was truncated for display.
         truncated: bool,
+    },
+    /// A structured patch/edit summary derived from apply_patch output.
+    PatchApplied {
+        changes: HashMap<PathBuf, FileChange>,
+    },
+    /// A structured plan or todo list update.
+    PlanUpdated {
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
     },
     ApprovalRequest {
         session_id: SessionId,
@@ -236,6 +268,8 @@ pub(crate) enum WorkerEvent {
         prompt_token_estimate: usize,
         /// Replay-friendly transcript items loaded from the resumed session.
         history_items: Vec<TranscriptItem>,
+        /// Rich persisted history items used to rebuild semantic cells on resume.
+        rich_history_items: Vec<SessionHistoryItem>,
         /// Number of persisted items loaded for the resumed session.
         loaded_item_count: u64,
         /// Pending turn input texts queued for the next turn.

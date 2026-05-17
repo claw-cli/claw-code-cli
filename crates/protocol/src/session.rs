@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::DateTime;
@@ -8,6 +9,8 @@ use serde::Serialize;
 use crate::ReasoningEffort;
 use crate::SessionId;
 use crate::SessionTitleState;
+use crate::parse_command::ParsedCommand;
+use crate::protocol::FileChange;
 use crate::turn::TurnMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,7 +69,7 @@ pub struct SessionResumeParams {
     pub session_id: SessionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionResumeResult {
     pub session: SessionMetadata,
     pub latest_turn: Option<TurnMetadata>,
@@ -90,11 +93,43 @@ pub enum SessionHistoryItemKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPlanStep {
+    pub text: String,
+    pub status: SessionPlanStepStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionHistoryMetadata {
+    Explored {
+        actions: Vec<ParsedCommand>,
+    },
+    Edited {
+        changes: HashMap<PathBuf, FileChange>,
+    },
+    PlanUpdate {
+        explanation: Option<String>,
+        steps: Vec<SessionPlanStep>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionHistoryItem {
     pub tool_call_id: Option<String>,
     pub kind: SessionHistoryItemKind,
     pub title: String,
     pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<SessionHistoryMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
 }
@@ -111,8 +146,14 @@ impl SessionHistoryItem {
             kind,
             title,
             body,
+            metadata: None,
             duration_ms: None,
         }
+    }
+
+    pub fn with_metadata(mut self, metadata: SessionHistoryMetadata) -> Self {
+        self.metadata = Some(metadata);
+        self
     }
 }
 
@@ -178,7 +219,7 @@ pub struct SessionRollbackParams {
     pub user_turn_index: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRollbackResult {
     pub session: SessionMetadata,
     pub latest_turn: Option<TurnMetadata>,

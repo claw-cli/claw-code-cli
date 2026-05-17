@@ -83,8 +83,6 @@ use crate::tui::event_stream::TuiEventStream;
 use crate::tui::frame_requester::FrameRequester;
 #[cfg(unix)]
 use crate::tui::job_control::SuspendContext;
-use devo_utils::terminal_detection::Multiplexer;
-use devo_utils::terminal_detection::TerminalName;
 
 #[cfg(unix)]
 mod job_control;
@@ -100,26 +98,10 @@ pub(crate) const TARGET_FRAME_INTERVAL: Duration =
 /// A type alias for the terminal type used in this application
 pub type Terminal = CustomTerminal<CrosstermBackend<Stdout>>;
 
-fn keyboard_enhancement_supported() -> bool {
-    if !supports_keyboard_enhancement().unwrap_or(false) {
-        return false;
-    }
-
-    let info = devo_utils::terminal_detection::terminal_info();
-    if matches!(
-        info.multiplexer,
-        Some(Multiplexer::Tmux { .. } | Multiplexer::Zellij {})
-    ) {
-        return false;
-    }
-
-    matches!(
-        info.name,
-        TerminalName::Kitty
-            | TerminalName::WezTerm
-            | TerminalName::Alacritty
-            | TerminalName::Ghostty
-    )
+fn keyboard_enhancement_flags() -> KeyboardEnhancementFlags {
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+        | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
 }
 
 pub fn set_modes() -> Result<()> {
@@ -132,16 +114,10 @@ pub fn set_modes() -> Result<()> {
     // Some terminals (notably legacy Windows consoles) do not support
     // keyboard enhancement flags. Attempt to enable them, but continue
     // gracefully if unsupported.
-    if keyboard_enhancement_supported() {
-        let _ = execute!(
-            stdout(),
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-            )
-        );
-    }
+    let _ = execute!(
+        stdout(),
+        PushKeyboardEnhancementFlags(keyboard_enhancement_flags())
+    );
 
     let _ = execute!(stdout(), EnableFocusChange);
     Ok(())
@@ -212,9 +188,7 @@ fn restore_common(should_disable_raw_mode: bool) -> Result<()> {
     // drop" approach, which was sending extra terminal control sequences and could
     // shift the shell prompt in Terminal.app.
     // Pop may fail on platforms that didn't support the push; ignore errors.
-    if keyboard_enhancement_supported() {
-        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
-    }
+    let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     execute!(stdout(), DisableBracketedPaste)?;
     let _ = execute!(stdout(), DisableFocusChange);
     if should_disable_raw_mode {
@@ -760,15 +734,26 @@ impl Tui {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyboardEnhancementFlags;
     use pretty_assertions::assert_eq;
     use ratatui::layout::Rect;
     use ratatui::text::Line;
 
     use super::Tui;
+    use super::keyboard_enhancement_flags;
     use crate::custom_terminal::Terminal as CustomTerminal;
     use crate::history_cell::ScrollbackLine;
     use crate::insert_history::insert_history_lines;
     use crate::test_backend::VT100Backend;
+
+    #[test]
+    fn keyboard_enhancement_flags_match_codex_rs() {
+        let flags = keyboard_enhancement_flags();
+
+        assert!(flags.contains(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_EVENT_TYPES));
+        assert!(flags.contains(KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS));
+    }
 
     #[test]
     fn reset_inline_session_ui_clears_pending_history_and_visible_transcript() {

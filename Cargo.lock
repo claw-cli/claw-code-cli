@@ -808,6 +808,7 @@ dependencies = [
  "devo-protocol",
  "devo-provider",
  "devo-safety",
+ "diffy",
  "filedescriptor",
  "futures",
  "glob",

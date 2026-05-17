@@ -12,7 +12,6 @@ mod read;
 mod shell_command;
 mod skill;
 mod task;
-mod todo_write;
 mod webfetch;
 mod websearch;
 
@@ -30,7 +29,6 @@ pub use read::ReadHandler;
 pub use shell_command::ShellCommandHandler;
 pub use skill::SkillHandler;
 pub use task::TaskHandler;
-pub use todo_write::TodoWriteHandler;
 pub use webfetch::WebFetchHandler;
 pub use websearch::WebSearchHandler;
 
@@ -65,7 +63,6 @@ pub fn build_registry_from_plan(config: &ToolPlanConfig) -> crate::registry::Too
             ToolHandlerKind::Plan => Arc::new(PlanHandler),
             ToolHandlerKind::Question => Arc::new(QuestionHandler),
             ToolHandlerKind::Task => Arc::new(TaskHandler),
-            ToolHandlerKind::TodoWrite => Arc::new(TodoWriteHandler),
             ToolHandlerKind::WebFetch => Arc::new(WebFetchHandler),
             ToolHandlerKind::WebSearch => Arc::new(WebSearchHandler),
             ToolHandlerKind::Skill => Arc::new(SkillHandler),

@@ -3,8 +3,21 @@ use async_trait::async_trait;
 use crate::errors::ToolExecutionError;
 use crate::events::ToolProgressSender;
 use crate::handler_kind::ToolHandlerKind;
-use crate::invocation::{FunctionToolOutput, ToolInvocation, ToolOutput};
+use crate::invocation::FunctionToolOutput;
+use crate::invocation::ToolInvocation;
+use crate::invocation::ToolOutput;
 use crate::tool_handler::ToolHandler;
+
+// TODO: WebSearch is a critical agent tool because it gives the agent access to
+// external information beyond the local workspace. It should be designed as an
+// extensible, pluggable provider interface, allowing the runtime to connect to
+// multiple public search engines now and enterprise/private knowledge bases in
+// the future.
+//
+// Define a stable WebSearch API contract here, including the request/response
+// schema, provider configuration, authentication, timeout/retry behavior, rate
+// limits, error handling, and fallback strategy. The agent core should depend on
+// the WebSearch abstraction rather than any specific search provider.
 
 pub struct WebSearchHandler;
 

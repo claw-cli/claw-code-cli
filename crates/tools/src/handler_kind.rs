@@ -10,7 +10,6 @@ pub enum ToolHandlerKind {
     Plan,
     Question,
     Task,
-    TodoWrite,
     WebFetch,
     WebSearch,
     Skill,

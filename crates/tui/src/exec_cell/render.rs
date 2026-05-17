@@ -185,6 +185,7 @@ pub(crate) fn truncated_tool_output_preview(
     preview: &str,
     width: u16,
     max_rows: usize,
+    line_limit: usize,
 ) -> Vec<Line<'static>> {
     let raw_output = output_lines(
         Some(&CommandOutput {
@@ -193,7 +194,7 @@ pub(crate) fn truncated_tool_output_preview(
             formatted_output: preview.to_string(),
         }),
         OutputLinesParams {
-            line_limit: TOOL_CALL_MAX_LINES,
+            line_limit,
             only_err: false,
             include_angle_pipe: false,
             include_prefix: false,
@@ -250,6 +251,9 @@ impl HistoryCell for ExecCell {
     }
 
     fn transcript_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if self.is_exploring_cell() {
+            return self.exploring_display_lines(width);
+        }
         let mut lines: Vec<Line<'static>> = vec![];
         for (i, call) in self.iter_calls().enumerate() {
             if i > 0 {
@@ -306,11 +310,7 @@ impl ExecCell {
     fn exploring_display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut out: Vec<Line<'static>> = Vec::new();
         out.push(Line::from(vec![
-            if self.is_active() {
-                spinner(self.active_start_time(), self.animations_enabled())
-            } else {
-                "•".dim()
-            },
+            "▌".dim(),
             " ".into(),
             if self.is_active() {
                 "Exploring".bold()

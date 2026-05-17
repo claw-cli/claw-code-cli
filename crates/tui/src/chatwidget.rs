@@ -5,7 +5,9 @@
 //! interaction. Protocol thinking choices come from `devo_protocol::thinking`
 //! through `Model` instead of a TUI-local reasoning enum.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -55,11 +57,16 @@ use crate::bottom_pane::ModelPickerEntry;
 use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
+use crate::events::PlanStep;
+use crate::events::PlanStepStatus;
 use crate::events::SessionListEntry;
 use crate::events::TextItemKind;
 use crate::events::TranscriptItem;
 use crate::events::TranscriptItemKind;
 use crate::events::WorkerEvent;
+use crate::exec_cell::CommandOutput;
+use crate::exec_cell::ExecCell;
+use crate::exec_cell::new_active_exec_command;
 use crate::exec_cell::truncated_tool_output_preview;
 use crate::get_git_diff::get_git_diff;
 use crate::history_cell;
@@ -67,6 +74,7 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::ScrollbackLine;
 use crate::markdown::append_markdown;
+use crate::render::line_utils::prefix_lines;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::startup_header::STARTUP_HEADER_ANIMATION_INTERVAL;
@@ -77,7 +85,11 @@ use crate::streaming::controller::StreamController;
 use crate::theme::ThemeSet;
 use crate::tool_result_cell::ToolResultCell;
 use crate::tui::frame_requester::FrameRequester;
+use devo_protocol::SessionHistoryItem;
+use devo_protocol::SessionHistoryMetadata;
+use devo_protocol::SessionPlanStepStatus;
 use devo_utils::ansi_escape::ansi_escape_line;
+use devo_utils::shell_command::parse_command::parse_command;
 
 /// Common initialization parameters shared by `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
@@ -142,6 +154,8 @@ pub(crate) struct ActiveCellTranscriptKey {
 pub(crate) struct TranscriptOverlayCell {
     pub(crate) lines: Vec<Line<'static>>,
     pub(crate) is_stream_continuation: bool,
+    pub(crate) user_message: Option<UserMessage>,
+    pub(crate) is_selected_user: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -197,6 +211,7 @@ enum OnboardingStep {
 struct ResumeBrowserState {
     sessions: Vec<SessionListEntry>,
     selection: usize,
+    scroll_offset: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +219,7 @@ struct ActiveToolCall {
     tool_use_id: String,
     title: String,
     lines: Vec<Line<'static>>,
+    exec_like: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,6 +359,7 @@ pub(crate) struct ChatWidget {
     pending_model_selection: Option<PendingModelSelection>,
     theme_set: ThemeSet,
     active_theme_name: String,
+    resume_browser_last_height: Cell<u16>,
     turn_count: usize,
     total_input_tokens: usize,
     total_output_tokens: usize,
@@ -350,8 +367,10 @@ pub(crate) struct ChatWidget {
     prompt_token_estimate: usize,
     last_query_input_tokens: usize,
     last_query_total_tokens: usize,
+    last_plan_progress: Option<(usize, usize)>,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
+    committed_server_assistant_in_turn: bool,
     pending_approval: Option<PendingApprovalRequest>,
     permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
@@ -363,6 +382,33 @@ pub(crate) struct ChatWidget {
 }
 
 impl ChatWidget {
+    fn format_git_diff_result(result: std::io::Result<(bool, String)>) -> String {
+        match result {
+            Ok((true, diff_text)) => {
+                if diff_text.trim().is_empty() {
+                    "No changes detected.".to_string()
+                } else {
+                    diff_text
+                }
+            }
+            Ok((false, _)) => "`/diff` — _not inside a git repository_".to_string(),
+            Err(e) => format!("Failed to compute diff: {e}"),
+        }
+    }
+
+    pub(crate) fn should_auto_show_git_diff(tool_title: &str, is_error: bool) -> bool {
+        if is_error {
+            return false;
+        }
+        let lower = tool_title.to_ascii_lowercase();
+        lower.contains("write ")
+            || lower.starts_with("write:")
+            || lower.contains("edit ")
+            || lower.starts_with("edit:")
+            || lower.contains("apply_patch")
+            || lower.contains("apply patch")
+    }
+
     fn can_change_configuration(&self) -> bool {
         !self.busy
     }
@@ -459,24 +505,39 @@ impl ChatWidget {
         ])
     }
 
-    fn truncate_display_text(value: &str, max_chars: usize) -> String {
+    fn truncate_display_text(value: &str, max_width: usize) -> String {
+        let total_width = unicode_width::UnicodeWidthStr::width(value);
+        if total_width <= max_width {
+            return value.to_string();
+        }
+        if max_width == 0 {
+            return String::new();
+        }
+        if max_width <= 3 {
+            return ".".repeat(max_width);
+        }
+
+        let target_width = max_width.saturating_sub(3);
         let mut rendered = String::new();
-        for (count, ch) in value.chars().enumerate() {
-            if count >= max_chars {
+        let mut rendered_width = 0usize;
+        for ch in value.chars() {
+            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if rendered_width.saturating_add(ch_width) > target_width {
                 break;
             }
             rendered.push(ch);
+            rendered_width = rendered_width.saturating_add(ch_width);
         }
-        if value.chars().count() > max_chars && max_chars > 0 {
-            let mut truncated = rendered
-                .chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>();
-            truncated.push('…');
-            truncated
-        } else {
-            rendered
+        rendered.push_str("...");
+        rendered
+    }
+
+    fn pad_display_text(value: &str, target_width: usize) -> String {
+        let width = unicode_width::UnicodeWidthStr::width(value);
+        if width >= target_width {
+            return value.to_string();
         }
+        format!("{value}{}", " ".repeat(target_width - width))
     }
 
     fn tool_text_style() -> Style {
@@ -715,6 +776,249 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    fn rebuild_restored_session_history_from_rich_items(
+        &mut self,
+        history_items: &[SessionHistoryItem],
+        loaded_item_count: u64,
+        session_id: &str,
+        title: Option<&str>,
+    ) -> bool {
+        self.history.clear();
+        self.next_history_flush_index = 0;
+
+        if history_items.is_empty() {
+            self.add_history_entry_without_redraw(Box::new(history_cell::new_info_event(
+                format!(
+                    "switched to {session_id}; title: {}; loaded items: {loaded_item_count}",
+                    title.unwrap_or("(untitled)")
+                ),
+                None,
+            )));
+            self.frame_requester.schedule_frame();
+            return false;
+        }
+
+        let mut paired_result_by_call_id = HashMap::new();
+        for (index, item) in history_items.iter().enumerate() {
+            if matches!(
+                item.kind,
+                devo_protocol::SessionHistoryItemKind::ToolResult
+                    | devo_protocol::SessionHistoryItemKind::Error
+            ) && let Some(tool_call_id) = item.tool_call_id.as_deref()
+            {
+                paired_result_by_call_id
+                    .entry(tool_call_id.to_string())
+                    .or_insert(index);
+            }
+        }
+
+        let metadata_owned_ids: HashSet<String> = history_items
+            .iter()
+            .filter_map(|item| {
+                item.tool_call_id
+                    .clone()
+                    .filter(|_| item.metadata.is_some())
+            })
+            .collect();
+        let mut consumed_indexes = HashSet::new();
+
+        for (index, item) in history_items.iter().enumerate() {
+            if consumed_indexes.contains(&index) {
+                continue;
+            }
+
+            if let Some(metadata) = &item.metadata {
+                if let Some(tool_call_id) = item.tool_call_id.as_deref()
+                    && let Some(result_index) = paired_result_by_call_id.get(tool_call_id).copied()
+                {
+                    consumed_indexes.insert(result_index);
+                }
+                match metadata {
+                    SessionHistoryMetadata::PlanUpdate { explanation, steps } => {
+                        self.on_plan_updated(
+                            explanation.clone(),
+                            steps
+                                .iter()
+                                .map(|step| crate::events::PlanStep {
+                                    text: step.text.clone(),
+                                    status: match step.status {
+                                        SessionPlanStepStatus::Pending => {
+                                            crate::events::PlanStepStatus::Pending
+                                        }
+                                        SessionPlanStepStatus::InProgress => {
+                                            crate::events::PlanStepStatus::InProgress
+                                        }
+                                        SessionPlanStepStatus::Completed => {
+                                            crate::events::PlanStepStatus::Completed
+                                        }
+                                        SessionPlanStepStatus::Cancelled => {
+                                            crate::events::PlanStepStatus::Cancelled
+                                        }
+                                    },
+                                })
+                                .collect(),
+                        );
+                    }
+                    SessionHistoryMetadata::Edited { changes } => {
+                        self.add_history_entry_without_redraw(Box::new(
+                            history_cell::new_patch_event(changes.clone(), &self.session.cwd),
+                        ));
+                    }
+                    SessionHistoryMetadata::Explored { actions } => {
+                        self.restore_explored_history_item(item, actions.clone());
+                    }
+                }
+                continue;
+            }
+
+            if let Some(changes) = Self::edited_changes_from_history_item(item) {
+                self.add_history_entry_without_redraw(Box::new(history_cell::new_patch_event(
+                    changes,
+                    &self.session.cwd,
+                )));
+                continue;
+            }
+
+            if item.kind == devo_protocol::SessionHistoryItemKind::ToolCall
+                && let Some(tool_call_id) = item.tool_call_id.as_deref()
+            {
+                if metadata_owned_ids.contains(tool_call_id) {
+                    continue;
+                }
+                if let Some(result_index) = paired_result_by_call_id.get(tool_call_id).copied() {
+                    consumed_indexes.insert(result_index);
+                    let result_item = &history_items[result_index];
+                    let title_line =
+                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title));
+                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                        title_line,
+                        result_item.body.clone(),
+                        Self::tool_dot_prefix(),
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        false,
+                    )));
+                    continue;
+                }
+            }
+
+            match item.kind {
+                devo_protocol::SessionHistoryItemKind::User => {
+                    self.add_history_entry_without_redraw(Box::new(history_cell::new_user_prompt(
+                        item.body.clone(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        self.active_accent_color(),
+                    )));
+                }
+                devo_protocol::SessionHistoryItemKind::Assistant => {
+                    self.add_markdown_history_without_redraw("Assistant", &item.body);
+                }
+                devo_protocol::SessionHistoryItemKind::Reasoning => {
+                    self.add_markdown_history_without_redraw("Reasoning", &item.body);
+                }
+                devo_protocol::SessionHistoryItemKind::ToolCall => {
+                    self.add_history_entry_without_redraw(Box::new(
+                        history_cell::AgentMessageCell::new_with_prefix(
+                            vec![Self::running_tool_line(&item.title)],
+                            self.dot_prefix(DotStatus::Pending),
+                            "  ",
+                            false,
+                        ),
+                    ));
+                }
+                devo_protocol::SessionHistoryItemKind::ToolResult
+                | devo_protocol::SessionHistoryItemKind::CommandExecution => {
+                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                        item.body.clone(),
+                        Self::tool_dot_prefix(),
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        false,
+                    )));
+                }
+                devo_protocol::SessionHistoryItemKind::Error => {
+                    self.add_history_entry_without_redraw(Box::new(ToolResultCell::new(
+                        (!item.title.is_empty()).then(|| Self::ran_tool_line(&item.title)),
+                        item.body.clone(),
+                        self.failed_dot_prefix(),
+                        Line::from("  "),
+                        Self::tool_text_style(),
+                        false,
+                    )));
+                }
+                devo_protocol::SessionHistoryItemKind::TurnSummary => {
+                    self.add_history_entry_without_redraw(Box::new(
+                        history_cell::TurnSummaryCell::new(
+                            item.title.clone(),
+                            item.duration_ms,
+                            self.active_accent_color(),
+                        ),
+                    ));
+                }
+            }
+        }
+
+        self.frame_requester.schedule_frame();
+        true
+    }
+
+    fn edited_changes_from_history_item(
+        item: &SessionHistoryItem,
+    ) -> Option<HashMap<PathBuf, devo_protocol::protocol::FileChange>> {
+        if item.kind != devo_protocol::SessionHistoryItemKind::ToolResult {
+            return None;
+        }
+        let lower_title = item.title.to_ascii_lowercase();
+        if !lower_title.contains("apply_patch")
+            && !lower_title.contains("write")
+            && !item.body.contains("\"files\"")
+        {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(&item.body).ok()?;
+        let files = value.get("files")?.as_array()?;
+        let diff = value
+            .get("diff")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut changes = HashMap::new();
+        for file in files {
+            let path = PathBuf::from(file.get("path")?.as_str()?);
+            let kind = file.get("kind")?.as_str()?;
+            let additions = file
+                .get("additions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let deletions = file
+                .get("deletions")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let change = match kind {
+                "add" => devo_protocol::protocol::FileChange::Add {
+                    content: "\n".repeat(additions as usize),
+                },
+                "delete" => devo_protocol::protocol::FileChange::Delete {
+                    content: "\n".repeat(deletions as usize),
+                },
+                "update" | "move" => devo_protocol::protocol::FileChange::Update {
+                    unified_diff: diff.clone(),
+                    move_path: file
+                        .get("movePath")
+                        .or_else(|| file.get("move_path"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(PathBuf::from),
+                },
+                _ => continue,
+            };
+            changes.insert(path, change);
+        }
+        (!changes.is_empty()).then_some(changes)
+    }
+
     fn clear_for_session_switch(&mut self) {
         self.history.clear();
         self.next_history_flush_index = 0;
@@ -828,6 +1132,7 @@ impl ChatWidget {
             pending_model_selection: None,
             theme_set,
             active_theme_name,
+            resume_browser_last_height: Cell::new(0),
             turn_count: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
@@ -835,8 +1140,10 @@ impl ChatWidget {
             prompt_token_estimate: 0,
             last_query_input_tokens: 0,
             last_query_total_tokens: 0,
+            last_plan_progress: None,
             queued_count: 0,
             active_turn_id: None,
+            committed_server_assistant_in_turn: false,
             pending_approval: None,
             permission_preset: initial_permission_preset,
             busy: false,
@@ -859,6 +1166,18 @@ impl ChatWidget {
 
     pub(crate) fn handle_key_event(&mut self, key: KeyEvent) {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+        if self.resume_browser_loading {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.resume_browser = None;
+                    self.resume_browser_loading = false;
+                    self.set_status_message("Ready");
+                    self.frame_requester.schedule_frame();
+                }
+                _ => {}
+            }
             return;
         }
         if self.resume_browser.is_some() {
@@ -1213,6 +1532,7 @@ impl ChatWidget {
 
     pub(crate) fn handle_worker_event(&mut self, event: WorkerEvent) {
         match event {
+            WorkerEvent::SessionActivated { .. } => {}
             WorkerEvent::TurnStarted {
                 model,
                 thinking,
@@ -1221,6 +1541,7 @@ impl ChatWidget {
                 ..
             } => {
                 self.active_turn_id = Some(turn_id);
+                self.committed_server_assistant_in_turn = false;
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
@@ -1231,6 +1552,7 @@ impl ChatWidget {
                 self.bottom_pane.set_task_running(true);
             }
             WorkerEvent::TextItemStarted { item_id, kind } => {
+                self.flush_active_cell();
                 self.start_text_item(ActiveTextItemId::Server(item_id), kind);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
@@ -1261,6 +1583,7 @@ impl ChatWidget {
             }
             WorkerEvent::TextDelta(text) => {
                 if !self.has_server_active_item(TextItemKind::Assistant) {
+                    self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
@@ -1271,6 +1594,7 @@ impl ChatWidget {
             }
             WorkerEvent::ReasoningDelta(text) => {
                 if !self.has_server_active_item(TextItemKind::Reasoning) {
+                    self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
@@ -1280,7 +1604,13 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                if !self.has_server_active_item(TextItemKind::Assistant) {
+                if !self.committed_server_assistant_in_turn
+                    && !self.has_server_active_item(TextItemKind::Assistant)
+                    && !self
+                        .active_text_items
+                        .iter()
+                        .any(|item| item.kind == TextItemKind::Assistant)
+                {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
@@ -1302,12 +1632,76 @@ impl ChatWidget {
             WorkerEvent::ToolCall {
                 tool_use_id,
                 summary,
+                parsed_commands,
             } => {
+                let command = crate::exec_command::split_command_string(&summary);
+                let parsed = parsed_commands.unwrap_or_else(|| parse_command(&command));
+                let exec_like = !parsed.is_empty()
+                    && parsed.iter().all(|parsed| {
+                        !matches!(
+                            parsed,
+                            devo_protocol::parse_command::ParsedCommand::Unknown { .. }
+                        )
+                    });
+                if exec_like {
+                    if let Some(cell) = self
+                        .active_cell
+                        .as_mut()
+                        .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                        && let Some(grouped) = cell.with_added_call(
+                            tool_use_id.clone(),
+                            command.clone(),
+                            parsed.clone(),
+                            devo_protocol::protocol::ExecCommandSource::Agent,
+                            None,
+                        )
+                    {
+                        *cell = grouped;
+                        self.active_tool_calls.insert(
+                            tool_use_id.clone(),
+                            ActiveToolCall {
+                                tool_use_id,
+                                title: summary,
+                                lines: Vec::new(),
+                                exec_like: true,
+                            },
+                        );
+                        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                        self.frame_requester.schedule_frame();
+                        self.set_status_message("Tool started");
+                        return;
+                    }
+
+                    self.flush_active_cell();
+                    self.active_cell = Some(Box::new(new_active_exec_command(
+                        tool_use_id.clone(),
+                        command,
+                        parsed,
+                        devo_protocol::protocol::ExecCommandSource::Agent,
+                        None,
+                        true,
+                    )));
+                    self.active_tool_calls.insert(
+                        tool_use_id.clone(),
+                        ActiveToolCall {
+                            tool_use_id,
+                            title: summary,
+                            lines: Vec::new(),
+                            exec_like: true,
+                        },
+                    );
+                    self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                    self.frame_requester.schedule_frame();
+                    self.set_status_message("Tool started");
+                    return;
+                }
+
                 let title = summary;
                 let tool_call = ActiveToolCall {
                     tool_use_id: tool_use_id.clone(),
                     title: title.clone(),
                     lines: vec![Self::running_tool_line(&title)],
+                    exec_like: false,
                 };
                 self.active_tool_calls
                     .insert(tool_use_id.clone(), tool_call.clone());
@@ -1325,6 +1719,18 @@ impl ChatWidget {
             }
             WorkerEvent::ToolOutputDelta { tool_use_id, delta } => {
                 if let Some(tool_call) = self.active_tool_calls.get_mut(&tool_use_id) {
+                    if tool_call.exec_like {
+                        if let Some(cell) = self
+                            .active_cell
+                            .as_mut()
+                            .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                            && cell.append_output(&tool_use_id, &delta)
+                        {
+                            self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+                            self.frame_requester.schedule_frame();
+                        }
+                        return;
+                    }
                     let line = Line::from(delta.clone()).patch_style(Self::tool_text_style());
                     tool_call.lines.push(line);
                     self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
@@ -1351,12 +1757,69 @@ impl ChatWidget {
                 } else {
                     DotStatus::Completed
                 };
-                let resolved_title = self
-                    .active_tool_calls
-                    .remove(&tool_use_id)
-                    .map(|tool| tool.title)
-                    .filter(|tool_title| !tool_title.is_empty())
-                    .unwrap_or(title);
+                let resolved_title =
+                    self.active_tool_calls
+                        .remove(&tool_use_id)
+                        .unwrap_or(ActiveToolCall {
+                            tool_use_id: tool_use_id.clone(),
+                            title,
+                            lines: Vec::new(),
+                            exec_like: false,
+                        });
+
+                if resolved_title.exec_like {
+                    let output = CommandOutput {
+                        exit_code: if is_error { 1 } else { 0 },
+                        aggregated_output: preview.clone(),
+                        formatted_output: preview.clone(),
+                    };
+                    let duration = std::time::Duration::from_millis(0);
+                    if let Some(cell) = self
+                        .active_cell
+                        .as_mut()
+                        .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+                    {
+                        let completed = cell.complete_call(&tool_use_id, output.clone(), duration);
+                        if completed {
+                            if cell.is_exploring_cell() {
+                                self.active_cell_revision =
+                                    self.active_cell_revision.wrapping_add(1);
+                                self.frame_requester.schedule_frame();
+                            } else if cell.should_flush() {
+                                self.flush_active_cell();
+                            } else {
+                                self.active_cell_revision =
+                                    self.active_cell_revision.wrapping_add(1);
+                                self.frame_requester.schedule_frame();
+                            }
+                            self.set_status_message(if is_error {
+                                "Tool returned an error"
+                            } else {
+                                "Tool completed"
+                            });
+                            return;
+                        }
+                    }
+                    if let Some(cell) = self.history.iter_mut().rev().find_map(|cell| {
+                        cell.as_any_mut()
+                            .downcast_mut::<ExecCell>()
+                            .and_then(|cell| {
+                                cell.complete_call(&tool_use_id, output.clone(), duration)
+                                    .then_some(cell)
+                            })
+                    }) {
+                        let _ = cell;
+                        self.frame_requester.schedule_frame();
+                        self.set_status_message(if is_error {
+                            "Tool returned an error"
+                        } else {
+                            "Tool completed"
+                        });
+                        return;
+                    }
+                }
+
+                let resolved_title = resolved_title.title;
 
                 let title_line =
                     (!resolved_title.is_empty()).then(|| Self::ran_tool_line(&resolved_title));
@@ -1376,6 +1839,21 @@ impl ChatWidget {
                 } else {
                     "Tool completed"
                 });
+                if Self::should_auto_show_git_diff(&resolved_title, is_error) {
+                    let tx = self.app_event_tx.clone();
+                    tokio::spawn(async move {
+                        let text = Self::format_git_diff_result(get_git_diff().await);
+                        tx.send(AppEvent::DiffResult(text));
+                    });
+                }
+            }
+            WorkerEvent::PlanUpdated { explanation, steps } => {
+                self.on_plan_updated(explanation, steps);
+                self.set_status_message("Plan updated");
+            }
+            WorkerEvent::PatchApplied { changes } => {
+                self.add_to_history(history_cell::new_patch_event(changes, &self.session.cwd));
+                self.set_status_message("Patch applied");
             }
             WorkerEvent::ApprovalRequest {
                 session_id,
@@ -1459,6 +1937,7 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
+                self.committed_server_assistant_in_turn = false;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1504,6 +1983,7 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
+                self.committed_server_assistant_in_turn = false;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1578,6 +2058,7 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.active_text_items.clear();
+                self.committed_server_assistant_in_turn = false;
                 self.stream_chunking_policy.reset();
                 self.busy = false;
                 self.turn_count = 0;
@@ -1608,6 +2089,7 @@ impl ChatWidget {
                 last_query_input_tokens,
                 prompt_token_estimate,
                 history_items,
+                rich_history_items,
                 loaded_item_count,
                 pending_texts,
             } => {
@@ -1621,6 +2103,7 @@ impl ChatWidget {
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.active_text_items.clear();
+                self.committed_server_assistant_in_turn = false;
                 self.stream_chunking_policy.reset();
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
@@ -1628,12 +2111,19 @@ impl ChatWidget {
                 self.last_query_total_tokens = last_query_total_tokens;
                 self.last_query_input_tokens = last_query_input_tokens;
                 self.prompt_token_estimate = prompt_token_estimate;
-                self.rebuild_restored_session_history(
-                    history_items,
+                if !self.rebuild_restored_session_history_from_rich_items(
+                    &rich_history_items,
                     loaded_item_count,
                     &session_id,
                     title.as_deref(),
-                );
+                ) {
+                    self.rebuild_restored_session_history(
+                        history_items,
+                        loaded_item_count,
+                        &session_id,
+                        title.as_deref(),
+                    );
+                }
                 // Restore pending queue state from the resumed session
                 self.queued_count = pending_texts.len();
                 self.bottom_pane.clear_pending_cells();
@@ -1700,6 +2190,83 @@ impl ChatWidget {
                 self.set_status_message("Steer accepted");
             }
         }
+    }
+
+    fn on_plan_updated(&mut self, explanation: Option<String>, steps: Vec<PlanStep>) {
+        let total = steps.len();
+        let completed = steps
+            .iter()
+            .filter(|step| matches!(step.status, PlanStepStatus::Completed))
+            .count();
+        self.last_plan_progress = (total > 0).then_some((completed, total));
+
+        let mut lines = vec![Line::from(vec![
+            Span::styled("▌", Style::default().fg(Color::Rgb(120, 220, 160))),
+            " ".into(),
+            "Updated Plan".bold(),
+        ])];
+        if let Some(explanation) = explanation
+            && !explanation.trim().is_empty()
+        {
+            lines.push(Line::from(""));
+            lines.push(Line::from(explanation.italic()));
+            lines.push(Line::from(""));
+        }
+        for step in steps {
+            let (prefix, style) = match step.status {
+                PlanStepStatus::Completed => ("✔ ", Style::default().green()),
+                PlanStepStatus::InProgress => ("→ ", Style::default().cyan()),
+                PlanStepStatus::Pending => ("□ ", Style::default().dim()),
+                PlanStepStatus::Cancelled => ("✗ ", Style::default().red()),
+            };
+            lines.extend(prefix_lines(
+                vec![Line::from(Span::styled(step.text, style))],
+                Span::styled(format!("  {prefix}"), style),
+                Span::from("    "),
+            ));
+        }
+        if !lines.is_empty() {
+            self.add_to_history(PlainHistoryCell::new(lines));
+        }
+        self.frame_requester.schedule_frame();
+    }
+
+    fn restore_explored_history_item(
+        &mut self,
+        item: &SessionHistoryItem,
+        actions: Vec<devo_protocol::parse_command::ParsedCommand>,
+    ) {
+        let command = item.title.clone();
+        let command_tokens = crate::exec_command::split_command_string(&command);
+        if let Some(cell) = self
+            .history
+            .last_mut()
+            .and_then(|cell| cell.as_any_mut().downcast_mut::<ExecCell>())
+            && let Some(grouped) = cell.with_added_call(
+                item.tool_call_id
+                    .clone()
+                    .unwrap_or_else(|| "restored".to_string()),
+                command_tokens.clone(),
+                actions.clone(),
+                devo_protocol::protocol::ExecCommandSource::Agent,
+                None,
+            )
+        {
+            *cell = grouped;
+            return;
+        }
+
+        let exec = new_active_exec_command(
+            item.tool_call_id
+                .clone()
+                .unwrap_or_else(|| "restored".to_string()),
+            command_tokens,
+            actions,
+            devo_protocol::protocol::ExecCommandSource::Agent,
+            None,
+            false,
+        );
+        self.add_history_entry_without_redraw(Box::new(exec));
     }
 
     pub(crate) fn submit_text(&mut self, text: String) {
@@ -1844,16 +2411,7 @@ impl ChatWidget {
                 self.set_status_message("Computing diff");
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
-                    let text = match get_git_diff().await {
-                        Ok((is_git_repo, diff_text)) => {
-                            if is_git_repo {
-                                diff_text
-                            } else {
-                                "`/diff` — _not inside a git repository_".to_string()
-                            }
-                        }
-                        Err(e) => format!("Failed to compute diff: {e}"),
-                    };
+                    let text = Self::format_git_diff_result(get_git_diff().await);
                     tx.send(AppEvent::DiffResult(text));
                 });
             }
@@ -2221,6 +2779,9 @@ impl ChatWidget {
         }
         self.sync_text_item_cell(index);
         self.commit_completed_text_items();
+        if matches!(item_id, ActiveTextItemId::Server(_)) && kind == TextItemKind::Assistant {
+            self.committed_server_assistant_in_turn = true;
+        }
     }
 
     fn ensure_text_item(&mut self, item_id: ActiveTextItemId, kind: TextItemKind) -> usize {
@@ -2473,7 +3034,8 @@ impl ChatWidget {
 
     fn tool_preview_lines(&self, preview: &str) -> Vec<Line<'static>> {
         let width = self.last_known_width().saturating_sub(2).max(1);
-        let mut preview_lines = truncated_tool_output_preview(preview, width, 2);
+        let mut preview_lines =
+            truncated_tool_output_preview(preview, width, 2, crate::exec_cell::TOOL_CALL_MAX_LINES);
         for line in &mut preview_lines {
             line.spans = line
                 .spans
@@ -2736,6 +3298,16 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    fn flush_active_cell(&mut self) {
+        if let Some(active) = self.active_cell.take() {
+            self.add_history_entry_without_redraw(active);
+        }
+    }
+
+    fn bump_active_cell_revision(&mut self) {
+        self.active_cell_revision = self.active_cell_revision.wrapping_add(1);
+    }
+
     /// Pop the oldest pending cell from the bottom pane and add it to history
     /// as a normal user input cell.
     fn unqueue_oldest_pending(&mut self) {
@@ -2771,6 +3343,14 @@ impl ChatWidget {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_cell_display_lines_for_test(&self, width: u16) -> Vec<Line<'static>> {
+        self.active_cell
+            .as_ref()
+            .map(|cell| cell.display_lines(width))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn transcript_overlay_cell_count(&self) -> usize {
         self.history.len()
     }
@@ -2779,11 +3359,57 @@ impl ChatWidget {
         let width = width.max(1);
         self.history
             .iter()
-            .map(|cell| TranscriptOverlayCell {
-                lines: cell.transcript_lines(width),
-                is_stream_continuation: cell.is_stream_continuation(),
+            .map(|cell| {
+                let user_message = cell
+                    .as_any()
+                    .downcast_ref::<history_cell::UserHistoryCell>()
+                    .map(|user| UserMessage {
+                        text: user.message.clone(),
+                        local_images: user
+                            .local_image_paths
+                            .iter()
+                            .cloned()
+                            .map(|path| crate::bottom_pane::LocalImageAttachment {
+                                path,
+                                placeholder: String::new(),
+                            })
+                            .collect(),
+                        remote_image_urls: user.remote_image_urls.clone(),
+                        text_elements: user.text_elements.clone(),
+                        mention_bindings: Vec::new(),
+                    });
+                TranscriptOverlayCell {
+                    lines: cell.transcript_lines(width),
+                    is_stream_continuation: cell.is_stream_continuation(),
+                    user_message,
+                    is_selected_user: false,
+                }
             })
             .collect()
+    }
+
+    pub(crate) fn truncate_history_to_user_turn_count(&mut self, user_turn_count: usize) {
+        let mut remaining_users = user_turn_count;
+        let mut new_len = 0usize;
+        for (idx, cell) in self.history.iter().enumerate() {
+            let is_user = cell
+                .as_ref()
+                .as_any()
+                .downcast_ref::<history_cell::UserHistoryCell>()
+                .is_some();
+            if is_user {
+                if remaining_users == 0 {
+                    break;
+                }
+                remaining_users -= 1;
+            }
+            new_len = idx + 1;
+        }
+        self.history.truncate(new_len);
+        self.next_history_flush_index = self.next_history_flush_index.min(self.history.len());
+        self.refresh_user_cell_indices();
+        self.exit_selection_mode();
+        self.frame_requester.schedule_frame();
     }
 
     pub(crate) fn transcript_overlay_live_tail_key(&self) -> Option<ActiveCellTranscriptKey> {
@@ -2838,6 +3464,22 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    pub(crate) fn restore_user_message_to_composer(&mut self, user_message: UserMessage) {
+        self.bottom_pane
+            .set_remote_image_urls(user_message.remote_image_urls);
+        let local_image_paths = user_message
+            .local_images
+            .into_iter()
+            .map(|attachment| attachment.path)
+            .collect::<Vec<_>>();
+        self.bottom_pane.set_text_content(
+            user_message.text,
+            user_message.text_elements,
+            local_image_paths,
+        );
+        self.set_status_message("Previous message loaded");
+    }
+
     pub(crate) fn pop_next_queued_user_message(&mut self) -> Option<UserMessage> {
         self.queued_user_messages.pop_front()
     }
@@ -2848,12 +3490,36 @@ impl ChatWidget {
         self.frame_requester.schedule_frame();
     }
 
+    #[cfg(test)]
+    pub(crate) fn last_plan_progress_for_test(&self) -> Option<(usize, usize)> {
+        self.last_plan_progress
+    }
+
     pub(crate) fn active_viewport_lines_for_test(&self, width: u16) -> Vec<Line<'static>> {
         self.active_viewport_lines(width)
     }
 
+    pub(crate) fn composer_is_empty(&self) -> bool {
+        self.bottom_pane.current_text().trim().is_empty()
+    }
+
+    pub(crate) fn is_normal_backtrack_mode(&self) -> bool {
+        self.bottom_pane.is_normal_backtrack_mode()
+    }
+
+    pub(crate) fn show_esc_backtrack_hint(&mut self) {
+        self.bottom_pane.show_esc_backtrack_hint();
+    }
+
+    pub(crate) fn clear_esc_backtrack_hint(&mut self) {
+        self.bottom_pane.clear_esc_backtrack_hint();
+    }
+
     fn active_viewport_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
+        if let Some(cell) = &self.active_cell {
+            Self::extend_lines_with_separator(&mut lines, cell.display_lines(width));
+        }
         for item in &self.active_text_items {
             if let Some(cell) = &item.cell {
                 Self::extend_lines_with_separator(&mut lines, cell.display_lines(width));
@@ -3180,6 +3846,7 @@ impl ChatWidget {
         self.resume_browser = Some(ResumeBrowserState {
             sessions,
             selection,
+            scroll_offset: 0,
         });
         self.set_status_message("Resume session");
     }
@@ -3191,28 +3858,69 @@ impl ChatWidget {
         let Some(browser) = self.resume_browser.as_mut() else {
             return;
         };
+        let page_step = Self::resume_browser_visible_capacity(
+            self.resume_browser_last_height.get(),
+            !browser.sessions.is_empty(),
+        )
+        .max(1);
         match key.code {
-            KeyCode::Esc => {
+            KeyCode::Esc | KeyCode::Char('q') => {
                 self.resume_browser = None;
                 self.resume_browser_loading = false;
                 self.set_status_message("Ready");
+                self.frame_requester.schedule_frame();
             }
             KeyCode::Up => {
                 if browser.sessions.is_empty() {
                     browser.selection = 0;
-                } else {
-                    browser.selection = (browser.selection as isize - 1)
-                        .rem_euclid(browser.sessions.len() as isize)
-                        as usize;
+                } else if browser.selection > 0 {
+                    browser.selection -= 1;
                 }
+                self.ensure_resume_selection_visible(u16::MAX);
                 self.frame_requester.schedule_frame();
             }
             KeyCode::Down => {
                 if browser.sessions.is_empty() {
                     browser.selection = 0;
-                } else {
-                    browser.selection = (browser.selection + 1) % browser.sessions.len();
+                } else if browser.selection + 1 < browser.sessions.len() {
+                    browser.selection += 1;
                 }
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::PageUp => {
+                if browser.sessions.is_empty() {
+                    browser.selection = 0;
+                } else {
+                    browser.selection = browser.selection.saturating_sub(page_step);
+                }
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::PageDown => {
+                if browser.sessions.is_empty() {
+                    browser.selection = 0;
+                } else {
+                    browser.selection = browser
+                        .selection
+                        .saturating_add(page_step)
+                        .min(browser.sessions.len().saturating_sub(1));
+                }
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::Home => {
+                browser.selection = 0;
+                self.ensure_resume_selection_visible(u16::MAX);
+                self.frame_requester.schedule_frame();
+            }
+            KeyCode::End => {
+                if browser.sessions.is_empty() {
+                    browser.selection = 0;
+                } else {
+                    browser.selection = browser.sessions.len().saturating_sub(1);
+                }
+                self.ensure_resume_selection_visible(u16::MAX);
                 self.frame_requester.schedule_frame();
             }
             KeyCode::Enter => {
@@ -3230,6 +3938,146 @@ impl ChatWidget {
 
     pub(crate) fn is_resume_browser_open(&self) -> bool {
         self.resume_browser_loading || self.resume_browser.is_some()
+    }
+
+    fn resume_browser_entry_height() -> usize {
+        1
+    }
+
+    fn resume_browser_chrome_height(has_sessions: bool) -> usize {
+        if has_sessions { 7 } else { 6 }
+    }
+
+    fn resume_browser_visible_capacity(area_height: u16, has_sessions: bool) -> usize {
+        area_height.saturating_sub(Self::resume_browser_chrome_height(has_sessions) as u16) as usize
+    }
+
+    fn resume_browser_window(
+        sessions_len: usize,
+        selection: usize,
+        requested_offset: usize,
+        area_height: u16,
+    ) -> (usize, usize, bool, bool) {
+        if sessions_len == 0 {
+            return (0, 0, false, false);
+        }
+        let list_window = Self::resume_browser_visible_capacity(area_height, true);
+        if list_window == 0 {
+            return (selection.min(sessions_len.saturating_sub(1)), 0, true, true);
+        }
+
+        let selection = selection.min(sessions_len.saturating_sub(1));
+        let mut start = requested_offset.min(sessions_len.saturating_sub(1));
+        let mut slots = list_window;
+
+        loop {
+            if slots == 0 {
+                return (selection, 0, start > 0, selection + 1 < sessions_len);
+            }
+            let end = (start + slots).min(sessions_len);
+            let has_above = start > 0;
+            let has_below = end < sessions_len;
+            let indicator_rows = usize::from(has_above) + usize::from(has_below);
+            let session_slots = list_window.saturating_sub(indicator_rows);
+            if session_slots == slots {
+                let end = (start + session_slots).min(sessions_len);
+                let has_above = start > 0;
+                let has_below = end < sessions_len;
+                return (start, end, has_above, has_below);
+            }
+            slots = session_slots;
+            if selection < start {
+                start = selection;
+            } else if selection >= start + slots {
+                start = selection + 1 - slots;
+            }
+            start = start.min(sessions_len.saturating_sub(slots.max(1)));
+        }
+    }
+
+    fn resume_browser_footer_lines(has_sessions: bool) -> Vec<Line<'static>> {
+        if has_sessions {
+            vec![
+                Line::from("↑/↓ select  pgup/pgdn page  home/end jump".dim()),
+                Line::from("enter resume  q back".dim()),
+            ]
+        } else {
+            vec![Line::from("q back".dim())]
+        }
+    }
+
+    fn resume_browser_progress_label(
+        selection: usize,
+        sessions_len: usize,
+        rendered_start: usize,
+        area_height: u16,
+    ) -> String {
+        if sessions_len == 0 {
+            return " 0 / 0 · 100% ".to_string();
+        }
+        let position = selection.saturating_add(1);
+        let total = sessions_len;
+        let capacity = Self::resume_browser_visible_capacity(area_height, true);
+        let max_scroll = sessions_len.saturating_sub(capacity.max(1));
+        let percent = if max_scroll == 0 {
+            100
+        } else {
+            ((rendered_start.min(max_scroll) as f32 / max_scroll as f32) * 100.0).round() as usize
+        };
+        format!(" {position} / {total} · {percent}% ")
+    }
+
+    fn ensure_resume_selection_visible(&mut self, area_height: u16) {
+        let Some(browser) = self.resume_browser.as_mut() else {
+            return;
+        };
+        if browser.sessions.is_empty() {
+            browser.selection = 0;
+            browser.scroll_offset = 0;
+            return;
+        }
+
+        let selection = browser
+            .selection
+            .min(browser.sessions.len().saturating_sub(1));
+        browser.selection = selection;
+        let capacity = Self::resume_browser_visible_capacity(area_height, true);
+        if capacity == 0 {
+            browser.scroll_offset = selection;
+            return;
+        }
+
+        if selection < browser.scroll_offset {
+            browser.scroll_offset = selection;
+        } else {
+            let selection_bottom = selection + Self::resume_browser_entry_height();
+            let viewport_bottom = browser.scroll_offset + capacity;
+            if selection_bottom > viewport_bottom {
+                browser.scroll_offset = selection_bottom.saturating_sub(capacity);
+            }
+        }
+
+        let max_offset = browser.sessions.len().saturating_sub(capacity);
+        browser.scroll_offset = browser.scroll_offset.min(max_offset);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_browser_selection_for_test(&self) -> Option<usize> {
+        self.resume_browser
+            .as_ref()
+            .map(|browser| browser.selection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_browser_scroll_offset_for_test(&self) -> Option<usize> {
+        self.resume_browser
+            .as_ref()
+            .map(|browser| browser.scroll_offset)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_resume_browser_for_test(&mut self, sessions: Vec<SessionListEntry>) {
+        self.open_resume_browser(sessions);
     }
 }
 
@@ -3250,26 +4098,38 @@ impl Renderable for ChatWidget {
         }
 
         if let Some(browser) = &self.resume_browser {
+            self.resume_browser_last_height.set(area.height);
             Block::default().style(Style::default()).render(area, buf);
+            let (scroll_offset, end, has_above, has_below) = Self::resume_browser_window(
+                browser.sessions.len(),
+                browser.selection,
+                browser.scroll_offset,
+                area.height,
+            );
             let title_width = browser
                 .sessions
                 .iter()
-                .map(|session| session.title.chars().count())
+                .map(|session| unicode_width::UnicodeWidthStr::width(session.title.as_str()))
                 .max()
                 .unwrap_or(5)
-                .clamp(5, 36);
-            let mut lines = vec![
-                Line::from("Resume Session".bold()),
-                Line::from("Use Up/Down to select a session, Enter to resume.".dim()),
-                Line::from("Esc to go back.".dim()),
-                Line::from(""),
-            ];
+                .clamp(5, 48);
+            let progress = Self::resume_browser_progress_label(
+                browser.selection,
+                browser.sessions.len(),
+                scroll_offset,
+                area.height,
+            );
+            let mut lines = vec![Line::from(vec![
+                Span::styled("Resume Session", Style::default().bold()),
+                Span::raw(" "),
+                Span::styled(progress, Style::default().dim()),
+            ])];
             if browser.sessions.is_empty() {
                 lines.push(Line::from("No saved sessions found.".dim()));
             } else {
                 lines.push(
                     Line::from(format!(
-                        "  {:title_width$}  {:<16}  {}",
+                        "  {:title_width$}  {:<36}  {}",
                         "Title",
                         "Session ID",
                         "Updated",
@@ -3281,22 +4141,30 @@ impl Renderable for ChatWidget {
                     Line::from(format!(
                         "  {}  {}  {}",
                         "-".repeat(title_width),
-                        "-".repeat(16),
-                        "-".repeat(19)
+                        "-".repeat(36),
+                        "-".repeat(23)
                     ))
                     .dim(),
                 );
-                for (index, session) in browser.sessions.iter().enumerate() {
+                if has_above {
+                    lines.push(Line::from("  ↑ more").dim());
+                }
+                for (index, session) in browser
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .skip(scroll_offset)
+                    .take(end.saturating_sub(scroll_offset))
+                {
                     let marker = if index == browser.selection { ">" } else { " " };
                     let current = if session.is_active { "  current" } else { "" };
-                    let display_title = Self::truncate_display_text(&session.title, title_width);
+                    let display_title = Self::pad_display_text(
+                        &Self::truncate_display_text(&session.title, title_width),
+                        title_width,
+                    );
                     let line = format!(
-                        "{marker} {:title_width$}  {:<16}  {}{}",
-                        display_title,
-                        session.session_id,
-                        session.updated_at,
-                        current,
-                        title_width = title_width
+                        "{marker} {}  {:<16}  {}{}",
+                        display_title, session.session_id, session.updated_at, current
                     );
                     lines.push(if index == browser.selection {
                         Line::from(line).bold()
@@ -3304,7 +4172,13 @@ impl Renderable for ChatWidget {
                         Line::from(line)
                     });
                 }
+                if has_below {
+                    lines.push(Line::from("  ↓ more").dim());
+                }
             }
+            lines.extend(Self::resume_browser_footer_lines(
+                !browser.sessions.is_empty(),
+            ));
             Paragraph::new(Text::from(lines))
                 .block(Block::default().title("Devo Sessions"))
                 .wrap(Wrap { trim: false })

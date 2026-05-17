@@ -1337,6 +1337,9 @@ impl ChatComposer {
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
         }
+        if Self::is_modified_enter(&key_event) {
+            return self.handle_input_basic(key_event);
+        }
         if key_event.code == KeyCode::Esc {
             let next_mode = esc_hint_mode(self.footer_mode, self.is_task_running);
             if next_mode != self.footer_mode {
@@ -1442,6 +1445,12 @@ impl ChatComposer {
         p
     }
 
+    fn is_modified_enter(key_event: &KeyEvent) -> bool {
+        key_event.code == KeyCode::Enter
+            && (key_event.modifiers.contains(KeyModifiers::SHIFT)
+                || key_event.modifiers.contains(KeyModifiers::CONTROL))
+    }
+
     /// Handle non-ASCII character input (often IME) while still supporting paste-burst detection.
     ///
     /// This handler exists because non-ASCII input often comes from IMEs, where characters can
@@ -1536,6 +1545,9 @@ impl ChatComposer {
     fn handle_key_event_with_file_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
+        }
+        if Self::is_modified_enter(&key_event) {
+            return self.handle_input_basic(key_event);
         }
         if key_event.code == KeyCode::Esc {
             let next_mode = esc_hint_mode(self.footer_mode, self.is_task_running);
@@ -1659,6 +1671,9 @@ impl ChatComposer {
     fn handle_key_event_with_skill_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
+        }
+        if Self::is_modified_enter(&key_event) {
+            return self.handle_input_basic(key_event);
         }
         self.footer_mode = reset_mode_after_activity(self.footer_mode);
 
@@ -2612,6 +2627,7 @@ impl ChatComposer {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
         match key_event {
+            input if Self::is_modified_enter(&input) => self.handle_input_basic(input),
             KeyEvent {
                 code: KeyCode::Char('d'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL,

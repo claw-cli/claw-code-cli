@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use devo_safety::ResourceKind;
-use futures::future::join_all;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -13,6 +14,8 @@ use crate::tool_spec::ToolCapabilityTag;
 
 type ProgressCallback = dyn Fn(&str, &str) + Send + Sync;
 type ProgressCallbackArc = Arc<ProgressCallback>;
+type CompletionCallback = dyn Fn(&ToolCallResult) + Send + Sync;
+type CompletionCallbackArc = Arc<CompletionCallback>;
 type PermissionFuture = futures::future::BoxFuture<'static, Result<(), String>>;
 type PermissionCheckFn = dyn Fn(ToolPermissionRequest) -> PermissionFuture + Send + Sync;
 const PROGRESS_DRAIN_GRACE_MS: u64 = 50;
@@ -92,7 +95,10 @@ impl ToolRuntime {
     }
 
     pub async fn execute_batch(&self, calls: &[ToolCall]) -> Vec<ToolCallResult> {
-        self.execute_batch_inner(calls, None).await
+        self.execute_batch_inner(
+            calls, /*on_progress*/ None, /*on_completion*/ None,
+        )
+        .await
     }
 
     pub async fn execute_batch_streaming(
@@ -100,41 +106,76 @@ impl ToolRuntime {
         calls: &[ToolCall],
         on_progress: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Vec<ToolCallResult> {
-        self.execute_batch_inner(calls, Some(Box::new(on_progress)))
-            .await
+        self.execute_batch_inner(
+            calls,
+            Some(Box::new(on_progress)),
+            /*on_completion*/ None,
+        )
+        .await
+    }
+
+    pub async fn execute_batch_streaming_with_completion(
+        &self,
+        calls: &[ToolCall],
+        on_progress: impl Fn(&str, &str) + Send + Sync + 'static,
+        on_completion: impl Fn(&ToolCallResult) + Send + Sync + 'static,
+    ) -> Vec<ToolCallResult> {
+        self.execute_batch_inner(
+            calls,
+            Some(Box::new(on_progress)),
+            Some(Box::new(on_completion)),
+        )
+        .await
     }
 
     async fn execute_batch_inner(
         &self,
         calls: &[ToolCall],
         on_progress: Option<Box<ProgressCallback>>,
+        on_completion: Option<Box<CompletionCallback>>,
     ) -> Vec<ToolCallResult> {
         // Wrap the Box in an Arc so it can be shared across spawned tasks
         let on_progress: Option<ProgressCallbackArc> = on_progress.map(Arc::from);
+        let on_completion: Option<CompletionCallbackArc> = on_completion.map(Arc::from);
 
-        let mut results = Vec::with_capacity(calls.len());
+        let mut indexed_results = Vec::with_capacity(calls.len());
 
         let (parallel, exclusive): (Vec<_>, Vec<_>) = calls
             .iter()
-            .partition(|call| self.registry.supports_parallel(&call.name));
+            .enumerate()
+            .partition(|(_, call)| self.registry.supports_parallel(&call.name));
 
         if !parallel.is_empty() {
             let _guard = self.gate.read().await;
-            let futures: Vec<_> = parallel
+            let mut futures: FuturesUnordered<_> = parallel
                 .iter()
-                .map(|call| self.execute_single(call, &on_progress))
+                .map(|(index, call)| {
+                    let on_progress = on_progress.clone();
+                    async move { (*index, self.execute_single(call, &on_progress).await) }
+                })
                 .collect();
-            let parallel_results = join_all(futures).await;
-            results.extend(parallel_results);
+            while let Some((index, result)) = futures.next().await {
+                if let Some(callback) = &on_completion {
+                    callback(&result);
+                }
+                indexed_results.push((index, result));
+            }
         }
 
-        for call in &exclusive {
+        for (index, call) in exclusive {
             let _guard = self.gate.write().await;
             let result = self.execute_single(call, &on_progress).await;
-            results.push(result);
+            if let Some(callback) = &on_completion {
+                callback(&result);
+            }
+            indexed_results.push((index, result));
         }
 
-        results
+        indexed_results.sort_by_key(|(index, _)| *index);
+        indexed_results
+            .into_iter()
+            .map(|(_, result)| result)
+            .collect()
     }
 
     pub(crate) async fn execute_single(
@@ -542,6 +583,34 @@ mod tests {
         }
     }
 
+    struct DelayedReadTool;
+
+    #[async_trait]
+    impl ToolHandler for DelayedReadTool {
+        fn tool_kind(&self) -> ToolHandlerKind {
+            ToolHandlerKind::Read
+        }
+
+        async fn handle(
+            &self,
+            invocation: ToolInvocation,
+            _progress: Option<ToolProgressSender>,
+        ) -> Result<Box<dyn ToolOutput>, ToolExecutionError> {
+            let delay_ms = invocation
+                .input
+                .get("delay_ms")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+            let output = invocation
+                .input
+                .get("output")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Ok(Box::new(FunctionToolOutput::success(output)))
+        }
+    }
+
     fn make_registry() -> Arc<ToolRegistry> {
         let mut builder = ToolRegistryBuilder::new();
         builder.register_handler("read_tool", Arc::new(ReadOnlyTool));
@@ -563,6 +632,16 @@ mod tests {
             execution_mode: ToolExecutionMode::Mutating,
             capability_tags: vec![ToolCapabilityTag::WriteFiles],
             supports_parallel: false,
+        });
+        builder.register_handler("delayed_read_tool", Arc::new(DelayedReadTool));
+        builder.push_spec(ToolSpec {
+            name: "delayed_read_tool".into(),
+            description: String::new(),
+            input_schema: JsonSchema::object(Default::default(), None, None),
+            output_mode: ToolOutputMode::Text,
+            execution_mode: ToolExecutionMode::ReadOnly,
+            capability_tags: vec![],
+            supports_parallel: true,
         });
         Arc::new(builder.build())
     }
@@ -845,6 +924,57 @@ mod tests {
         // Order should be preserved (parallel tools first, then sequential)
         assert_eq!(results[0].tool_use_id, "r1".to_string());
         assert_eq!(results[1].tool_use_id, "r2".to_string());
+    }
+
+    #[tokio::test]
+    async fn parallel_completion_callback_streams_before_batch_is_done_but_results_stay_ordered() {
+        let registry = make_registry();
+        let runtime = ToolRuntime::new_without_permissions(registry);
+        let calls = vec![
+            ToolCall {
+                id: "slow".into(),
+                name: "delayed_read_tool".into(),
+                input: serde_json::json!({
+                    "delay_ms": 50,
+                    "output": "slow output",
+                }),
+            },
+            ToolCall {
+                id: "fast".into(),
+                name: "delayed_read_tool".into(),
+                input: serde_json::json!({
+                    "delay_ms": 5,
+                    "output": "fast output",
+                }),
+            },
+        ];
+        let completions = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let completions_clone = Arc::clone(&completions);
+
+        let results = runtime
+            .execute_batch_streaming_with_completion(
+                &calls,
+                |_tool_use_id, _content| {},
+                move |result| {
+                    completions_clone
+                        .lock()
+                        .expect("lock completions")
+                        .push(result.tool_use_id.clone());
+                },
+            )
+            .await;
+
+        assert_eq!(
+            completions.lock().expect("lock completions").as_slice(),
+            &["fast".to_string(), "slow".to_string()]
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.tool_use_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["slow", "fast"]
+        );
     }
 
     #[tokio::test]

@@ -80,18 +80,82 @@ pub(crate) async fn exec_apply_patch(
         let relative_path =
             relative_worktree_path(target_path.as_ref().unwrap_or(&source_path), cwd);
         let kind_name = change.kind.as_str();
-        let diff = format!("--- {}\n+++ {}\n", relative_path, relative_path);
+        let diff = match change.kind {
+            PatchKind::Add => {
+                let content = if change.content.ends_with('\n') {
+                    change.content.clone()
+                } else {
+                    format!("{}\n", change.content)
+                };
+                format!(
+                    "diff --git a/{0} b/{0}\nnew file mode 100644\n--- /dev/null\n+++ b/{0}\n@@ -0,0 +1,{1} @@\n{2}",
+                    relative_path,
+                    additions,
+                    content
+                        .lines()
+                        .map(|line| format!("+{line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            }
+            PatchKind::Delete => {
+                let deleted = if old_content.ends_with('\n') {
+                    old_content.clone()
+                } else {
+                    format!("{old_content}\n")
+                };
+                format!(
+                    "diff --git a/{0} b/{0}\ndeleted file mode 100644\n--- a/{0}\n+++ /dev/null\n@@ -1,{1} +0,0 @@\n{2}",
+                    relative_path,
+                    deletions,
+                    deleted
+                        .lines()
+                        .map(|line| format!("-{line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            }
+            PatchKind::Update | PatchKind::Move => {
+                let old_line_count = old_content.lines().count();
+                let new_line_count = new_content.lines().count();
+                let patch_body = change
+                    .hunks
+                    .iter()
+                    .flat_map(|hunk| {
+                        let mut lines = Vec::with_capacity(hunk.lines.len() + 1);
+                        lines.push(format!("@@ -1,{old_line_count} +1,{new_line_count} @@"));
+                        lines.extend(hunk.lines.iter().map(|line| match line {
+                            HunkLine::Context(text) => format!(" {text}"),
+                            HunkLine::Remove(text) => format!("-{text}"),
+                            HunkLine::Add(text) => format!("+{text}"),
+                        }));
+                        lines
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}\n",
+                    relative_path, patch_body
+                )
+            }
+        };
 
         files.push(json!({
+            "path": relative_path,
             "filePath": source_path,
             "relativePath": relative_path,
+            "kind": kind_name,
             "type": kind_name,
+            "diff": diff,
             "patch": diff,
             "additions": additions,
             "deletions": deletions,
             "movePath": target_path,
         }));
-        total_diff.push_str(&diff);
+        if !total_diff.is_empty() {
+            total_diff.push('\n');
+        }
+        total_diff.push_str(diff.trim_end());
         total_diff.push('\n');
 
         summary.push(match change.kind {
@@ -980,5 +1044,26 @@ hello
         assert_eq!(files[2]["deletions"], 1);
         assert_eq!(files[3]["additions"], 1);
         assert_eq!(files[3]["deletions"], 1);
+
+        for file in files {
+            if file["kind"] == "update" || file["kind"] == "move" {
+                let per_file_diff = file
+                    .get("diff")
+                    .or_else(|| file.get("patch"))
+                    .and_then(serde_json::Value::as_str)
+                    .expect("per-file diff");
+                let patch =
+                    diffy::Patch::from_str(per_file_diff).expect("per-file diff should parse");
+                let (added, removed) = patch.hunks().iter().flat_map(diffy::Hunk::lines).fold(
+                    (0usize, 0usize),
+                    |(a, d), line| match line {
+                        diffy::Line::Insert(_) => (a + 1, d),
+                        diffy::Line::Delete(_) => (a, d + 1),
+                        diffy::Line::Context(_) => (a, d),
+                    },
+                );
+                assert_eq!((added, removed), (1, 1));
+            }
+        }
     }
 }

@@ -15,6 +15,7 @@ use devo_protocol::SessionId;
 use devo_protocol::ThinkingCapability;
 use devo_protocol::TurnId;
 use pretty_assertions::assert_eq;
+use ratatui::text::Line;
 use tokio::sync::mpsc;
 
 use crate::app_command::AppCommand;
@@ -24,6 +25,8 @@ use crate::chatwidget::ChatWidget;
 use crate::chatwidget::ChatWidgetInit;
 use crate::chatwidget::ThinkingListEntry;
 use crate::chatwidget::TuiSessionState;
+use crate::events::PlanStep;
+use crate::events::PlanStepStatus;
 use crate::render::renderable::Renderable;
 use crate::slash_command::built_in_slash_commands;
 use crate::tui::frame_requester::FrameRequester;
@@ -137,6 +140,18 @@ fn trim_trailing_blank_scrollback_lines(
     lines
 }
 
+fn line_texts(lines: Vec<ratatui::text::Line<'static>>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
 fn indices_containing(lines: &[String], needles: &[&str]) -> Vec<usize> {
     needles
         .iter()
@@ -147,6 +162,206 @@ fn indices_containing(lines: &[String], needles: &[&str]) -> Vec<usize> {
                 .unwrap_or_else(|| panic!("missing {needle} in:\n{}", lines.join("\n")))
         })
         .collect()
+}
+
+#[test]
+fn user_prompt_multiline_has_no_extra_blank_prefix_rows_and_consistent_prefix_text() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("line one\nline two\nline three".to_string());
+
+    let transcript = line_texts(widget.transcript_overlay_lines(80));
+    let user_lines: Vec<String> = transcript
+        .into_iter()
+        .filter(|line| line.starts_with("▌ "))
+        .collect();
+
+    assert_eq!(
+        user_lines.len(),
+        5,
+        "unexpected user prompt rows: {user_lines:?}"
+    );
+    assert_eq!(user_lines[0], "▌ ");
+    assert_eq!(user_lines[1], "▌ line one");
+    assert_eq!(user_lines[2], "▌ line two");
+    assert_eq!(user_lines[3], "▌ line three");
+    assert_eq!(user_lines[4], "▌ ");
+}
+
+#[test]
+fn restore_user_message_to_composer_restores_text() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget
+        .restore_user_message_to_composer(crate::chatwidget::UserMessage::from("previous message"));
+
+    let rendered = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered.contains("previous message"),
+        "composer should show restored text:\n{rendered}"
+    );
+}
+
+#[test]
+fn transcript_overlay_cell_carries_user_message_payload() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("previous message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+
+    let cells = widget.transcript_overlay_cells(80);
+    let user_cell = cells
+        .into_iter()
+        .find(|cell| cell.user_message.is_some())
+        .expect("user transcript cell");
+    assert_eq!(
+        user_cell.user_message.expect("user payload").text,
+        "previous message"
+    );
+}
+
+#[test]
+fn backtrack_preview_restore_latest_user_message() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("first message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+    widget.submit_text("second message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+
+    let mut overlay =
+        crate::pager_overlay::Overlay::new_transcript(widget.transcript_overlay_cells(80), 80);
+    let crate::pager_overlay::Overlay::Transcript(transcript) = &mut overlay else {
+        panic!("expected transcript overlay");
+    };
+    transcript.begin_backtrack_preview();
+    let selected = transcript
+        .selected_user_message()
+        .expect("selected latest user");
+    widget.restore_user_message_to_composer(selected);
+
+    let rendered = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered.contains("second message"),
+        "expected latest message to be restored into composer:\n{rendered}"
+    );
+}
+
+#[test]
+fn backtrack_preview_can_restore_previous_and_next_user_messages() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("first message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+    widget.submit_text("second message".to_string());
+    let _ = widget.drain_scrollback_lines(80);
+
+    let mut overlay =
+        crate::pager_overlay::Overlay::new_transcript(widget.transcript_overlay_cells(80), 80);
+    let crate::pager_overlay::Overlay::Transcript(transcript) = &mut overlay else {
+        panic!("expected transcript overlay");
+    };
+    transcript.begin_backtrack_preview();
+    transcript.select_prev_user();
+    let previous = transcript
+        .selected_user_message()
+        .expect("selected previous user");
+    widget.restore_user_message_to_composer(previous);
+    let rendered_prev = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered_prev.contains("first message"),
+        "expected previous message after select_prev:\n{rendered_prev}"
+    );
+
+    transcript.select_next_user();
+    let next = transcript
+        .selected_user_message()
+        .expect("selected next user");
+    widget.restore_user_message_to_composer(next);
+    let rendered_next = rendered_rows(&widget, 80, 12).join("\n");
+    assert!(
+        rendered_next.contains("second message"),
+        "expected next message after select_next:\n{rendered_next}"
+    );
+}
+
+#[test]
+fn restoring_previous_message_truncates_later_transcript_history() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.submit_text("first message".to_string());
+    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        Line::from("assistant 1"),
+    ]));
+    widget.submit_text("second message".to_string());
+    widget.add_to_history(crate::history_cell::PlainHistoryCell::new(vec![
+        Line::from("assistant 2"),
+    ]));
+    let _ = widget.drain_scrollback_lines(80);
+
+    widget.truncate_history_to_user_turn_count(1);
+    widget.restore_user_message_to_composer(crate::chatwidget::UserMessage::from("first message"));
+
+    let rendered = rendered_rows(&widget, 80, 16).join("\n");
+    assert!(rendered.contains("first message"));
+    let transcript_lines = widget
+        .transcript_overlay_cells(80)
+        .into_iter()
+        .flat_map(|cell| cell.lines)
+        .flat_map(|line| line.spans.into_iter())
+        .map(|span| span.content)
+        .collect::<String>();
+    assert!(transcript_lines.contains("first message"));
+    assert!(!transcript_lines.contains("second message"));
+    assert!(!transcript_lines.contains("assistant 2"));
+}
+
+#[test]
+fn esc_backtrack_hint_is_shown_before_restore() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.show_esc_backtrack_hint();
+    let rendered = rendered_rows(&widget, 100, 14).join("\n");
+    assert!(
+        rendered.contains("esc again to edit previous message")
+            || rendered.contains("esc esc to edit previous message"),
+        "expected esc backtrack hint before opening overlay:\n{rendered}"
+    );
 }
 
 #[test]
@@ -168,6 +383,397 @@ fn resume_command_opens_loading_browser_immediately() {
     assert!(
         rows.iter()
             .any(|row| row.contains("Loading saved sessions"))
+    );
+}
+
+#[test]
+fn resume_loading_browser_closes_with_esc_or_q() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.handle_app_event(AppEvent::Command(AppCommand::RunUserShellCommand {
+        command: "session list".to_string(),
+    }));
+    assert!(widget.is_resume_browser_open());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+
+    widget.handle_app_event(AppEvent::Command(AppCommand::RunUserShellCommand {
+        command: "session list".to_string(),
+    }));
+    assert!(widget.is_resume_browser_open());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+}
+
+#[test]
+fn resume_browser_clips_sessions_to_viewport_height() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+
+    let rows = rendered_rows(&widget, 80, 10);
+    let blob = rows.join("\n");
+    assert!(blob.contains("Session 0"));
+    assert!(blob.contains("Session 1"));
+    assert!(
+        !blob.contains("Session 2"),
+        "rows should be clipped to viewport:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Session 3"),
+        "rows should be clipped to viewport:\n{blob}"
+    );
+    assert!(
+        blob.contains("↓ more"),
+        "expected lower overflow indicator:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_list_closes_with_esc_or_q() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions = vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "Session".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: true,
+    }];
+    widget.open_resume_browser_for_test(sessions.clone());
+    assert!(widget.is_resume_browser_open());
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+
+    widget.open_resume_browser_for_test(sessions);
+    assert!(widget.is_resume_browser_open());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+    assert!(!widget.is_resume_browser_open());
+}
+
+#[test]
+fn resume_browser_keeps_selection_visible_when_navigating_down() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+
+    for _ in 0..11 {
+        widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(11));
+
+    let rows = rendered_rows(&widget, 80, 10);
+    let blob = rows.join("\n");
+    assert!(
+        blob.contains("Session 11"),
+        "selected tail item should be visible:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Session 0"),
+        "viewport should have scrolled away from the head:\n{blob}"
+    );
+    assert!(
+        blob.contains("↑ more"),
+        "expected upper overflow indicator after scrolling:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_enter_resumes_selected_scrolled_session() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    let expected = sessions[11].session_id;
+    widget.open_resume_browser_for_test(sessions);
+
+    for _ in 0..11 {
+        widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let event = app_event_rx
+        .try_recv()
+        .expect("resume selection should emit switch command");
+    assert_eq!(
+        event,
+        AppEvent::Command(AppCommand::switch_session(expected))
+    );
+}
+
+#[test]
+fn resume_browser_supports_page_and_home_end_navigation() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+    let _ = rendered_rows(&widget, 80, 10);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(3));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(11));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(0));
+
+    let blob = rendered_rows(&widget, 80, 10).join("\n");
+    assert!(
+        blob.contains("pgup/pgdn page"),
+        "expected paging hint text in resume browser:\n{blob}"
+    );
+    assert!(
+        blob.contains("home/end jump"),
+        "expected home/end hint text in resume browser:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_up_down_do_not_wrap_around() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..4)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(0));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(3));
+
+    widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(widget.resume_browser_selection_for_test(), Some(3));
+}
+
+#[test]
+fn resume_browser_shows_position_and_scroll_progress() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let sessions: Vec<_> = (0..12)
+        .map(|index| crate::events::SessionListEntry {
+            session_id: SessionId::new(),
+            title: format!("Session {index}"),
+            updated_at: format!("2026-05-{index:02} 10:00"),
+            is_active: index == 0,
+        })
+        .collect();
+    widget.open_resume_browser_for_test(sessions);
+    let _ = rendered_rows(&widget, 80, 10);
+    widget.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+
+    let blob = rendered_rows(&widget, 80, 10).join("\n");
+    assert!(
+        blob.contains("12 / 12"),
+        "expected position label in resume header:\n{blob}"
+    );
+    assert!(
+        blob.contains("100%"),
+        "expected scroll percent in resume header:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_title_uses_ascii_ellipsis_when_too_long() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "This is a very long session title that should be truncated in resume browser"
+            .to_string(),
+        updated_at: "2026-05-17 10:00".to_string(),
+        is_active: true,
+    }]);
+
+    let blob = rendered_rows(&widget, 54, 10).join("\n");
+    assert!(
+        blob.contains("..."),
+        "expected ASCII ellipsis truncation in title column:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_dash_only_title_is_truncated_with_ascii_ellipsis() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "------------------------------------------------------------".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: true,
+    }]);
+
+    let blob = rendered_rows(&widget, 54, 10).join("\n");
+    assert!(
+        blob.contains("..."),
+        "expected dash-only title to be truncated with ASCII ellipsis:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_cjk_title_truncates_by_display_width() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    widget.open_resume_browser_for_test(vec![crate::events::SessionListEntry {
+        session_id: SessionId::new(),
+        title: "这是一个非常非常长的中文会话标题用于测试截断显示是否正确".to_string(),
+        updated_at: "2026-05-18 10:00".to_string(),
+        is_active: true,
+    }]);
+
+    let blob = rendered_rows(&widget, 54, 10).join("\n");
+    assert!(
+        blob.contains("..."),
+        "expected CJK title truncation to include ASCII ellipsis:\n{blob}"
+    );
+    assert!(
+        !blob.contains("是否正确"),
+        "expected tail of long CJK title to be truncated:\n{blob}"
+    );
+}
+
+#[test]
+fn resume_browser_cjk_and_ascii_titles_keep_session_id_column_aligned() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let cjk_session_id = SessionId::new();
+    let ascii_session_id = SessionId::new();
+    widget.open_resume_browser_for_test(vec![
+        crate::events::SessionListEntry {
+            session_id: cjk_session_id,
+            title: "中文标题用于对齐测试".to_string(),
+            updated_at: "2026-05-18 10:00".to_string(),
+            is_active: true,
+        },
+        crate::events::SessionListEntry {
+            session_id: ascii_session_id,
+            title: "ASCII title".to_string(),
+            updated_at: "2026-05-18 10:00".to_string(),
+            is_active: false,
+        },
+    ]);
+
+    let area = ratatui::layout::Rect::new(0, 0, 90, 10);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    widget.render(area, &mut buf);
+
+    let cjk_id_text = cjk_session_id.to_string();
+    let ascii_id_text = ascii_session_id.to_string();
+    let mut cjk_pos = None;
+    let mut ascii_pos = None;
+    for row in 0..area.height {
+        let row_text = (0..area.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect::<String>();
+        if row_text.contains(&cjk_id_text) {
+            cjk_pos = (0..area.width).find(|col| {
+                let tail = (*col..area.width)
+                    .map(|scan_col| buf[(scan_col, row)].symbol())
+                    .collect::<String>();
+                tail.starts_with(&cjk_id_text)
+            });
+        }
+        if row_text.contains(&ascii_id_text) {
+            ascii_pos = (0..area.width).find(|col| {
+                let tail = (*col..area.width)
+                    .map(|scan_col| buf[(scan_col, row)].symbol())
+                    .collect::<String>();
+                tail.starts_with(&ascii_id_text)
+            });
+        }
+    }
+    let cjk_col = cjk_pos.expect("cjk session id column");
+    let ascii_col = ascii_pos.expect("ascii session id column");
+    assert_eq!(
+        cjk_col, ascii_col,
+        "expected Session ID column alignment across CJK and ASCII rows"
     );
 }
 
@@ -219,6 +825,68 @@ fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
             decision: ApprovalDecisionValue::Approve,
             scope: ApprovalScopeValue::Once,
         })
+    );
+}
+
+#[test]
+fn approval_request_does_not_duplicate_already_committed_assistant_text() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let item_id = ItemId::new();
+    let text = "明白，我来随便加点内容，测试一下 apply_patch。".to_string();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id,
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id,
+        kind: crate::events::TextItemKind::Assistant,
+        delta: text.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id,
+        kind: crate::events::TextItemKind::Assistant,
+        final_text: text.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
+        text.clone(),
+    ));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ApprovalRequest {
+        session_id,
+        turn_id,
+        approval_id: "approval-call-1".to_string(),
+        action_summary: "apply_patch".to_string(),
+        justification: "Tool execution requires approval.".to_string(),
+        resource: Some("FileWrite".to_string()),
+        available_scopes: vec!["once".to_string(), "session".to_string()],
+        path: Some("src/main.rs".to_string()),
+        host: None,
+        target: None,
+    });
+
+    let transcript = widget.transcript_overlay_lines(100);
+    let rows = transcript
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        rows.matches(&text).count(),
+        1,
+        "assistant text should not be committed twice around approval request:\n{rows}"
     );
 }
 
@@ -588,6 +1256,65 @@ fn typed_character_submits_after_paste_burst_flush() {
     );
 }
 
+fn assert_no_command_emitted(app_event_rx: &mut mpsc::UnboundedReceiver<AppEvent>) {
+    let command = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .find(|event| matches!(event, AppEvent::Command(_)));
+    assert_eq!(command, None);
+}
+
+fn submitted_text_after_modified_enter(
+    modifier: KeyModifiers,
+    test_model: Model,
+    cwd: PathBuf,
+) -> String {
+    let (mut widget, mut app_event_rx) = widget_with_model(test_model, cwd);
+
+    widget.handle_paste("hello".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, modifier));
+    assert_no_command_emitted(&mut app_event_rx);
+    widget.handle_paste("world".to_string());
+    widget.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let emitted_command = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .find(|event| matches!(event, AppEvent::Command(_)))
+        .expect("command event is emitted");
+    let AppEvent::Command(AppCommand::UserTurn { input, .. }) = emitted_command else {
+        unreachable!("filtered for user command");
+    };
+    let [InputItem::Text { text }] = input.as_slice() else {
+        panic!("expected one text input item, got {input:?}");
+    };
+    text.clone()
+}
+
+#[test]
+fn shift_enter_inserts_newline_in_composer_without_submitting() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+
+    let text = submitted_text_after_modified_enter(KeyModifiers::SHIFT, model, cwd);
+
+    assert_eq!(text, "hello\nworld");
+}
+
+#[test]
+fn ctrl_enter_inserts_newline_in_composer_without_submitting() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+
+    let text = submitted_text_after_modified_enter(KeyModifiers::CONTROL, model, cwd);
+
+    assert_eq!(text, "hello\nworld");
+}
+
 #[test]
 fn key_release_does_not_duplicate_text_input() {
     let cwd = std::env::current_dir().expect("current directory is available");
@@ -634,6 +1361,390 @@ fn key_release_does_not_duplicate_text_input() {
             sandbox: None,
             approval_policy: Some("on-request".to_string()),
         })
+    );
+}
+
+#[test]
+fn plan_update_updates_progress_and_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PlanUpdated {
+        explanation: Some("Working through checklist".to_string()),
+        steps: vec![
+            PlanStep {
+                text: "Inspect implementation".to_string(),
+                status: PlanStepStatus::Completed,
+            },
+            PlanStep {
+                text: "Patch runtime".to_string(),
+                status: PlanStepStatus::InProgress,
+            },
+        ],
+    });
+
+    assert_eq!(widget.last_plan_progress_for_test(), Some((1, 2)));
+
+    let lines = scrollback_plain_lines(&widget.drain_scrollback_lines(80));
+    assert!(lines.iter().any(|line| line.contains("Updated Plan")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Working through checklist"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Inspect implementation"))
+    );
+    assert!(lines.iter().any(|line| line.contains("Patch runtime")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("  ✔ Inspect implementation"))
+    );
+    assert!(lines.iter().any(|line| line.contains("  → Patch runtime")));
+}
+
+#[test]
+fn session_switch_restores_plan_metadata_into_progress() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd.clone());
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd,
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: None,
+            kind: devo_protocol::SessionHistoryItemKind::Assistant,
+            title: String::new(),
+            body: r#"{"explanation":"Do work","plan":[{"step":"Inspect","status":"completed"},{"step":"Patch","status":"in_progress"}]}"#.to_string(),
+            metadata: Some(devo_protocol::SessionHistoryMetadata::PlanUpdate {
+                explanation: Some("Do work".to_string()),
+                steps: vec![
+                    devo_protocol::SessionPlanStep {
+                        text: "Inspect".to_string(),
+                        status: devo_protocol::SessionPlanStepStatus::Completed,
+                    },
+                    devo_protocol::SessionPlanStep {
+                        text: "Patch".to_string(),
+                        status: devo_protocol::SessionPlanStepStatus::InProgress,
+                    },
+                ],
+            }),
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    assert_eq!(widget.last_plan_progress_for_test(), Some((1, 2)));
+}
+
+#[test]
+fn session_switch_restores_explored_metadata_into_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::CommandExecution,
+            title: "cat foo.txt".to_string(),
+            body: "hello".to_string(),
+            metadata: Some(devo_protocol::SessionHistoryMetadata::Explored {
+                actions: vec![devo_protocol::parse_command::ParsedCommand::Read {
+                    cmd: "cat foo.txt".to_string(),
+                    name: "foo.txt".to_string(),
+                    path: PathBuf::from("foo.txt"),
+                }],
+            }),
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Explored") || blob.contains("Exploring"),
+        "expected explored block after resume, got:\n{blob}"
+    );
+    assert!(
+        blob.contains("Read foo.txt"),
+        "expected read summary, got:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_restores_edited_metadata_into_history() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: Vec::new(),
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::ToolResult,
+            title: "apply_patch".to_string(),
+            body: String::new(),
+            metadata: Some(devo_protocol::SessionHistoryMetadata::Edited { changes }),
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "expected edited block after resume, got:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_merges_consecutive_explored_items() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: Some("call-1".to_string()),
+                kind: devo_protocol::SessionHistoryItemKind::ToolCall,
+                title: "read crates/tui/src/worker.rs".to_string(),
+                body: String::new(),
+                metadata: Some(devo_protocol::SessionHistoryMetadata::Explored {
+                    actions: vec![devo_protocol::parse_command::ParsedCommand::Read {
+                        cmd: "read crates/tui/src/worker.rs".to_string(),
+                        name: "worker.rs".to_string(),
+                        path: PathBuf::from("crates/tui/src/worker.rs"),
+                    }],
+                }),
+                duration_ms: None,
+            },
+            devo_protocol::SessionHistoryItem {
+                tool_call_id: Some("call-2".to_string()),
+                kind: devo_protocol::SessionHistoryItemKind::ToolCall,
+                title: "grep command_actions in crates/tui/src/worker.rs".to_string(),
+                body: String::new(),
+                metadata: Some(devo_protocol::SessionHistoryMetadata::Explored {
+                    actions: vec![devo_protocol::parse_command::ParsedCommand::Search {
+                        cmd: "grep command_actions in crates/tui/src/worker.rs".to_string(),
+                        query: Some("command_actions".to_string()),
+                        path: Some("crates/tui/src/worker.rs".to_string()),
+                    }],
+                }),
+                duration_ms: None,
+            },
+        ],
+        loaded_item_count: 2,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(100)).join("\n");
+    assert_eq!(
+        blob.matches("Explored").count() + blob.matches("Exploring").count(),
+        1,
+        "expected one merged explored block, got:\n{blob}"
+    );
+    assert!(
+        blob.contains("Read worker.rs"),
+        "expected read entry, got:\n{blob}"
+    );
+    assert!(
+        blob.contains("Search command_actions in crates/tui/src/worker.rs"),
+        "expected search entry, got:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_restores_error_via_tool_result_cell_style() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::Error,
+            title: "bash error".to_string(),
+            body: "permission denied".to_string(),
+            metadata: None,
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Ran bash error"),
+        "expected tool-result style title, got:\n{blob}"
+    );
+    assert!(
+        blob.contains("permission denied"),
+        "expected tool-result body, got:\n{blob}"
+    );
+}
+
+#[test]
+fn live_and_resume_error_share_same_rendering_chain() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut live_widget, _live_rx) = widget_with_model(model.clone(), PathBuf::from("."));
+    let (mut resume_widget, _resume_rx) = widget_with_model(model, PathBuf::from("."));
+
+    live_widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "bash error".to_string(),
+        preview: "permission denied".to_string(),
+        is_error: true,
+        truncated: false,
+    });
+    let live_blob = scrollback_plain_lines(&live_widget.drain_scrollback_lines(80))
+        .into_iter()
+        .filter(|line| line.contains("Ran bash error") || line.contains("permission denied"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    resume_widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![],
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::Error,
+            title: "bash error".to_string(),
+            body: "permission denied".to_string(),
+            metadata: None,
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+    let resume_blob = scrollback_plain_lines(&resume_widget.drain_scrollback_lines(80))
+        .into_iter()
+        .filter(|line| line.contains("Ran bash error") || line.contains("permission denied"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        live_blob, resume_blob,
+        "live and resume error cells diverged"
     );
 }
 
@@ -834,7 +1945,7 @@ fn batched_history_inserts_separator_and_trailing_blank_lines() {
 }
 
 #[test]
-fn session_switch_restores_header_and_double_blank_line_before_user_input() {
+fn session_switch_restores_header_and_spacing_before_user_input() {
     let initial_cwd = std::env::current_dir().expect("current directory is available");
     let resumed_cwd = initial_cwd.join("resumed");
     let model = Model {
@@ -875,6 +1986,7 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
                 "world".to_string(),
             ),
         ],
+        rich_history_items: Vec::new(),
         loaded_item_count: 2,
         pending_texts: vec![],
     });
@@ -903,11 +2015,13 @@ fn session_switch_restores_header_and_double_blank_line_before_user_input() {
     assert!(!committed_text.contains("session 1 lingering line"));
     assert!(
         committed_rows
-            .windows(3)
+            .windows(5)
             .any(|window| window[0].trim_end() == "▌"
                 && window[1].contains("hello")
-                && window[2].trim_end() == "▌"),
-        "expected blank line spacing with colored bar before restored user input: {committed_lines:?}"
+                && window[2].trim_end() == "▌"
+                && window[3].trim().is_empty()
+                && window[4].contains("world")),
+        "expected restored spaced user prompt before assistant response: {committed_lines:?}"
     );
 }
 
@@ -1259,6 +2373,7 @@ fn tool_call_start_and_finish_are_both_visible_in_history() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "powershell -NoProfile -Command Get-Date".to_string(),
+        parsed_commands: None,
     });
 
     let running = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
@@ -1355,6 +2470,7 @@ fn restored_reasoning_text_is_visible_in_transcript() {
             "",
             "thinking text",
         )],
+        rich_history_items: Vec::new(),
         loaded_item_count: 1,
         pending_texts: vec![],
     });
@@ -1740,6 +2856,7 @@ fn session_switch_updates_session_identity_projection() {
         last_query_input_tokens: 3,
         prompt_token_estimate: 3,
         history_items: Vec::new(),
+        rich_history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
@@ -1778,6 +2895,7 @@ fn status_summary_uses_last_turn_total_when_idle_and_live_estimate_while_busy() 
         last_query_input_tokens: 42,
         prompt_token_estimate: 12,
         history_items: Vec::new(),
+        rich_history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
@@ -1884,6 +3002,7 @@ fn new_session_prepared_appends_header_after_existing_history_and_resets_status(
         last_query_input_tokens: 20,
         prompt_token_estimate: 20,
         history_items: Vec::new(),
+        rich_history_items: Vec::new(),
         loaded_item_count: 0,
         pending_texts: vec![],
     });
@@ -2350,6 +3469,7 @@ fn transcript_overlay_lines_include_full_completed_tool_output() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "bash".to_string(),
+        parsed_commands: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
         tool_use_id: "tool-1".to_string(),
@@ -2373,7 +3493,19 @@ fn transcript_overlay_lines_include_full_completed_tool_output() {
         .join("\n");
 
     assert!(
-        !inline.contains("line 5"),
+        inline.contains("line 1") && inline.contains("line 2"),
+        "inline output should include the head of the preview: {inline}"
+    );
+    assert!(
+        inline.contains("ctrl + t to view transcript"),
+        "inline output should include the transcript hint when truncated: {inline}"
+    );
+    assert!(
+        inline.contains("line 7") && inline.contains("line 8"),
+        "inline output should include the tail of the preview: {inline}"
+    );
+    assert!(
+        !inline.contains("line 3") && !inline.contains("line 6"),
         "inline output should stay compact: {inline}"
     );
     assert!(
@@ -2394,6 +3526,7 @@ fn transcript_overlay_lines_include_running_tool_output_delta() {
     widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
         tool_use_id: "tool-1".to_string(),
         summary: "bash".to_string(),
+        parsed_commands: None,
     });
     widget.handle_worker_event(crate::events::WorkerEvent::ToolOutputDelta {
         tool_use_id: "tool-1".to_string(),
@@ -2415,5 +3548,829 @@ fn transcript_overlay_lines_include_running_tool_output_delta() {
     assert!(
         transcript.contains("streamed output line"),
         "transcript output should include running tool deltas: {transcript}"
+    );
+}
+
+#[test]
+fn read_tool_call_renders_as_explored_group_in_viewport() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "cat foo.txt".to_string(),
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "cat foo.txt".to_string(),
+        preview: "hello".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("Explored") || display.contains("Exploring"),
+        "expected explored viewport grouping: {display}"
+    );
+    assert!(
+        display.contains("Read foo.txt"),
+        "expected read summary in explored viewport: {display}"
+    );
+    assert!(display.contains("▌ Explored") || display.contains("▌ Exploring"));
+}
+
+#[test]
+fn glob_tool_call_renders_as_explored_group_in_viewport() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "glob **/Cargo.toml in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/Cargo.toml in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "glob **/Cargo.toml in crates".to_string(),
+        preview: "crates/tools/Cargo.toml".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(display.contains("Explored") || display.contains("Exploring"));
+    assert!(
+        display.contains("List crates"),
+        "expected list summary, got:\n{display}"
+    );
+}
+
+#[test]
+fn grep_tool_call_renders_as_explored_group_in_viewport() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'rebuild_restored_session' in crates/tui/src".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'rebuild_restored_session' in crates/tui/src".to_string(),
+            query: Some("rebuild_restored_session".to_string()),
+            path: Some("crates/tui/src".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'rebuild_restored_session' in crates/tui/src".to_string(),
+        preview: "chatwidget.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(display.contains("Explored") || display.contains("Exploring"));
+    assert!(
+        display.contains("Search rebuild_restored_session in crates/tui/src"),
+        "expected search summary, got:\n{display}"
+    );
+}
+
+#[test]
+fn merged_explored_group_becomes_explored_after_all_results_arrive() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'plan' in crates".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob **/plan.rs in crates".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("▌ Explored"),
+        "expected merged explored group to become completed, got:\n{display}"
+    );
+    assert!(
+        !display.contains("▌ Exploring"),
+        "merged explored group should not stay active after all completions:\n{display}"
+    );
+}
+
+#[test]
+fn live_viewport_shows_explored_group_while_active() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+
+    let display = widget
+        .active_viewport_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("▌ Exploring") || display.contains("▌ Explored"),
+        "live viewport should show explored exec cell:\n{display}"
+    );
+    assert!(
+        display.contains("Search plan in crates"),
+        "live viewport should include search summary:\n{display}"
+    );
+    assert!(
+        display.contains("List crates"),
+        "live viewport should include list summary:\n{display}"
+    );
+}
+
+#[test]
+fn reasoning_start_closes_current_explored_group() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: devo_core::ItemId::new(),
+        kind: crate::events::TextItemKind::Reasoning,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+
+    let transcript = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        transcript.matches("Explored").count() + transcript.matches("Exploring").count(),
+        2,
+        "reasoning boundary should split explored groups:\n{transcript}"
+    );
+}
+
+#[test]
+fn assistant_text_start_closes_current_explored_group() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id: devo_core::ItemId::new(),
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+
+    let transcript = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        transcript.matches("Explored").count() + transcript.matches("Exploring").count(),
+        2,
+        "assistant text boundary should split explored groups:\n{transcript}"
+    );
+}
+
+#[test]
+fn merged_explored_group_stays_completed_when_tool_results_arrive_after_tool_call_completion() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'plan' in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob **/plan.rs in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep output".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob output".to_string(),
+        preview: "crates/tools/src/handlers/plan.rs".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let display = widget
+        .active_cell_display_lines_for_test(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        display.contains("▌ Explored"),
+        "tool result follow-up events should not reactivate explored group:\n{display}"
+    );
+    assert!(
+        !display.contains("▌ Exploring"),
+        "tool result follow-up events should not leave explored group active:\n{display}"
+    );
+}
+
+#[test]
+fn explored_group_in_history_can_finish_late_completions() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "grep 'plan' in crates".to_string(),
+        parsed_commands: Some(vec![devo_protocol::parse_command::ParsedCommand::Search {
+            cmd: "grep 'plan' in crates".to_string(),
+            query: Some("plan".to_string()),
+            path: Some("crates".to_string()),
+        }]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-2".to_string(),
+        summary: "glob **/plan.rs in crates".to_string(),
+        parsed_commands: Some(vec![
+            devo_protocol::parse_command::ParsedCommand::ListFiles {
+                cmd: "glob **/plan.rs in crates".to_string(),
+                path: Some("crates".to_string()),
+            },
+        ]),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "grep 'plan' in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-3".to_string(),
+        summary: "write src/main.rs".to_string(),
+        parsed_commands: None,
+    });
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-2".to_string(),
+        title: "glob **/plan.rs in crates".to_string(),
+        preview: String::new(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let history_blob = widget
+        .transcript_overlay_lines(80)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        history_blob.contains("▌ Explored"),
+        "late completion should finish explored cell already flushed to history:\n{history_blob}"
+    );
+    assert!(
+        !history_blob.contains("▌ Exploring"),
+        "flushed explored cell should not stay active after late completion:\n{history_blob}"
+    );
+}
+
+#[test]
+fn auto_git_diff_trigger_matches_editing_tools_only() {
+    assert!(ChatWidget::should_auto_show_git_diff(
+        "write src/main.rs",
+        false
+    ));
+    assert!(ChatWidget::should_auto_show_git_diff("apply_patch", false));
+    assert!(!ChatWidget::should_auto_show_git_diff("bash", false));
+    assert!(!ChatWidget::should_auto_show_git_diff(
+        "bash echo hi > file.txt",
+        false
+    ));
+    assert!(!ChatWidget::should_auto_show_git_diff(
+        "read src/main.rs",
+        false
+    ));
+    assert!(!ChatWidget::should_auto_show_git_diff(
+        "write src/main.rs",
+        true
+    ));
+}
+
+#[tokio::test]
+async fn successful_write_tool_result_triggers_diff_event() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, mut app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolCall {
+        tool_use_id: "tool-1".to_string(),
+        summary: "write src/main.rs".to_string(),
+        parsed_commands: None,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::ToolResult {
+        tool_use_id: "tool-1".to_string(),
+        title: "write src/main.rs".to_string(),
+        preview: "updated".to_string(),
+        is_error: false,
+        truncated: false,
+    });
+
+    let diff_event = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Some(AppEvent::DiffResult(text)) = app_event_rx.recv().await {
+                break text;
+            }
+        }
+    })
+    .await
+    .expect("diff event should arrive");
+
+    assert!(
+        !diff_event.is_empty(),
+        "auto diff should send some result text"
+    );
+}
+
+#[test]
+fn patch_applied_event_renders_edited_block() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "expected edited patch block, got:\n{blob}"
+    );
+    assert!(blob.contains("▌ Edited") || blob.contains("▌ Added"));
+}
+
+#[test]
+fn apply_patch_style_full_git_diff_reports_non_zero_counts() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("update.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/update.txt b/update.txt\n--- a/update.txt\n+++ b/update.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("(+1 -1)"),
+        "full git-style apply_patch diff should report non-zero counts:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Edited 0 files (+0 -0)"),
+        "full git-style apply_patch diff should not collapse to zero summary:\n{blob}"
+    );
+}
+
+#[test]
+fn diff_count_parser_handles_write_generated_update_diff_shape() {
+    let diff = "diff --git a/foo.txt b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    assert_eq!(
+        crate::diff_render::calculate_add_remove_from_diff(diff),
+        (1, 1)
+    );
+}
+
+#[test]
+fn diff_count_parser_handles_apply_patch_generated_update_diff_shape() {
+    let diff = "diff --git a/update.txt b/update.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    assert_eq!(
+        crate::diff_render::calculate_add_remove_from_diff(diff),
+        (1, 1)
+    );
+}
+
+#[test]
+fn write_patch_applied_event_renders_edited_block() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "expected edited patch block for write result, got:\n{blob}"
+    );
+}
+
+#[test]
+fn write_patch_applied_event_reports_non_zero_counts() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        !blob.contains("Edited 0 files (+0 -0)"),
+        "write-derived edited block should not collapse to zero summary:\n{blob}"
+    );
+    assert!(
+        blob.contains("(+1 -1)"),
+        "write-derived edited block should report non-zero counts:\n{blob}"
+    );
+}
+
+#[test]
+fn patch_applied_event_with_diff_only_reports_non_zero_counts() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+
+    let mut changes = std::collections::HashMap::new();
+    changes.insert(
+        PathBuf::from("foo.txt"),
+        devo_protocol::protocol::FileChange::Update {
+            unified_diff: "diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            move_path: None,
+        },
+    );
+
+    widget.handle_worker_event(crate::events::WorkerEvent::PatchApplied { changes });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        !blob.contains("Edited 0 files (+0 -0)"),
+        "patch-derived edited block should not collapse to zero summary:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_without_rich_edited_metadata_degrades_to_tool_result_path() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![crate::events::TranscriptItem::restored_tool_result(
+            "Ran apply_patch output",
+            "{\"diff\":\"diff --git a/foo.txt b/foo.txt\\n--- a/foo.txt\\n+++ b/foo.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"files\":[{\"path\":\"foo.txt\",\"kind\":\"update\",\"additions\":1,\"deletions\":1}]}",
+        )],
+        rich_history_items: Vec::new(),
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Ran apply_patch output"),
+        "missing rich metadata currently falls back to tool-result rendering:\n{blob}"
+    );
+}
+
+#[test]
+fn session_switch_without_rich_edited_metadata_still_restores_edited_block() {
+    let cwd = std::env::current_dir().expect("current directory is available");
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, cwd);
+
+    widget.handle_worker_event(crate::events::WorkerEvent::SessionSwitched {
+        session_id: "session-1".to_string(),
+        cwd: std::env::current_dir().expect("current directory is available"),
+        title: None,
+        model: Some("test-model".to_string()),
+        thinking: None,
+        reasoning_effort: None,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_tokens: 0,
+        last_query_total_tokens: 0,
+        last_query_input_tokens: 0,
+        prompt_token_estimate: 0,
+        history_items: vec![crate::events::TranscriptItem::restored_tool_result(
+            "Ran apply_patch output",
+            "{\"diff\":\"diff --git a/foo.txt b/foo.txt\\n--- a/foo.txt\\n+++ b/foo.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"files\":[{\"path\":\"foo.txt\",\"kind\":\"update\",\"additions\":1,\"deletions\":1}]}",
+        )],
+        rich_history_items: vec![devo_protocol::SessionHistoryItem {
+            tool_call_id: Some("call-1".to_string()),
+            kind: devo_protocol::SessionHistoryItemKind::ToolResult,
+            title: "apply_patch output".to_string(),
+            body: "{\"diff\":\"diff --git a/foo.txt b/foo.txt\\n--- a/foo.txt\\n+++ b/foo.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n\",\"files\":[{\"path\":\"foo.txt\",\"kind\":\"update\",\"additions\":1,\"deletions\":1}]}".to_string(),
+            metadata: None,
+            duration_ms: None,
+        }],
+        loaded_item_count: 1,
+        pending_texts: vec![],
+    });
+
+    let blob = scrollback_plain_lines(&widget.drain_scrollback_lines(80)).join("\n");
+    assert!(
+        blob.contains("Edited foo.txt") || blob.contains("Edited 1 file"),
+        "fallback parse should restore edited block without rich metadata:\n{blob}"
+    );
+    assert!(
+        !blob.contains("Ran apply_patch output"),
+        "fallback parse should avoid tool-result degradation:\n{blob}"
     );
 }

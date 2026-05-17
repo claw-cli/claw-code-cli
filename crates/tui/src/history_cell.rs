@@ -338,12 +338,14 @@ impl HistoryCell for UserHistoryCell {
             (!wrapped.is_empty()).then_some(wrapped)
         };
 
-        let mut lines: Vec<Line<'static>> = vec![blank_prefixed_line()];
-
+        let mut lines = vec![blank_prefixed_line()];
         if let Some(wrapped_message) = wrapped_message {
-            lines.extend(prefix_lines(wrapped_message, "▌ ".cyan(), "▌ ".cyan()));
+            lines.extend(prefix_lines(
+                wrapped_message,
+                Span::styled("▌ ", prefix_style),
+                Span::styled("▌ ", prefix_style),
+            ));
         }
-
         lines.push(blank_prefixed_line());
         lines
     }

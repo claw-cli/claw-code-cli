@@ -226,10 +226,8 @@ impl StatusIndicatorWidget {
 
 impl Renderable for StatusIndicatorWidget {
     fn desired_height(&self, width: u16) -> u16 {
-        let base = 1 + u16::try_from(self.wrapped_details_lines(width).len()).unwrap_or(0);
-        // Keep a minimum height so the status row can still breathe when details
-        // are shown, but leave the blank separator to the parent layout.
-        base.max(2)
+        let details_height = u16::try_from(self.wrapped_details_lines(width).len()).unwrap_or(0);
+        1 + details_height
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -295,7 +293,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn status_indicator_reserves_top_padding_row() {
+    fn status_indicator_renders_single_header_row_without_details() {
         let (app_event_tx, _app_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let widget = StatusIndicatorWidget::new(
             AppEventSender::new(app_event_tx),
@@ -303,9 +301,9 @@ mod tests {
             false,
         );
 
-        assert_eq!(widget.desired_height(80), 2);
+        assert_eq!(widget.desired_height(80), 1);
 
-        let area = Rect::new(0, 0, 20, 2);
+        let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
         widget.render(area, &mut buf);
 

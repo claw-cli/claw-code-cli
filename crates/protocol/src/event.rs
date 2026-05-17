@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
+use crate::parse_command::ParsedCommand;
+use crate::protocol::{ExecCommandSource, FileChange};
 use crate::session::{SessionMetadata, SessionRuntimeStatus};
 use crate::turn::TurnMetadata;
 use crate::{ItemId, SessionId, TurnId, TurnUsage};
@@ -25,6 +27,8 @@ pub struct ToolCallPayload {
     pub tool_call_id: String,
     pub tool_name: String,
     pub parameters: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_actions: Vec<ParsedCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,9 +48,20 @@ pub struct CommandExecutionPayload {
     pub tool_call_id: String,
     pub tool_name: String,
     pub command: String,
+    #[serde(default)]
+    pub source: ExecCommandSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_actions: Vec<ParsedCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<serde_json::Value>,
     #[serde(default)]
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileChangePayload {
+    pub tool_call_id: String,
+    pub changes: Vec<(std::path::PathBuf, FileChange)>,
     pub is_error: bool,
 }
 
@@ -68,6 +83,20 @@ pub struct ItemDeltaPayload {
 pub struct TurnEventPayload {
     pub session_id: SessionId,
     pub turn: TurnMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnPlanStepPayload {
+    pub step: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnPlanUpdatedPayload {
+    pub session_id: SessionId,
+    pub turn: TurnMetadata,
+    pub explanation: Option<String>,
+    pub plan: Vec<TurnPlanStepPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,7 +244,7 @@ pub enum ServerEvent {
     TurnCompleted(TurnEventPayload),
     TurnInterrupted(TurnEventPayload),
     TurnFailed(TurnEventPayload),
-    TurnPlanUpdated(TurnEventPayload),
+    TurnPlanUpdated(TurnPlanUpdatedPayload),
     TurnDiffUpdated(TurnEventPayload),
     TurnUsageUpdated(TurnUsageUpdatedPayload),
     InputQueueUpdated(InputQueueUpdatedPayload),
@@ -245,8 +274,8 @@ impl ServerEvent {
             | Self::TurnCompleted(payload)
             | Self::TurnInterrupted(payload)
             | Self::TurnFailed(payload)
-            | Self::TurnPlanUpdated(payload)
             | Self::TurnDiffUpdated(payload) => Some(payload.session_id),
+            Self::TurnPlanUpdated(payload) => Some(payload.session_id),
             Self::TurnUsageUpdated(payload) => Some(payload.session_id),
             Self::InputQueueUpdated(payload) => Some(payload.session_id),
             Self::SteerAccepted(payload) => Some(payload.session_id),

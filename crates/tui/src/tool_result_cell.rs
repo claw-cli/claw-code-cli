@@ -11,6 +11,9 @@ use crate::exec_cell::truncated_tool_output_preview;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 
+const INLINE_OUTPUT_PREVIEW_ROWS: usize = 5;
+const INLINE_OUTPUT_PREVIEW_LINE_LIMIT: usize = 5;
+
 #[derive(Debug)]
 pub(crate) struct ToolResultCell {
     title_line: Option<Line<'static>>,
@@ -42,7 +45,12 @@ impl ToolResultCell {
 
     fn inline_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines = self.title_line.iter().cloned().collect::<Vec<_>>();
-        let mut preview_lines = truncated_tool_output_preview(&self.output, width, 2);
+        let mut preview_lines = truncated_tool_output_preview(
+            &self.output,
+            width,
+            INLINE_OUTPUT_PREVIEW_ROWS,
+            INLINE_OUTPUT_PREVIEW_LINE_LIMIT,
+        );
         for line in &mut preview_lines {
             line.spans = line
                 .spans
@@ -134,7 +142,13 @@ mod tests {
         let inline = plain(cell.display_lines(80)).join("\n");
         let transcript = plain(cell.transcript_lines(80)).join("\n");
 
-        assert!(!inline.contains("line 5"));
+        assert!(inline.contains("line 1"));
+        assert!(inline.contains("line 2"));
+        assert!(inline.contains("ctrl + t to view transcript"));
+        assert!(inline.contains("line 7"));
+        assert!(inline.contains("line 8"));
+        assert!(!inline.contains("line 3"));
+        assert!(!inline.contains("line 6"));
         assert!(transcript.contains("line 5"));
         assert!(transcript.contains("line 8"));
     }

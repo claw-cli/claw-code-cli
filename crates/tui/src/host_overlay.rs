@@ -70,6 +70,20 @@ impl OverlayState {
         Ok(())
     }
 
+    pub(crate) fn transcript_mut(&mut self) -> Option<&mut TranscriptOverlay> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Transcript(overlay)) => Some(overlay),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn close(&mut self, tui: &mut Tui) -> Result<()> {
+        self.overlay = None;
+        tui.leave_alt_screen()?;
+        tui.frame_requester().schedule_frame();
+        Ok(())
+    }
+
     pub(crate) fn open_diff(
         &mut self,
         tui: &mut Tui,

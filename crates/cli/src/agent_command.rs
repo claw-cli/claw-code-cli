@@ -6,6 +6,7 @@ use devo_core::ModelCatalog;
 use devo_core::PresetModelCatalog;
 use devo_core::ProviderConfigFile;
 use devo_core::ResolvedProviderSettings;
+use devo_core::SessionId;
 use devo_core::load_config;
 use devo_core::project_config_key;
 use devo_core::resolve_provider_settings;
@@ -23,7 +24,11 @@ use devo_utils::find_devo_home;
 /// when a provider config already exists. `log_level` is forwarded to the
 /// background server process, and `model_override` replaces the resolved model
 /// for this session without mutating the stored provider config.
-pub(crate) async fn run_agent(force_onboarding: bool, log_level: Option<&str>) -> Result<()> {
+pub(crate) async fn run_agent(
+    force_onboarding: bool,
+    log_level: Option<&str>,
+    initial_session_id: Option<SessionId>,
+) -> Result<devo_tui::AppExit> {
     let cwd = std::env::current_dir()?;
     let config_home = find_devo_home().context("could not determine devo home directory")?;
     let model_catalog = PresetModelCatalog::load_from_config(&config_home, Some(&cwd))?;
@@ -55,6 +60,7 @@ pub(crate) async fn run_agent(force_onboarding: bool, log_level: Option<&str>) -
     run_interactive_tui(InteractiveTuiConfig {
         // initial_session corresponding fields at top of `config.toml`.
         initial_session: InitialTuiSession {
+            session_id: initial_session_id,
             model,
             provider: wire_api,
             thinking_selection: model_thinking_selection,
@@ -68,7 +74,6 @@ pub(crate) async fn run_agent(force_onboarding: bool, log_level: Option<&str>) -
         show_model_onboarding: onboarding_mode,
     })
     .await
-    .map(|_| ())
 }
 
 /// Resolves the initial provider settings and whether onboarding should be shown.
