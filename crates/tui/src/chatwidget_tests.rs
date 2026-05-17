@@ -261,6 +261,68 @@ fn approval_request_renders_bottom_pane_menu_and_accepts_once() {
 }
 
 #[test]
+fn approval_request_does_not_duplicate_already_committed_assistant_text() {
+    let model = Model {
+        slug: "test-model".to_string(),
+        display_name: "Test Model".to_string(),
+        ..Model::default()
+    };
+    let (mut widget, _app_event_rx) = widget_with_model(model, PathBuf::from("."));
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
+    let item_id = ItemId::new();
+    let text = "明白，我来随便加点内容，测试一下 apply_patch。".to_string();
+
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemStarted {
+        item_id,
+        kind: crate::events::TextItemKind::Assistant,
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemDelta {
+        item_id,
+        kind: crate::events::TextItemKind::Assistant,
+        delta: text.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::TextItemCompleted {
+        item_id,
+        kind: crate::events::TextItemKind::Assistant,
+        final_text: text.clone(),
+    });
+    widget.handle_worker_event(crate::events::WorkerEvent::AssistantMessageCompleted(
+        text.clone(),
+    ));
+
+    widget.handle_worker_event(crate::events::WorkerEvent::ApprovalRequest {
+        session_id,
+        turn_id,
+        approval_id: "approval-call-1".to_string(),
+        action_summary: "apply_patch".to_string(),
+        justification: "Tool execution requires approval.".to_string(),
+        resource: Some("FileWrite".to_string()),
+        available_scopes: vec!["once".to_string(), "session".to_string()],
+        path: Some("src/main.rs".to_string()),
+        host: None,
+        target: None,
+    });
+
+    let transcript = widget.transcript_overlay_lines(100);
+    let rows = transcript
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        rows.matches(&text).count(),
+        1,
+        "assistant text should not be committed twice around approval request:\n{rows}"
+    );
+}
+
+#[test]
 fn approval_request_bottom_pane_menu_denies_with_n_shortcut() {
     let model = Model {
         slug: "test-model".to_string(),

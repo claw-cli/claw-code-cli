@@ -363,6 +363,8 @@ pub(crate) struct ChatWidget {
     last_plan_progress: Option<(usize, usize)>,
     queued_count: usize,
     active_turn_id: Option<TurnId>,
+    saw_server_assistant_lifecycle: bool,
+    saw_server_reasoning_lifecycle: bool,
     pending_approval: Option<PendingApprovalRequest>,
     permission_preset: devo_protocol::PermissionPreset,
     busy: bool,
@@ -1104,6 +1106,8 @@ impl ChatWidget {
             last_plan_progress: None,
             queued_count: 0,
             active_turn_id: None,
+            saw_server_assistant_lifecycle: false,
+            saw_server_reasoning_lifecycle: false,
             pending_approval: None,
             permission_preset: initial_permission_preset,
             busy: false,
@@ -1488,6 +1492,8 @@ impl ChatWidget {
                 ..
             } => {
                 self.active_turn_id = Some(turn_id);
+                self.saw_server_assistant_lifecycle = false;
+                self.saw_server_reasoning_lifecycle = false;
                 self.update_session_request_model(model);
                 self.thinking_selection = thinking;
                 self.session.reasoning_effort = reasoning_effort;
@@ -1499,6 +1505,10 @@ impl ChatWidget {
             }
             WorkerEvent::TextItemStarted { item_id, kind } => {
                 self.flush_active_cell();
+                match kind {
+                    TextItemKind::Assistant => self.saw_server_assistant_lifecycle = true,
+                    TextItemKind::Reasoning => self.saw_server_reasoning_lifecycle = true,
+                }
                 self.start_text_item(ActiveTextItemId::Server(item_id), kind);
                 self.set_status_message(match kind {
                     TextItemKind::Assistant => "Generating",
@@ -1528,7 +1538,9 @@ impl ChatWidget {
                 });
             }
             WorkerEvent::TextDelta(text) => {
-                if !self.has_server_active_item(TextItemKind::Assistant) {
+                if !self.saw_server_assistant_lifecycle
+                    && !self.has_server_active_item(TextItemKind::Assistant)
+                {
                     self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
@@ -1539,7 +1551,9 @@ impl ChatWidget {
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningDelta(text) => {
-                if !self.has_server_active_item(TextItemKind::Reasoning) {
+                if !self.saw_server_reasoning_lifecycle
+                    && !self.has_server_active_item(TextItemKind::Reasoning)
+                {
                     self.flush_active_cell();
                     self.push_text_item_delta(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
@@ -1550,7 +1564,13 @@ impl ChatWidget {
                 self.set_status_message("Thinking");
             }
             WorkerEvent::AssistantMessageCompleted(text) => {
-                if !self.has_server_active_item(TextItemKind::Assistant) {
+                if !self.saw_server_assistant_lifecycle
+                    && !self.has_server_active_item(TextItemKind::Assistant)
+                    && !self
+                        .active_text_items
+                        .iter()
+                        .any(|item| item.kind == TextItemKind::Assistant)
+                {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Assistant),
                         TextItemKind::Assistant,
@@ -1560,7 +1580,13 @@ impl ChatWidget {
                 self.set_status_message("Generating");
             }
             WorkerEvent::ReasoningCompleted(text) => {
-                if !self.has_server_active_item(TextItemKind::Reasoning) {
+                if !self.saw_server_reasoning_lifecycle
+                    && !self.has_server_active_item(TextItemKind::Reasoning)
+                    && !self
+                        .active_text_items
+                        .iter()
+                        .any(|item| item.kind == TextItemKind::Reasoning)
+                {
                     self.complete_text_item(
                         ActiveTextItemId::Legacy(TextItemKind::Reasoning),
                         TextItemKind::Reasoning,
@@ -1876,6 +1902,8 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
+                self.saw_server_assistant_lifecycle = false;
+                self.saw_server_reasoning_lifecycle = false;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1921,6 +1949,8 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.pending_approval = None;
+                self.saw_server_assistant_lifecycle = false;
+                self.saw_server_reasoning_lifecycle = false;
                 self.busy = false;
                 self.turn_count = turn_count;
                 self.total_input_tokens = total_input_tokens;
@@ -1995,6 +2025,8 @@ impl ChatWidget {
                 self.active_tool_calls.clear();
                 self.pending_tool_calls.clear();
                 self.active_text_items.clear();
+                self.saw_server_assistant_lifecycle = false;
+                self.saw_server_reasoning_lifecycle = false;
                 self.stream_chunking_policy.reset();
                 self.busy = false;
                 self.turn_count = 0;
@@ -2039,6 +2071,8 @@ impl ChatWidget {
                 self.history.clear();
                 self.next_history_flush_index = 0;
                 self.active_text_items.clear();
+                self.saw_server_assistant_lifecycle = false;
+                self.saw_server_reasoning_lifecycle = false;
                 self.stream_chunking_policy.reset();
                 self.total_input_tokens = total_input_tokens;
                 self.total_output_tokens = total_output_tokens;
